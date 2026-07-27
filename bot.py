@@ -1,11 +1,13 @@
 import os
 import io
+import time
 import asyncio
 import threading
 from flask import Flask
 import yfinance as yf
 import mplfinance as mpf
 import google.generativeai as genai
+from google.api_core.exceptions import ResourceExhausted
 from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -31,34 +33,25 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-def get_active_model():
-    """Queries available models and prioritizes verified active vision models."""
-    preferred_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']
+def generate_content_with_retry(prompt, chart_img, retries=3, delay=5):
+    """Generates content and handles 429 Rate Limits automatically with retry backoff."""
+    models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
     
-    try:
-        # Retrieve supported models and strip 'models/' prefix
-        available = [
-            m.name.replace('models/', '') 
-            for m in genai.list_models() 
-            if 'generateContent' in m.supported_generation_methods
-        ]
-        
-        # 1. Pick the first preferred stable model available on your API key
-        for target in preferred_models:
-            if target in available:
-                print(f"Active model initialized: {target}")
-                return genai.GenerativeModel(target)
-                
-        # 2. Fallback to any active content generation model returned by API
-        if available:
-            print(f"Fallback model initialized: {available[0]}")
-            return genai.GenerativeModel(available[0])
-
-    except Exception as e:
-        print(f"Error querying model list: {e}")
-    
-    # 3. Default safety fallback
-    return genai.GenerativeModel('gemini-1.5-flash')
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            for attempt in range(retries):
+                try:
+                    return model.generate_content([prompt, chart_img])
+                except ResourceExhausted as e:
+                    print(f"Rate limit hit on {model_name} (Attempt {attempt+1}/{retries}). Retrying in {delay}s...")
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+        except Exception as err:
+            print(f"Failed model {model_name}: {err}")
+            continue
+            
+    raise Exception("API rate limit reached across all models. Please wait a minute and try again.")
 
 def format_ticker(symbol: str) -> str:
     """Formats user symbol inputs to standard Yahoo Finance tickers."""
@@ -91,7 +84,7 @@ def format_ticker(symbol: str) -> str:
         
     return sym
 
-# Store active price alerts: { chat_id: [ {'symbol': 'GBPUSD', 'target': 1.3050, 'direction': 'above'} ] }
+# Store active price alerts
 active_alerts = {}
 
 # --- 3. Handlers & Commands ---
@@ -125,7 +118,6 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_symbol = context.args[0]
     tf_input = context.args[1].lower() if len(context.args) > 1 else "15m"
     
-    # Map timeframes to yfinance interval and history period
     tf_map = {
         "1m": ("1m", "1d"),
         "5m": ("5m", "5d"),
@@ -148,8 +140,7 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         df = yf.download(ticker, period=period, interval=interval)
         if df.empty:
             await update.message.reply_text(
-                f"❌ Could not retrieve market data for `{user_symbol}` on `{tf_input}`. "
-                "Ensure symbol is correct or upload a screenshot.",
+                f"❌ Could not retrieve market data for `{user_symbol}` on `{tf_input}`.",
                 parse_mode="Markdown"
             )
             return
@@ -182,8 +173,7 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Keep the output crisp, clear, and structured for a real-time trading alert.
         """
         
-        model = get_active_model()
-        response = model.generate_content([prompt, chart_img])
+        response = generate_content_with_retry(prompt, chart_img)
 
         img_buf.seek(0)
         await update.message.reply_photo(
@@ -301,9 +291,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Keep the output crisp, clear, and structured for a real-time trading alert.
         """
         
-        model = get_active_model()
-        response = model.generate_content([prompt, chart_img])
-        
+        response = generate_content_with_retry(prompt, chart_img)
         await update.message.reply_text(f"🎯 *AI CHART ANALYSIS*\n\n{response.text}", parse_mode="Markdown")
         
     except Exception as e:
@@ -316,14 +304,12 @@ if __name__ == '__main__':
     else:
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         
-        # Command & Event Handlers
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("analyze", analyze_pair))
         app.add_handler(CommandHandler("alert", set_alert))
         app.add_handler(CommandHandler("listalerts", list_alerts))
         app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
         
-        # Schedule price alert checker to run every 60 seconds
         if app.job_queue:
             app.job_queue.run_repeating(check_alerts_job, interval=60, first=10)
         
