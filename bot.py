@@ -165,7 +165,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Keep the output crisp, clear, and structured for a real-time trading alert.
         """
         
-        model = genai.GenerativeModel('gemini-1.5-pro')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         response = model.generate_content([prompt, chart_img])
         
         await update.message.reply_text(f"🎯 *AI CHART ANALYSIS*\n\n{response.text}", parse_mode="Markdown")
