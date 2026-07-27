@@ -4,7 +4,7 @@ import threading
 from flask import Flask
 import yfinance as yf
 import mplfinance as mpf
-import google.generativeai as genai
+import google.generativeai as generativeai
 from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -135,7 +135,7 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Keep the output crisp, clear, and structured for a real-time trading alert.
         """
         
-        model = genai.GenerativeModel('gemini-1.5-pro')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         response = model.generate_content([prompt, chart_img])
 
         img_buf.seek(0)
