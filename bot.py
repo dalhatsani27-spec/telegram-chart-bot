@@ -1,22 +1,7 @@
 import os
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is active!")
-
-def start_health_check():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    server.serve_forever()
-
-threading.Thread(target=start_health_check, daemon=True).start()
-
-import os
 import io
+import threading
+from flask import Flask
 import yfinance as yf
 import mplfinance as mpf
 import google.generativeai as genai
@@ -24,7 +9,21 @@ from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Retrieve environment variables configured in Render
+# --- 1. Flask Health Check Server for Render Free Tier ---
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def health_check():
+    return "Bot is active!", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
+
+# Start Flask background server before anything else
+threading.Thread(target=run_flask, daemon=True).start()
+
+# --- 2. Configuration & Utilities ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
@@ -66,6 +65,16 @@ def format_ticker(symbol: str) -> str:
         return "^GSPC"
         
     return sym
+
+# --- 3. Command & Message Handlers ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends start message."""
+    await update.message.reply_text(
+        "👋 *Welcome to Market Vision Bot!*\n\n"
+        "• Send `/analyze GBPUSD` to generate an AI analysis on a pair.\n"
+        "• Or send a chart screenshot directly for custom structure breakdown!",
+        parse_mode="Markdown"
+    )
 
 async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Generates candle charts automatically and feeds them to Gemini AI."""
@@ -164,12 +173,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error analyzing image: {str(e)}")
 
+# --- 4. Main App Execution ---
 if __name__ == '__main__':
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Handlers
-    app.add_handler(CommandHandler("analyze", analyze_pair))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    
-    print("Telegram Vision Bot active...")
-    app.run_polling()
+    if not TELEGRAM_BOT_TOKEN:
+        print("Error: TELEGRAM_BOT_TOKEN environment variable missing!")
+    else:
+        app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        
+        # Register Command Handlers
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("analyze", analyze_pair))
+        app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        
+        print("Telegram Vision Bot active...")
+        app.run_polling()
