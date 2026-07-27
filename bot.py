@@ -32,16 +32,32 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 def get_active_model():
-    """Queries the Gemini API to resolve an available vision model for your API key."""
-    try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods and "gemini" in m.name:
-                print(f"Dynamically selected Gemini model: {m.name}")
-                return genai.GenerativeModel(m.name)
-    except Exception as e:
-        print(f"Model query error: {e}")
+    """Queries available models and prioritizes verified active vision models."""
+    preferred_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']
     
-    # Standard fallback if dynamic list is restricted
+    try:
+        # Retrieve supported models and strip 'models/' prefix
+        available = [
+            m.name.replace('models/', '') 
+            for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        
+        # 1. Pick the first preferred stable model available on your API key
+        for target in preferred_models:
+            if target in available:
+                print(f"Active model initialized: {target}")
+                return genai.GenerativeModel(target)
+                
+        # 2. Fallback to any active content generation model returned by API
+        if available:
+            print(f"Fallback model initialized: {available[0]}")
+            return genai.GenerativeModel(available[0])
+
+    except Exception as e:
+        print(f"Error querying model list: {e}")
+    
+    # 3. Default safety fallback
     return genai.GenerativeModel('gemini-1.5-flash')
 
 def format_ticker(symbol: str) -> str:
@@ -85,7 +101,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 *Welcome to Market Vision Bot!*\n\n"
         "📌 *Analysis Commands:*\n"
         "• `/analyze GBPUSD` (Default 15m chart)\n"
-        "• `/analyze BTCUSD 5m` (Specific timeframe: 1m, 5m, 15m, 1h, 4h, 1d)\n\n"
+        "• `/analyze BTCUSD 5m` (Timeframes: 1m, 5m, 15m, 1h, 4h, 1d)\n\n"
         "🔔 *Alert Commands:*\n"
         "• `/alert GBPUSD 1.3100` (Notifies you when price crosses target)\n"
         "• `/listalerts` (View active alerts)\n\n"
@@ -116,7 +132,7 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "15m": ("15m", "5d"),
         "30m": ("30m", "5d"),
         "1h": ("60m", "1mo"),
-        "4h": ("60m", "1mo"), # Resampled or standard interval fallback
+        "4h": ("60m", "1mo"),
         "1d": ("1d", "3mo")
     }
     
