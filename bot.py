@@ -1,6 +1,5 @@
 import os
 import io
-import time
 import asyncio
 import threading
 from flask import Flask
@@ -23,40 +22,51 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port)
 
-# Start Flask background server for Render web service health check
 threading.Thread(target=run_flask, daemon=True).start()
 
-# --- 2. Gemini Configuration & Dynamic Model Discovery ---
+# --- 2. Gemini Configuration & Rate-Limited Generator ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-def generate_content_with_retry(prompt, chart_img, retries=3, delay=5):
-    """Generates content and handles 429 Rate Limits automatically with retry backoff."""
-    models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+def resize_image_for_api(image: Image.Image, max_dim: int = 1024) -> Image.Image:
+    """Resizes high-res screenshots to reduce token footprint on Free Tier."""
+    img = image.copy()
+    img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+    return img
+
+async def generate_content_async(prompt: str, chart_img: Image.Image, retries: int = 3, delay: int = 6):
+    """Non-blocking generate content with backoff retry logic across multiple models."""
+    optimized_img = resize_image_for_api(chart_img)
+    models_to_try = ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
     
     for model_name in models_to_try:
         try:
             model = genai.GenerativeModel(model_name)
+            current_delay = delay
             for attempt in range(retries):
                 try:
-                    return model.generate_content([prompt, chart_img])
-                except ResourceExhausted as e:
-                    print(f"Rate limit hit on {model_name} (Attempt {attempt+1}/{retries}). Retrying in {delay}s...")
-                    time.sleep(delay)
-                    delay *= 2  # Exponential backoff
+                    # Run generative call in executor to keep loop non-blocking
+                    loop = asyncio.get_event_loop()
+                    response = await loop.run_in_executor(
+                        None, lambda: model.generate_content([prompt, optimized_img])
+                    )
+                    return response
+                except ResourceExhausted:
+                    print(f"Rate limit on {model_name} (Attempt {attempt+1}/{retries}). Waiting {current_delay}s...")
+                    await asyncio.sleep(current_delay)
+                    current_delay *= 2
         except Exception as err:
-            print(f"Failed model {model_name}: {err}")
+            print(f"Model {model_name} unavailable: {err}")
             continue
             
-    raise Exception("API rate limit reached across all models. Please wait a minute and try again.")
+    raise Exception("Free Tier rate limit reached across all models. Please wait 1 minute before trying another image.")
 
 def format_ticker(symbol: str) -> str:
     """Formats user symbol inputs to standard Yahoo Finance tickers."""
     sym = symbol.upper().replace("/", "").strip()
-    
     forex_pairs = [
         "GBPUSD", "EURUSD", "AUDUSD", "USDCAD", 
         "USDJPY", "USDCHF", "NZDUSD", "GBPAUD", 
@@ -84,12 +94,10 @@ def format_ticker(symbol: str) -> str:
         
     return sym
 
-# Store active price alerts
 active_alerts = {}
 
 # --- 3. Handlers & Commands ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command help menu."""
     await update.message.reply_text(
         "👋 *Welcome to Market Vision Bot!*\n\n"
         "📌 *Analysis Commands:*\n"
@@ -103,14 +111,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generates charts based on requested timeframe and feeds to Gemini."""
     if not context.args:
         await update.message.reply_text(
-            "⚠️ *Please specify a symbol.*\n\n"
-            "Examples:\n"
-            "• `/analyze GBPUSD`\n"
-            "• `/analyze BTCUSD 5m`\n"
-            "• `/analyze XAUUSD 1h`",
+            "⚠️ *Please specify a symbol.*\n\nExamples:\n• `/analyze GBPUSD`\n• `/analyze BTCUSD 5m`",
             parse_mode="Markdown"
         )
         return
@@ -119,13 +122,8 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tf_input = context.args[1].lower() if len(context.args) > 1 else "15m"
     
     tf_map = {
-        "1m": ("1m", "1d"),
-        "5m": ("5m", "5d"),
-        "15m": ("15m", "5d"),
-        "30m": ("30m", "5d"),
-        "1h": ("60m", "1mo"),
-        "4h": ("60m", "1mo"),
-        "1d": ("1d", "3mo")
+        "1m": ("1m", "1d"), "5m": ("5m", "5d"), "15m": ("15m", "5d"),
+        "30m": ("30m", "5d"), "1h": ("60m", "1mo"), "4h": ("60m", "1mo"), "1d": ("1d", "3mo")
     }
     
     interval, period = tf_map.get(tf_input, ("15m", "5d"))
@@ -139,10 +137,7 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         df = yf.download(ticker, period=period, interval=interval)
         if df.empty:
-            await update.message.reply_text(
-                f"❌ Could not retrieve market data for `{user_symbol}` on `{tf_input}`.",
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text(f"❌ Could not retrieve market data for `{user_symbol}`.", parse_mode="Markdown")
             return
 
         if hasattr(df.columns, "levels"):
@@ -153,12 +148,9 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         s  = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=True)
         
         mpf.plot(
-            df.tail(80), 
-            type='candle', 
-            style=s, 
-            volume=False, 
+            df.tail(80), type='candle', style=s, volume=False, 
             title=f"{user_symbol.upper()} ({tf_input.upper()} Chart)", 
-            savefig=dict(fname=img_buf, dpi=150)
+            savefig=dict(fname=img_buf, dpi=120)
         )
         
         img_buf.seek(0)
@@ -173,7 +165,7 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Keep the output crisp, clear, and structured for a real-time trading alert.
         """
         
-        response = generate_content_with_retry(prompt, chart_img)
+        response = await generate_content_async(prompt, chart_img)
 
         img_buf.seek(0)
         await update.message.reply_photo(
@@ -185,10 +177,32 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error generating analysis: {str(e)}")
 
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles direct uploaded screenshots with token optimization."""
+    await update.message.reply_text("📸 *Chart screenshot received! Optimizing & analyzing structure...*", parse_mode="Markdown")
+    
+    try:
+        photo_file = await update.message.photo[-1].get_file()
+        image_bytes = await photo_file.download_as_bytearray()
+        chart_img = Image.open(io.BytesIO(image_bytes))
+        
+        prompt = """
+        Perform a strict price action and market structure analysis on this uploaded trading chart:
+        1. **Overall Bias**: Bullish / Bearish / Consolidation.
+        2. **Liquidity & Key Levels**: Identify liquidity high/low hunts, wicks, and rejection zones.
+        3. **Trade Setup**: Provide a clear Trigger Zone, Stop Loss, and Take Profit targets.
+        Keep the output crisp, clear, and structured for a real-time trading alert.
+        """
+        
+        response = await generate_content_async(prompt, chart_img)
+        await update.message.reply_text(f"🎯 *AI CHART ANALYSIS*\n\n{response.text}", parse_mode="Markdown")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error analyzing image: {str(e)}")
+
 async def set_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sets a price trigger alert."""
     if len(context.args) < 2:
-        await update.message.reply_text("⚠️ Usage: `/alert <SYMBOL> <TARGET_PRICE>`\nExample: `/alert GBPUSD 1.3050`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Usage: `/alert <SYMBOL> <TARGET_PRICE>`", parse_mode="Markdown")
         return
 
     symbol = context.args[0].upper()
@@ -215,22 +229,15 @@ async def set_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_alerts[chat_id] = []
 
     active_alerts[chat_id].append({
-        'symbol': symbol,
-        'ticker': ticker,
-        'target': target_price,
-        'direction': direction
+        'symbol': symbol, 'ticker': ticker, 'target': target_price, 'direction': direction
     })
 
     await update.message.reply_text(
-        f"🔔 *Alert set for {symbol}!*\n"
-        f"• Current Price: `{current_price:.5f}`\n"
-        f"• Target Price: `{target_price:.5f}`\n"
-        f"• Trigger condition: Price moves `{direction}` target.",
+        f"🔔 *Alert set for {symbol}!*\n• Current: `{current_price:.5f}`\n• Target: `{target_price:.5f}`\n• Condition: Price `{direction}` target.",
         parse_mode="Markdown"
     )
 
 async def list_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lists all active alerts for the current chat."""
     chat_id = update.effective_chat.id
     alerts = active_alerts.get(chat_id, [])
     if not alerts:
@@ -243,7 +250,6 @@ async def list_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def check_alerts_job(context: ContextTypes.DEFAULT_TYPE):
-    """Background task running every 60s to check price conditions."""
     for chat_id, alerts in list(active_alerts.items()):
         for alert in list(alerts):
             try:
@@ -264,38 +270,12 @@ async def check_alerts_job(context: ContextTypes.DEFAULT_TYPE):
                 if triggered:
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text=f"🚨 *PRICE ALERT TRIGGERED!*\n\n"
-                             f"Symbol: `{alert['symbol']}`\n"
-                             f"Target Level: `{alert['target']}`\n"
-                             f"Current Price: `{current_price:.5f}`",
+                        text=f"🚨 *PRICE ALERT TRIGGERED!*\n\nSymbol: `{alert['symbol']}`\nTarget Level: `{alert['target']}`\nCurrent Price: `{current_price:.5f}`",
                         parse_mode="Markdown"
                     )
                     alerts.remove(alert)
             except Exception as e:
                 print(f"Alert check error: {e}")
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles direct uploaded screenshots."""
-    await update.message.reply_text("📸 *Chart screenshot received! Analyzing structure...*", parse_mode="Markdown")
-    
-    try:
-        photo_file = await update.message.photo[-1].get_file()
-        image_bytes = await photo_file.download_as_bytearray()
-        chart_img = Image.open(io.BytesIO(image_bytes))
-        
-        prompt = """
-        Perform a strict price action and market structure analysis on this uploaded trading chart:
-        1. **Overall Bias**: Bullish / Bearish / Consolidation.
-        2. **Liquidity & Key Levels**: Identify liquidity high/low hunts, wicks, and rejection zones.
-        3. **Trade Setup**: Provide a clear Trigger Zone, Stop Loss, and Take Profit targets.
-        Keep the output crisp, clear, and structured for a real-time trading alert.
-        """
-        
-        response = generate_content_with_retry(prompt, chart_img)
-        await update.message.reply_text(f"🎯 *AI CHART ANALYSIS*\n\n{response.text}", parse_mode="Markdown")
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error analyzing image: {str(e)}")
 
 # --- 4. Main App Execution ---
 if __name__ == '__main__':
