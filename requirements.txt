@@ -1,0 +1,5 @@
+google-generativeai
+python-telegram-bot
+Pillow
+yfinance
+mplfinance
