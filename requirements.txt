@@ -1,5 +1,6 @@
-google-generativeai
 python-telegram-bot
-Pillow
+google-genai
 yfinance
 mplfinance
+pillow
+flask
