@@ -4,7 +4,7 @@ import threading
 from flask import Flask
 import yfinance as yf
 import mplfinance as mpf
-import google.generativeai as generativeai
+import google.generativeai as genai
 from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
