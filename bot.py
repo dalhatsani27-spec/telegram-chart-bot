@@ -24,7 +24,7 @@ def run_flask():
 
 threading.Thread(target=run_flask, daemon=True).start()
 
-# --- 2. Gemini Configuration & Rate-Limited Generator ---
+# --- 2. Gemini Configuration & Non-Blocking Content Generator ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
@@ -32,13 +32,13 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 def resize_image_for_api(image: Image.Image, max_dim: int = 1024) -> Image.Image:
-    """Resizes high-res screenshots to reduce token footprint on Free Tier."""
+    """Resizes images to reduce token payload and prevent rate limits."""
     img = image.copy()
     img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
     return img
 
-async def generate_content_async(prompt: str, chart_img: Image.Image, retries: int = 3, delay: int = 6):
-    """Non-blocking generate content with backoff retry logic across multiple models."""
+async def generate_content_async(prompt: str, chart_img: Image.Image, retries: int = 3, delay: int = 5):
+    """Non-blocking generate content with backoff retry logic across active vision models."""
     optimized_img = resize_image_for_api(chart_img)
     models_to_try = ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
     
@@ -48,21 +48,18 @@ async def generate_content_async(prompt: str, chart_img: Image.Image, retries: i
             current_delay = delay
             for attempt in range(retries):
                 try:
-                    # Run generative call in executor to keep loop non-blocking
-                    loop = asyncio.get_event_loop()
-                    response = await loop.run_in_executor(
-                        None, lambda: model.generate_content([prompt, optimized_img])
-                    )
+                    # Offload API call to thread so it doesn't block Telegram event loop
+                    response = await asyncio.to_thread(model.generate_content, [prompt, optimized_img])
                     return response
                 except ResourceExhausted:
                     print(f"Rate limit on {model_name} (Attempt {attempt+1}/{retries}). Waiting {current_delay}s...")
                     await asyncio.sleep(current_delay)
                     current_delay *= 2
         except Exception as err:
-            print(f"Model {model_name} unavailable: {err}")
+            print(f"Model {model_name} error: {err}")
             continue
             
-    raise Exception("Free Tier rate limit reached across all models. Please wait 1 minute before trying another image.")
+    raise Exception("Free Tier rate limit reached across all models. Please wait a minute and try again.")
 
 def format_ticker(symbol: str) -> str:
     """Formats user symbol inputs to standard Yahoo Finance tickers."""
@@ -93,6 +90,19 @@ def format_ticker(symbol: str) -> str:
         return "^GSPC"
         
     return sym
+
+def generate_chart_image(df, title_str):
+    """Synchronous function to generate and render mplfinance chart buffer."""
+    img_buf = io.BytesIO()
+    mc = mpf.make_marketcolors(up='#00b050', down='#ff0000', edge='inherit', wick='inherit', volume='in')
+    s  = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=True)
+    
+    mpf.plot(
+        df.tail(80), type='candle', style=s, volume=False, 
+        title=title_str, savefig=dict(fname=img_buf, dpi=120)
+    )
+    img_buf.seek(0)
+    return img_buf
 
 active_alerts = {}
 
@@ -135,7 +145,9 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        df = yf.download(ticker, period=period, interval=interval)
+        # Offload yfinance download to background thread to avoid freezing async event loop
+        df = await asyncio.to_thread(yf.download, ticker, period=period, interval=interval)
+        
         if df.empty:
             await update.message.reply_text(f"❌ Could not retrieve market data for `{user_symbol}`.", parse_mode="Markdown")
             return
@@ -143,17 +155,11 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if hasattr(df.columns, "levels"):
             df.columns = df.columns.droplevel(1)
 
-        img_buf = io.BytesIO()
-        mc = mpf.make_marketcolors(up='#00b050', down='#ff0000', edge='inherit', wick='inherit', volume='in')
-        s  = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=True)
-        
-        mpf.plot(
-            df.tail(80), type='candle', style=s, volume=False, 
-            title=f"{user_symbol.upper()} ({tf_input.upper()} Chart)", 
-            savefig=dict(fname=img_buf, dpi=120)
+        # Offload chart generation to background thread
+        img_buf = await asyncio.to_thread(
+            generate_chart_image, df, f"{user_symbol.upper()} ({tf_input.upper()} Chart)"
         )
         
-        img_buf.seek(0)
         chart_img = Image.open(img_buf)
 
         prompt = f"""
@@ -165,7 +171,8 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Keep the output crisp, clear, and structured for a real-time trading alert.
         """
         
-        response = await generate_content_async(prompt, chart_img)
+        # Enforce a 30-second execution timeout
+        response = await asyncio.wait_for(generate_content_async(prompt, chart_img), timeout=30.0)
 
         img_buf.seek(0)
         await update.message.reply_photo(
@@ -174,11 +181,13 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
+    except asyncio.TimeoutError:
+        await update.message.reply_text("⏱️ *Request timed out.* Yahoo Finance or Gemini API took too long to respond. Please try again in a few seconds.", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error generating analysis: {str(e)}")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles direct uploaded screenshots with token optimization."""
+    """Handles direct uploaded screenshots with thread offloading."""
     await update.message.reply_text("📸 *Chart screenshot received! Optimizing & analyzing structure...*", parse_mode="Markdown")
     
     try:
@@ -194,9 +203,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Keep the output crisp, clear, and structured for a real-time trading alert.
         """
         
-        response = await generate_content_async(prompt, chart_img)
+        response = await asyncio.wait_for(generate_content_async(prompt, chart_img), timeout=30.0)
         await update.message.reply_text(f"🎯 *AI CHART ANALYSIS*\n\n{response.text}", parse_mode="Markdown")
         
+    except asyncio.TimeoutError:
+        await update.message.reply_text("⏱️ *Request timed out.* Gemini API took too long to respond. Please re-send the screenshot.", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error analyzing image: {str(e)}")
 
@@ -213,7 +224,7 @@ async def set_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     ticker = format_ticker(symbol)
-    df = yf.download(ticker, period="1d", interval="1m")
+    df = await asyncio.to_thread(yf.download, ticker, period="1d", interval="1m")
     if df.empty:
         await update.message.reply_text(f"❌ Could not fetch live price for `{symbol}`.", parse_mode="Markdown")
         return
@@ -253,7 +264,7 @@ async def check_alerts_job(context: ContextTypes.DEFAULT_TYPE):
     for chat_id, alerts in list(active_alerts.items()):
         for alert in list(alerts):
             try:
-                df = yf.download(alert['ticker'], period="1d", interval="1m")
+                df = await asyncio.to_thread(yf.download, alert['ticker'], period="1d", interval="1m")
                 if df.empty:
                     continue
                 if hasattr(df.columns, "levels"):
