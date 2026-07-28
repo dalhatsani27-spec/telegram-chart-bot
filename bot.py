@@ -6,7 +6,7 @@ from flask import Flask
 import yfinance as yf
 import mplfinance as mpf
 import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
+from google.api_core.exceptions import ResourceExhausted, GoogleAPIError
 from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -32,33 +32,41 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 def resize_image_for_api(image: Image.Image, max_dim: int = 1024) -> Image.Image:
-    """Resizes images to reduce token footprint and speed up processing."""
+    """Resizes images to drastically reduce token usage on Free Tier."""
     img = image.copy()
     img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
     return img
 
-async def generate_content_async(prompt: str, chart_img: Image.Image, retries: int = 2, delay: int = 4):
-    """Non-blocking generate content with retry backoff across verified vision models."""
+async def generate_content_async(prompt: str, chart_img: Image.Image, retries: int = 2):
+    """Non-blocking generate content targeting supported vision models on Free Tier."""
     optimized_img = resize_image_for_api(chart_img)
-    models_to_try = ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-2.0-flash']
     
+    # Supported production models for vision/multimodal analysis
+    models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+    
+    last_err = None
     for model_name in models_to_try:
         try:
             model = genai.GenerativeModel(model_name)
-            current_delay = delay
             for attempt in range(retries):
                 try:
+                    # Offload execution to thread so asyncio loop never blocks
                     response = await asyncio.to_thread(model.generate_content, [prompt, optimized_img])
-                    return response
+                    if response and response.text:
+                        return response
                 except ResourceExhausted:
-                    print(f"Rate limit on {model_name} (Attempt {attempt+1}/{retries}). Waiting {current_delay}s...")
-                    await asyncio.sleep(current_delay)
-                    current_delay *= 2
+                    print(f"Rate limit on {model_name} (Attempt {attempt+1}). Waiting 5s...")
+                    await asyncio.sleep(5)
+                except GoogleAPIError as gerr:
+                    print(f"API Error on {model_name}: {gerr}")
+                    last_err = gerr
+                    break
         except Exception as err:
-            print(f"Model {model_name} error: {err}")
+            print(f"Model initialization error on {model_name}: {err}")
+            last_err = err
             continue
-            
-    raise Exception("Free Tier quota busy. Please wait 30–60 seconds before trying again.")
+
+    raise Exception("Gemini Free Tier is currently busy or rate-limited. Please wait 1 minute before trying again.")
 
 def format_ticker(symbol: str) -> str:
     """Formats user symbol inputs to standard Yahoo Finance tickers."""
@@ -150,7 +158,7 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        # Fetch market data safely in a thread using Ticker.history
+        # Fetch market data in a background thread
         df = await asyncio.to_thread(fetch_market_data, ticker_sym, period, interval)
         
         if df is None or df.empty:
@@ -163,7 +171,7 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if hasattr(df.columns, "levels"):
             df.columns = df.columns.droplevel(1)
 
-        # Offload chart rendering
+        # Generate chart in background thread
         img_buf = await asyncio.to_thread(
             generate_chart_image, df, f"{user_symbol.upper()} ({tf_input.upper()} Chart)"
         )
@@ -190,12 +198,12 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     except asyncio.TimeoutError:
-        await update.message.reply_text("⏱️ *Request timed out.* API took longer than 60s to respond. Please try again.", parse_mode="Markdown")
+        await update.message.reply_text("⏱️ *Request timed out.* Gemini API took longer than 60s to respond. Please try again.", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error generating analysis: {str(e)}")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles direct uploaded screenshots with thread offloading and 60s timeout."""
+    """Handles direct uploaded screenshots with thread offloading."""
     await update.message.reply_text("📸 *Chart screenshot received! Optimizing & analyzing structure...*", parse_mode="Markdown")
     
     try:
@@ -215,7 +223,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🎯 *AI CHART ANALYSIS*\n\n{response.text}", parse_mode="Markdown")
         
     except asyncio.TimeoutError:
-        await update.message.reply_text("⏱️ *Request timed out.* API took too long. Please re-send the screenshot.", parse_mode="Markdown")
+        await update.message.reply_text("⏱️ *Request timed out.* Gemini API took too long. Please re-send the screenshot.", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error analyzing image: {str(e)}")
 
