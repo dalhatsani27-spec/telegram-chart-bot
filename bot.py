@@ -43,8 +43,8 @@ async def generate_content_async(prompt: str, chart_img: Image.Image):
 
     optimized_img = resize_image_for_api(chart_img)
     
-    # Official free-tier vision model names
-    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro']
+    # Active production models for vision and multimodal analysis
+    models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-1.5-flash']
     
     last_error = None
     for model_name in models_to_try:
@@ -54,7 +54,7 @@ async def generate_content_async(prompt: str, chart_img: Image.Image):
             if response and response.text:
                 return response.text
         except Exception as e:
-            print(f"Error trying model {model_name}: {e}")
+            print(f"Model {model_name} failed: {e}")
             last_error = e
             continue
 
