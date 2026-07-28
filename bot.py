@@ -316,11 +316,16 @@ def analyze_structure_and_setup(df):
     return results, swing_highs, swing_lows, trade_setup
 
 # ==========================================
-# 6. HIGH-CONTRAST CHART GENERATOR
+# 6. HIGH-CONTRAST CHART GENERATOR (DATETIME INDEX PRESERVED)
 # ==========================================
 def generate_chart_image(df, title_str, trade_setup=None):
     img_buf = io.BytesIO()
-    chart_df = df.tail(80).copy().reset_index(drop=True)
+    
+    # Preserve the DatetimeIndex required by mplfinance
+    chart_df = df.tail(80).copy()
+    if not isinstance(chart_df.index, pd.DatetimeIndex):
+        chart_df.index = pd.to_datetime(chart_df.index)
+
     ict_data, swing_highs, swing_lows, _ = analyze_structure_and_setup(chart_df)
     
     mc = mpf.make_marketcolors(
@@ -366,16 +371,17 @@ def generate_chart_image(df, title_str, trade_setup=None):
         color = '#089981' if ob['type'] == 'BULLISH_OB' else '#f23645'
         label = " BULLISH OB" if ob['type'] == 'BULLISH_OB' else " BEARISH OB"
         ax.axhspan(ob['bottom'], ob['top'], color=color, alpha=0.30 if not ob['mitigated'] else 0.10)
-        ax.text(n_bars - 22, ob['top'], label, color=color, fontsize=8, fontweight='bold')
+        ax.text(max(0, n_bars - 22), ob['top'], label, color=color, fontsize=8, fontweight='bold')
 
     if trade_setup:
         ax.axhline(trade_setup['entry'], color='#2962ff', linestyle='-.', linewidth=1.5)
         ax.axhline(trade_setup['sl'], color='#f23645', linestyle='--', linewidth=1.5)
         ax.axhline(trade_setup['tp1'], color='#089981', linestyle='--', linewidth=1.5)
         
-        ax.text(n_bars - 35, trade_setup['entry'], f" ENTRY: {trade_setup['entry']:.2f}", color='#2962ff', fontsize=8, fontweight='bold', backgroundcolor='#131722')
-        ax.text(n_bars - 35, trade_setup['sl'], f" SL: {trade_setup['sl']:.2f}", color='#f23645', fontsize=8, fontweight='bold', backgroundcolor='#131722')
-        ax.text(n_bars - 35, trade_setup['tp1'], f" TP1: {trade_setup['tp1']:.2f}", color='#089981', fontsize=8, fontweight='bold', backgroundcolor='#131722')
+        offset = max(0, n_bars - 35)
+        ax.text(offset, trade_setup['entry'], f" ENTRY: {trade_setup['entry']:.2f}", color='#2962ff', fontsize=8, fontweight='bold', backgroundcolor='#131722')
+        ax.text(offset, trade_setup['sl'], f" SL: {trade_setup['sl']:.2f}", color='#f23645', fontsize=8, fontweight='bold', backgroundcolor='#131722')
+        ax.text(offset, trade_setup['tp1'], f" TP1: {trade_setup['tp1']:.2f}", color='#089981', fontsize=8, fontweight='bold', backgroundcolor='#131722')
 
     ax.set_title(title_str, color='#d1d4dc', fontsize=9, fontweight='bold')
     img_buf.seek(0)
@@ -527,7 +533,6 @@ async def natural_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode="Markdown"
         )
     else:
-        # Fallback conversational response using AI
         response = analyze_with_ai(f"Act as an institutional risk manager and trading desk assistant. Respond briefly to this trader message: '{update.message.text}'")
         await update.message.reply_text(response)
 
