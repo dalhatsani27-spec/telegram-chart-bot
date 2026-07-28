@@ -46,7 +46,6 @@ async def analyze_chart_async(prompt: str, chart_img: Image.Image) -> str:
 
     base64_image = image_to_base64(chart_img)
     
-    # openrouter/free automatically selects an active free model supporting vision
     models_to_try = [
         "openrouter/free",
         "google/gemini-2.5-flash:free",
@@ -174,12 +173,10 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         analysis_text = await analyze_chart_async(prompt, chart_img)
 
+        # Send photo first, then full analysis as text message
         img_buf.seek(0)
-        await update.message.reply_photo(
-            photo=img_buf,
-            caption=f"🎯 *LIVE AI ANALYSIS: {user_symbol.upper()} ({tf_input.upper()})*\n\n{analysis_text}",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_photo(photo=img_buf, caption=f"🎯 *LIVE CHART: {user_symbol.upper()} ({tf_input.upper()})*")
+        await update.message.reply_text(f"🎯 *AI ANALYSIS*\n\n{analysis_text}", parse_mode="Markdown")
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error generating analysis: {str(e)}")
