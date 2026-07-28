@@ -37,14 +37,15 @@ def resize_image_for_api(image: Image.Image, max_dim: int = 1024) -> Image.Image
     return img
 
 async def generate_content_async(prompt: str, chart_img: Image.Image):
-    """Direct non-blocking call using verified standard Gemini models."""
+    """Direct non-blocking call using active Gemini production models."""
     if not GEMINI_API_KEY:
         raise Exception("GEMINI_API_KEY environment variable is missing on Render!")
 
     optimized_img = resize_image_for_api(chart_img)
     
-    # Active production models for vision and multimodal analysis
-    models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-1.5-flash']
+    # Active production models for vision & multimodal analysis
+    # Excludes deprecated 1.5 versions to avoid 404 errors
+    models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash']
     
     last_error = None
     for model_name in models_to_try:
