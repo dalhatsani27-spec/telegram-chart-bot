@@ -10,7 +10,7 @@ from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- 1. Flask Health Check Server ---
+# --- 1. Flask Health Check Server for Render Free Tier ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -23,7 +23,7 @@ def run_flask():
 
 threading.Thread(target=run_flask, daemon=True).start()
 
-# --- 2. Gemini Configuration ---
+# --- 2. Gemini API Configuration ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
@@ -31,37 +31,38 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 def resize_image_for_api(image: Image.Image, max_dim: int = 1024) -> Image.Image:
-    """Resizes high-res screenshots to prevent token limit errors."""
+    """Resizes high-resolution screenshots to reduce token usage and speed up API response."""
     img = image.copy()
     img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
     return img
 
 async def generate_content_async(prompt: str, chart_img: Image.Image):
-    """Direct non-blocking call using active Gemini production models."""
+    """Non-blocking call targeting only active Gemini models on AI Studio."""
     if not GEMINI_API_KEY:
-        raise Exception("GEMINI_API_KEY environment variable is missing on Render!")
+        raise Exception("GEMINI_API_KEY environment variable is missing in Render settings!")
 
     optimized_img = resize_image_for_api(chart_img)
     
-    # Active production models for vision & multimodal analysis
-    # Excludes deprecated 1.5 versions to avoid 404 errors
-    models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash']
+    # Active Gemini 2.5 production models visible on your AI Studio Dashboard
+    models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
     
     last_error = None
     for model_name in models_to_try:
         try:
             model = genai.GenerativeModel(model_name)
+            # Offload synchronous execution to asyncio threadpool
             response = await asyncio.to_thread(model.generate_content, [prompt, optimized_img])
             if response and response.text:
                 return response.text
         except Exception as e:
-            print(f"Model {model_name} failed: {e}")
+            print(f"Model {model_name} execution error: {e}")
             last_error = e
             continue
 
     raise Exception(f"Gemini API Error: {str(last_error)}")
 
 def format_ticker(symbol: str) -> str:
+    """Formats user symbol inputs to standard Yahoo Finance tickers."""
     sym = symbol.upper().replace("/", "").strip()
     forex_pairs = [
         "GBPUSD", "EURUSD", "AUDUSD", "USDCAD", 
@@ -109,7 +110,7 @@ def generate_chart_image(df, title_str):
 
 active_alerts = {}
 
-# --- 3. Handlers & Commands ---
+# --- 3. Telegram Handlers & Commands ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome to Market Vision Bot!*\n\n"
@@ -166,7 +167,7 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Keep the output crisp, clear, and structured for a real-time trading alert.
         """
         
-        analysis_text = await asyncio.wait_for(generate_content_async(prompt, chart_img), timeout=45.0)
+        analysis_text = await asyncio.wait_for(generate_content_async(prompt, chart_img), timeout=50.0)
 
         img_buf.seek(0)
         await update.message.reply_photo(
@@ -176,7 +177,7 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     except asyncio.TimeoutError:
-        await update.message.reply_text("⏱️ *Request timed out.* Gemini API took longer than 45s to respond. Please try again.", parse_mode="Markdown")
+        await update.message.reply_text("⏱️ *Request timed out.* Gemini API took longer than 50s to respond. Please try again.", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error generating analysis: {str(e)}")
 
@@ -196,7 +197,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Keep the output crisp, clear, and structured for a real-time trading alert.
         """
         
-        analysis_text = await asyncio.wait_for(generate_content_async(prompt, chart_img), timeout=45.0)
+        analysis_text = await asyncio.wait_for(generate_content_async(prompt, chart_img), timeout=50.0)
         await update.message.reply_text(f"🎯 *AI CHART ANALYSIS*\n\n{analysis_text}", parse_mode="Markdown")
         
     except asyncio.TimeoutError:
