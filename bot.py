@@ -1,16 +1,17 @@
 import os
 import io
 import asyncio
+import base64
 import threading
 from flask import Flask
 import yfinance as yf
 import mplfinance as mpf
-import google.generativeai as genai
+from openai import OpenAI
 from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- 1. Flask Health Check Server ---
+# --- 1. Flask Health Check Server for Render ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -23,42 +24,67 @@ def run_flask():
 
 threading.Thread(target=run_flask, daemon=True).start()
 
-# --- 2. Gemini Configuration ---
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# --- 2. OpenRouter Setup ---
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY or "dummy_key"
+)
 
-def resize_image_for_api(image: Image.Image, max_dim: int = 1024) -> Image.Image:
-    """Resizes high-res screenshots to prevent token limit errors."""
-    img = image.copy()
-    img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
-    return img
+def image_to_base64(image: Image.Image) -> str:
+    """Converts PIL Image to Base64 format for OpenRouter API."""
+    buffered = io.BytesIO()
+    image.convert("RGB").save(buffered, format="JPEG")
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-async def generate_content_async(prompt: str, chart_img: Image.Image):
-    """Direct non-blocking call using standard Gemini 2.5 Flash."""
-    if not GEMINI_API_KEY:
-        raise Exception("GEMINI_API_KEY environment variable is missing on Render!")
+async def analyze_chart_async(prompt: str, chart_img: Image.Image) -> str:
+    """Non-blocking vision request via OpenRouter free router."""
+    if not OPENROUTER_API_KEY:
+        raise Exception("OPENROUTER_API_KEY environment variable is missing on Render!")
 
-    optimized_img = resize_image_for_api(chart_img)
+    base64_image = image_to_base64(chart_img)
     
-    # Exclusively using standard Gemini 2.5 Flash
-    models_to_try = ['gemini-2.5-flash']
-    
+    # openrouter/free automatically selects an active free model supporting vision
+    models_to_try = [
+        "openrouter/free",
+        "google/gemini-2.5-flash:free",
+        "meta-llama/llama-3.2-11b-vision-instruct:free"
+    ]
+
     last_error = None
     for model_name in models_to_try:
         try:
-            model = genai.GenerativeModel(model_name)
-            response = await asyncio.to_thread(model.generate_content, [prompt, optimized_img])
-            if response and response.text:
-                return response.text
+            def _call():
+                return client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=700
+                )
+
+            response = await asyncio.to_thread(_call)
+            if response and response.choices and response.choices[0].message.content:
+                return response.choices[0].message.content
         except Exception as e:
             print(f"Model {model_name} failed: {e}")
             last_error = e
             continue
 
-    raise Exception(f"Gemini API Error: {str(last_error)}")
+    raise Exception(f"OpenRouter API Error: {str(last_error)}")
 
 def format_ticker(symbol: str) -> str:
     sym = symbol.upper().replace("/", "").strip()
@@ -69,30 +95,17 @@ def format_ticker(symbol: str) -> str:
     ]
     if sym in forex_pairs:
         return f"{sym}=X"
-    
     if sym in ["BTCUSD", "BTC", "BITCOIN"]:
         return "BTC-USD"
     elif sym in ["ETHUSD", "ETH", "ETHEREUM"]:
         return "ETH-USD"
-    elif sym in ["SOLUSD", "SOL"]:
-        return "SOL-USD"
     elif sym in ["XAUUSD", "GOLD"]:
         return "GC=F"
-    elif sym in ["USOIL", "WTI", "CRUDE"]:
-        return "CL=F"
-    elif sym in ["US30", "DJI"]:
-        return "^DJI"
-    elif sym in ["NAS100", "NDX"]:
-        return "^IXIC"
-    elif sym in ["SPX500", "SP500"]:
-        return "^GSPC"
-        
     return sym
 
 def fetch_market_data(ticker_symbol: str, period: str, interval: str):
     ticker = yf.Ticker(ticker_symbol)
-    df = ticker.history(period=period, interval=interval)
-    return df
+    return ticker.history(period=period, interval=interval)
 
 def generate_chart_image(df, title_str):
     img_buf = io.BytesIO()
@@ -106,19 +119,14 @@ def generate_chart_image(df, title_str):
     img_buf.seek(0)
     return img_buf
 
-active_alerts = {}
-
-# --- 3. Handlers & Commands ---
+# --- 3. Telegram Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome to Market Vision Bot!*\n\n"
         "📌 *Analysis Commands:*\n"
         "• `/analyze GBPUSD` (Default 15m chart)\n"
         "• `/analyze BTCUSD 5m` (Timeframes: 1m, 5m, 15m, 1h, 4h, 1d)\n\n"
-        "🔔 *Alert Commands:*\n"
-        "• `/alert GBPUSD 1.3100` (Notifies you when price crosses target)\n"
-        "• `/listalerts` (View active alerts)\n\n"
-        "📸 Or simply upload a screenshot of your chart directly!",
+        "📸 Or send a chart screenshot directly to analyze!",
         parse_mode="Markdown"
     )
 
@@ -139,13 +147,12 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ticker_sym = format_ticker(user_symbol)
 
     await update.message.reply_text(
-        f"📊 *Fetching market data & generating {tf_input.upper()} chart for {user_symbol.upper()}...*", 
+        f"📊 *Fetching market data & analyzing {tf_input.upper()} chart for {user_symbol.upper()}...*", 
         parse_mode="Markdown"
     )
 
     try:
         df = await asyncio.to_thread(fetch_market_data, ticker_sym, period, interval)
-        
         if df is None or df.empty:
             await update.message.reply_text(f"❌ Could not retrieve market data for `{user_symbol}`.", parse_mode="Markdown")
             return
@@ -153,19 +160,19 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if hasattr(df.columns, "levels"):
             df.columns = df.columns.droplevel(1)
 
-        img_buf = await asyncio.to_thread(generate_chart_image, df, f"{user_symbol.upper()} ({tf_input.upper()} Chart)")
+        img_buf = await asyncio.to_thread(generate_chart_image, df, f"{user_symbol.upper()} ({tf_input.upper()})")
         chart_img = Image.open(img_buf)
 
         prompt = f"""
         Perform a strict price action and market structure analysis on this {user_symbol.upper()} ({tf_input.upper()}) chart:
         1. **Overall Bias**: Bullish / Bearish / Consolidation.
         2. **Liquidity & Key Levels**: Identify liquidity high/low hunts, key support/resistance, or supply/demand zones.
-        3. **Price Action Interrogation**: Highlight active wicks, rejections, or displacement candles.
+        3. **Price Action**: Highlight active wicks, rejections, or displacement candles.
         4. **Trade Setup**: Provide a clear Trigger Zone, Stop Loss, and Take Profit targets.
-        Keep the output crisp, clear, and structured for a real-time trading alert.
+        Keep the output crisp and structured for a real-time trading alert.
         """
         
-        analysis_text = await asyncio.wait_for(generate_content_async(prompt, chart_img), timeout=50.0)
+        analysis_text = await analyze_chart_async(prompt, chart_img)
 
         img_buf.seek(0)
         await update.message.reply_photo(
@@ -174,8 +181,6 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-    except asyncio.TimeoutError:
-        await update.message.reply_text("⏱️ *Request timed out.* Gemini API took longer than 50s to respond. Please try again.", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error generating analysis: {str(e)}")
 
@@ -188,26 +193,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chart_img = Image.open(io.BytesIO(image_bytes))
         
         prompt = """
-        Perform a strict price action and market structure analysis on this uploaded trading chart:
+        Perform a strict price action and market structure analysis on this chart screenshot:
         1. **Overall Bias**: Bullish / Bearish / Consolidation.
         2. **Liquidity & Key Levels**: Identify liquidity high/low hunts, wicks, and rejection zones.
         3. **Trade Setup**: Provide a clear Trigger Zone, Stop Loss, and Take Profit targets.
-        Keep the output crisp, clear, and structured for a real-time trading alert.
         """
         
-        analysis_text = await asyncio.wait_for(generate_content_async(prompt, chart_img), timeout=50.0)
+        analysis_text = await analyze_chart_async(prompt, chart_img)
         await update.message.reply_text(f"🎯 *AI CHART ANALYSIS*\n\n{analysis_text}", parse_mode="Markdown")
         
-    except asyncio.TimeoutError:
-        await update.message.reply_text("⏱️ *Request timed out.* Gemini API took too long.", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error analyzing image: {str(e)}")
 
-# --- 4. Main App Execution ---
+# --- 4. Main Execution ---
 if __name__ == '__main__':
-    if not TELEGRAM_BOT_TOKEN:
-        print("Error: TELEGRAM_BOT_TOKEN environment variable missing!")
-    else:
+    if TELEGRAM_BOT_TOKEN:
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("analyze", analyze_pair))
