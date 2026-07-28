@@ -26,12 +26,12 @@ def health_check():
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-MY_CHAT_ID = os.environ.get("MY_CHAT_ID")  # Your personal Telegram Chat ID for alerts
+MY_CHAT_ID = os.environ.get("MY_CHAT_ID")  # Personal Telegram Chat ID
 
 def keep_alive_ping():
     """Pings Flask endpoint every 10 minutes to prevent Render from sleeping."""
     while True:
-        time.sleep(600)  # 10 minute interval
+        time.sleep(600)
         if RENDER_EXTERNAL_URL:
             try:
                 res = requests.get(RENDER_EXTERNAL_URL, timeout=10)
@@ -39,7 +39,6 @@ def keep_alive_ping():
             except Exception as e:
                 print(f"[Keep-Alive] Ping failed: {e}")
 
-# Start background keep-alive ping thread
 threading.Thread(target=keep_alive_ping, daemon=True).start()
 
 # ==========================================
@@ -66,7 +65,6 @@ def fetch_ai_analysis(prompt):
                 max_tokens=600
             )
             content = response.choices[0].message.content
-            # Guard against guardrail responses (e.g. 'User Safety: safe')
             if content and "User Safety:" not in content and len(content.strip()) > 30:
                 return content
         except Exception:
@@ -75,12 +73,12 @@ def fetch_ai_analysis(prompt):
     return (
         "🎯 *AI ANALYSIS & MARKET STORY*\n\n"
         "1. **Overall Bias:** Dynamic Market Structure\n"
-        "2. **Liquidity & Key POI:** Check chart overlay for dynamic Pivot Support/Resistance lines.\n"
-        "3. **Trade Setup:** Refer to blue trigger line and green/red shaded position boxes on the generated chart."
+        "2. **Liquidity & Key POI:** Check chart markers for BSL (▼) and SSL (▲) footprints.\n"
+        "3. **Trade Setup:** Refer to blue trigger line and green/red localized position boxes on the right."
     )
 
 # ==========================================
-# 3. CHART MAPPING: PIVOTS & POI LIMIT SETUPS
+# 3. CHART MAPPING: POI MARKS & LOCALIZED SETUPS
 # ==========================================
 def find_pivots(df, window=3):
     """Calculates local fractal Pivot Highs and Pivot Lows."""
@@ -99,9 +97,9 @@ def find_pivots(df, window=3):
     return pivots_high, pivots_low
 
 def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=True):
-    """Renders TradingView-style dark chart with POI Limit Order setups anchored to Liquidity Pivots."""
+    """Renders TradingView-style dark chart with explicit POI marks and localized position shading."""
     img_buf = io.BytesIO()
-    chart_df = df.tail(80)
+    chart_df = df.tail(80).copy()
     
     # TradingView Dark Color Scheme
     mc = mpf.make_marketcolors(
@@ -113,61 +111,82 @@ def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=Tr
         y_on_right=True, facecolor='#131722', figcolor='#131722'
     )
     
-    # Dynamic Pivot Trendlines
+    # Dynamic Pivot & POI Footprint Markers
     p_highs, p_lows = find_pivots(chart_df, window=3)
-    alines_list = []
     
-    if len(p_highs) >= 2:
-        alines_list.append([p_highs[-2], p_highs[-1]])  # Dynamic Resistance
-    if len(p_lows) >= 2:
-        alines_list.append([p_lows[-2], p_lows[-1]])    # Dynamic Support
-        
-    alines_dict = dict(alines=alines_list, colors=['#f23645', '#089981'], linewidths=1.2) if alines_list else None
+    bsl_points = [np.nan] * len(chart_df)
+    ssl_points = [np.nan] * len(chart_df)
+    price_range = chart_df['High'].max() - chart_df['Low'].min()
+    
+    for idx_time, val in p_highs:
+        if idx_time in chart_df.index:
+            loc = chart_df.index.get_loc(idx_time)
+            bsl_points[loc] = val + (price_range * 0.02)  # Mark BSL slightly above high
+            
+    for idx_time, val in p_lows:
+        if idx_time in chart_df.index:
+            loc = chart_df.index.get_loc(idx_time)
+            ssl_points[loc] = val - (price_range * 0.02)  # Mark SSL slightly below low
 
-    # POI-BASED LIMIT ORDER ENTRY LOGIC
-    recent_high = chart_df['High'].tail(30).max()
-    recent_low = chart_df['Low'].tail(30).min()
+    addplots = []
+    if any(~np.isnan(bsl_points)):
+        addplots.append(mpf.make_addplot(bsl_points, type='scatter', marker='v', markersize=40, color='#f23645'))
+    if any(~np.isnan(ssl_points)):
+        addplots.append(mpf.make_addplot(ssl_points, type='scatter', marker='^', markersize=40, color='#089981'))
+
+    # Establish Key POI Levels
+    recent_bsl = p_highs[-1][1] if len(p_highs) > 0 else chart_df['High'].tail(30).max()
+    recent_ssl = p_lows[-1][1] if len(p_lows) > 0 else chart_df['Low'].tail(30).min()
     
     if entry is None:
         if is_long:
-            # BUY LIMIT: Anchor entry at recent Pivot Low / Liquidity Hunt level
-            entry = p_lows[-1][1] if len(p_lows) > 0 else recent_low
-            risk_dist = abs(entry - recent_low) if entry != recent_low else (recent_high - recent_low) * 0.1
-            sl = entry - max(risk_dist, (recent_high - recent_low) * 0.05)
-            tp = recent_high
+            entry = recent_ssl  # Expect entry at SSL sweep level
+            risk_dist = max((recent_bsl - recent_ssl) * 0.12, price_range * 0.04)
+            sl = entry - risk_dist
+            tp = recent_bsl
         else:
-            # SELL LIMIT: Anchor entry at recent Pivot High / Liquidity Hunt level
-            entry = p_highs[-1][1] if len(p_highs) > 0 else recent_high
-            risk_dist = abs(recent_high - entry) if entry != recent_high else (recent_high - recent_low) * 0.1
-            sl = entry + max(risk_dist, (recent_high - recent_low) * 0.05)
-            tp = recent_low
+            entry = recent_bsl  # Expect entry at BSL sweep level
+            risk_dist = max((recent_bsl - recent_ssl) * 0.12, price_range * 0.04)
+            sl = entry + risk_dist
+            tp = recent_ssl
 
-    # Horizontal Level Lines (Blue Entry / Red SL / Green TP)
+    # Horizontal Lines: Dotted BSL/SSL POIs & Distinct Entry/SL/TP Levels
     hlines_dict = dict(
-        hlines=[entry, sl, tp],
-        colors=['#2962ff', '#f23645', '#089981'],
-        linestyle=['-.', '--', '--'],
-        linewidths=[1.2, 1.0, 1.0]
+        hlines=[recent_bsl, recent_ssl, entry, sl, tp],
+        colors=['#f23645', '#089981', '#2962ff', '#e53935', '#43a047'],
+        linestyle=[':', ':', '-.', '--', '--'],
+        linewidths=[1.0, 1.0, 1.2, 1.0, 1.0]
     )
 
-    # Direction-Aware Shaded Position Boxes
-    fill_tp = dict(y1=entry, y2=tp, color='#089981', alpha=0.18)
-    fill_sl = dict(y1=entry, y2=sl, color='#f23645', alpha=0.18)
+    # Restrict Position Shading ONLY to the last 15 candles on the right
+    fill_tp_data = [np.nan] * len(chart_df)
+    fill_sl_data = [np.nan] * len(chart_df)
+    
+    box_width = min(15, len(chart_df))
+    for i in range(len(chart_df) - box_width, len(chart_df)):
+        fill_tp_data[i] = tp
+        fill_sl_data[i] = sl
 
-    # Plot Chart
+    # Render Base Chart
     fig, axlist = mpf.plot(
         chart_df,
         type='candle',
         style=style,
         volume=False,
         hlines=hlines_dict,
-        alines=alines_dict,
-        fill_between=[fill_tp, fill_sl],
+        addplot=addplots if addplots else None,
+        fill_between=dict(y1=fill_tp_data, y2=entry, color='#089981', alpha=0.18),
         savefig=dict(fname=img_buf, dpi=130),
         returnfig=True
     )
     
-    axlist[0].set_title(title_str, color='#d1d4dc', fontsize=11, fontweight='bold')
+    # Overlay localized Stop Loss shading restricted to recent candles
+    axlist[0].fill_between(
+        range(len(chart_df)), fill_sl_data, entry,
+        where=~np.isnan(fill_sl_data), color='#f23645', alpha=0.18
+    )
+
+    axlist[0].set_title(f"{title_str}\n[▼ BSL Liquidity | ▲ SSL Liquidity]", color='#d1d4dc', fontsize=10, fontweight='bold')
     img_buf.seek(0)
     return img_buf
 
@@ -178,20 +197,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a formatted welcome message with full instructions."""
     welcome_text = (
         "🤖 *WELCOME TO YOUR CHART & SIGNAL ANALYZER*\n\n"
-        "I am configured to map institutional price action, liquidity sweeps, and POI zones directly onto chart setups.\n\n"
+        "I am configured to map institutional price action, liquidity footprints, and key POI zones directly onto chart setups.\n\n"
         "📌 *HOW TO USE ME:*\n"
         "• `/analyze [SYMBOL] [TIMEFRAME]`\n"
         "  _Examples:_\n"
         "  - `/analyze GBPUSD 15m`\n"
-        "  - `/analyze EURUSD 1h`\n"
+        "  - `/analyze CHFJPY 15m`\n"
         "  - `/analyze BTCUSD 5m`\n\n"
         "📊 *WHAT YOU GET:*\n"
-        "1. **TradingView Dark Chart:** Clean high-resolution chart mapping.\n"
-        "2. **Dynamic Trendlines:** Connected fractal Pivot Highs & Lows.\n"
-        "3. **Position Templates:** Limit order setups anchored to key POI levels (Green TP / Red SL).\n"
-        "4. **AI Market Story:** Liquidity sweep & POI breakdown.\n"
+        "1. **TradingView Dark Chart:** Clean high-resolution candle mapping.\n"
+        "2. **POI Footprint Marks:** ▼ BSL (Buy-Side Liquidity) & ▲ SSL (Sell-Side Liquidity).\n"
+        "3. **Localized Position Box:** Clean setup shading restricted to recent candles.\n"
+        "4. **AI Market Story:** Structural analysis left behind by price.\n"
         "5. **Automated Pop-Up Alerts:** Instant signals delivered straight to your phone.\n\n"
-        "💡 *Get Started:* Try running `/analyze GBPUSD 15m` now!"
+        "💡 *Get Started:* Try running `/analyze CHFJPY 15m` now!"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -223,19 +242,19 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         recent_low = df['Low'].tail(30).min()
         
         prompt = f"""
-        You are an elite quantitative price-action trader.
+        You are an elite quantitative price-action trader analyzing historical market footprints.
         Analyze this chart data for {symbol}:
         Current Price: {last_price}
-        Recent High: {recent_high}
-        Recent Low: {recent_low}
+        Recent BSL Pool (High): {recent_high}
+        Recent SSL Pool (Low): {recent_low}
         
-        Provide analysis formatted exactly as:
+        Provide structural story analysis formatted as:
         🎯 AI ANALYSIS & MARKET STORY
         1. Overall Bias: (Bullish/Bearish)
-        2. Liquidity & Key POI: Highlight liquidity sweeps or high/low hunts.
-        3. Price Action Story: Rejection wicks, displacement, and volume context.
-        4. Trade Setup:
-           - Trigger Zone:
+        2. Structural Footprint & Key POI: Highlight liquidity sweeps or high/low hunts price left behind.
+        3. Price Action Story: Rejection wicks, displacement, and footprint context.
+        4. Future Trade Setup:
+           - Trigger Zone (POI):
            - Stop Loss:
            - Take Profit:
         """
@@ -243,7 +262,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Fetch robust analysis text
         analysis_text = fetch_ai_analysis(prompt)
 
-        # Determine directional bias to align chart position template correctly
+        # Determine directional bias
         is_long_bias = "bearish" not in analysis_text.lower()
 
         # Generate Chart Image matching bias direction
