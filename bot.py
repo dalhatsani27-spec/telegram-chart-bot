@@ -2,6 +2,7 @@ import os
 import io
 import time
 import threading
+import asyncio
 import requests
 import numpy as np
 import pandas as pd
@@ -326,8 +327,11 @@ async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 # 6. APPLICATION INITIALIZATION & THREADING
 # ==========================================
-def start_telegram_bot():
-    """Runs Telegram bot polling in a dedicated background thread."""
+def run_telegram_bot():
+    """Runs the Telegram bot polling loop cleanly inside its own AsyncIO loop."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     # Register Command Handlers
@@ -338,12 +342,17 @@ def start_telegram_bot():
     job_queue = application.job_queue
     job_queue.run_repeating(auto_market_scanner, interval=300, first=10)
 
-    # Start Polling
-    application.run_polling(drop_pending_updates=True)
+    # Initialize and start polling
+    loop.run_until_complete(application.initialize())
+    loop.run_until_complete(application.start())
+    loop.run_until_complete(application.updater.start_polling(drop_pending_updates=True))
+    
+    print("[Telegram Bot] Polling started successfully!")
+    loop.run_forever()
 
 if __name__ == "__main__":
-    # 1. Launch Telegram Bot Polling in Background Thread
-    telegram_thread = threading.Thread(target=start_telegram_bot, daemon=True)
+    # 1. Start Telegram Bot Polling in Background Thread
+    telegram_thread = threading.Thread(target=run_telegram_bot, daemon=True)
     telegram_thread.start()
 
     # 2. Run Flask Web App on Main Thread (Render binds to PORT 10000 immediately)
