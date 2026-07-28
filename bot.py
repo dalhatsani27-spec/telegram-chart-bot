@@ -20,7 +20,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "Multi-Timeframe Chart Analyzer Bot is Alive & Running 24/7!", 200
+    return "Multi-Timeframe POI Chart Analyzer Bot is Active 24/7!", 200
 
 # Environment variables
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
@@ -35,7 +35,7 @@ def keep_alive_ping():
         if RENDER_EXTERNAL_URL:
             try:
                 res = requests.get(RENDER_EXTERNAL_URL, timeout=10)
-                print(f"[Keep-Alive] Ping sent | Status: {res.status_code}")
+                print(f"[Keep-Alive] Ping status: {res.status_code}")
             except Exception as e:
                 print(f"[Keep-Alive] Ping failed: {e}")
 
@@ -50,7 +50,7 @@ ai_client = OpenAI(
 )
 
 def fetch_ai_analysis(prompt):
-    """Fallback chain ensuring reliable text analysis."""
+    """Fallback model chain for high-reliability text analysis."""
     vision_models = [
         "google/gemma-4-31b-it:free",
         "google/gemma-4-26b-a4b-it:free",
@@ -72,19 +72,40 @@ def fetch_ai_analysis(prompt):
             
     return (
         "🎯 *AI ANALYSIS & MARKET STORY*\n\n"
-        "1. **Overall Bias:** Multi-Timeframe Alignment Active.\n"
-        "2. **Macro Context:** Check 200 EMA (Yellow Line) for master trend direction.\n"
-        "3. **Liquidity Footprints:** Reference BSL (▼) and SSL (▲) zones before entry."
+        "1. **Overall Bias:** Multi-Timeframe Structural Alignment Active.\n"
+        "2. **Macro Context:** Reference the 200 EMA (Yellow Line) for major trend direction.\n"
+        "3. **POI Footprints:** Red shaded zone = BSL (Sell Interest), Green shaded zone = SSL (Buy Interest)."
     )
 
 # ==========================================
-# 3. MULTI-TIMEFRAME & INDICATOR LOGIC
+# 3. TICKER ALIAS & DATA ENGINE
 # ==========================================
+def normalize_ticker(symbol):
+    """Maps shorthand terms like GOLD, XAUUSD, OIL, BTC directly to correct yfinance tickers."""
+    symbol = symbol.strip().upper()
+    
+    alias_map = {
+        "GOLD": "XAUUSD=X",
+        "XAUUSD": "XAUUSD=X",
+        "SILVER": "XAGUSD=X",
+        "XAGUSD": "XAGUSD=X",
+        "OIL": "CL=F",
+        "USOIL": "CL=F",
+        "BTC": "BTC-USD",
+        "BTCUSD": "BTC-USD"
+    }
+    
+    if symbol in alias_map:
+        return alias_map[symbol]
+    
+    if len(symbol) == 6 and not symbol.endswith("=X"):
+        return f"{symbol}=X"
+        
+    return symbol
+
 def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
     """Fetches Daily macro context alongside execution timeframe data."""
-    ticker_str = f"{symbol}=X" if len(symbol) == 6 else symbol
-    if symbol == "BTCUSD": 
-        ticker_str = "BTC-USD"
+    ticker_str = normalize_ticker(symbol)
 
     # 1. Macro Trend Data (Daily)
     df_daily = yf.download(ticker_str, period="1y", interval="1d", progress=False)
@@ -103,7 +124,7 @@ def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
         
     df_entry['EMA200'] = df_entry['Close'].ewm(span=200, adjust=False).mean()
     
-    return df_daily, df_entry, macro_is_bearish, daily_ema
+    return df_daily, df_entry, macro_is_bearish, daily_ema, ticker_str
 
 def find_pivots(df, window=3):
     """Calculates local fractal Pivot Highs and Pivot Lows."""
@@ -114,19 +135,21 @@ def find_pivots(df, window=3):
         low_window = df['Low'].iloc[i-window:i+window+1]
         
         if df['High'].iloc[i] == high_window.max():
-            pivots_high.append((df.index[i], df['High'].iloc[i]))
+            pivots_high.append((df.index[i], df['High'].iloc[i], df['Low'].iloc[i]))
             
         if df['Low'].iloc[i] == low_window.min():
-            pivots_low.append((df.index[i], df['Low'].iloc[i]))
+            pivots_low.append((df.index[i], df['High'].iloc[i], df['Low'].iloc[i]))
             
     return pivots_high, pivots_low
 
+# ==========================================
+# 4. CHART GENERATOR WITH VISUAL POI ZONES
+# ==========================================
 def generate_chart_image(df, title_str, is_long=True):
-    """Renders TradingView dark chart with 200 EMA, POI marks, and localized position box."""
+    """Renders dark-themed chart with 200 EMA, POI Zones (Shaded Blocks), and Trade Box."""
     img_buf = io.BytesIO()
     chart_df = df.tail(80).copy()
     
-    # TradingView Dark Theme
     mc = mpf.make_marketcolors(
         up='#089981', down='#f23645',
         edge='inherit', wick='inherit', volume='in'
@@ -136,23 +159,24 @@ def generate_chart_image(df, title_str, is_long=True):
         y_on_right=True, facecolor='#131722', figcolor='#131722'
     )
     
-    # Pivot Marks
+    # Calculate Pivots & POI Zones
     p_highs, p_lows = find_pivots(chart_df, window=3)
+    
     bsl_points = [np.nan] * len(chart_df)
     ssl_points = [np.nan] * len(chart_df)
     price_range = chart_df['High'].max() - chart_df['Low'].min()
     
-    for idx_time, val in p_highs:
+    for idx_time, h_val, _ in p_highs:
         if idx_time in chart_df.index:
             loc = chart_df.index.get_loc(idx_time)
-            bsl_points[loc] = val + (price_range * 0.02)
+            bsl_points[loc] = h_val + (price_range * 0.02)
             
-    for idx_time, val in p_lows:
+    for idx_time, _, l_val in p_lows:
         if idx_time in chart_df.index:
             loc = chart_df.index.get_loc(idx_time)
-            ssl_points[loc] = val - (price_range * 0.02)
+            ssl_points[loc] = l_val - (price_range * 0.02)
 
-    # Overlays: Yellow 200 EMA + BSL (▼ Red) + SSL (▲ Green)
+    # Base Plot: Yellow 200 EMA + Pivot Markers
     addplots = [
         mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5)
     ]
@@ -162,9 +186,9 @@ def generate_chart_image(df, title_str, is_long=True):
         addplots.append(mpf.make_addplot(ssl_points, type='scatter', marker='^', markersize=40, color='#089981'))
 
     recent_bsl = p_highs[-1][1] if len(p_highs) > 0 else chart_df['High'].tail(30).max()
-    recent_ssl = p_lows[-1][1] if len(p_lows) > 0 else chart_df['Low'].tail(30).min()
+    recent_ssl = p_lows[-1][2] if len(p_lows) > 0 else chart_df['Low'].tail(30).min()
     
-    # Align position direction strictly with the 200 EMA filter
+    # Align position setup strictly with 200 EMA filter
     if is_long:
         entry = recent_ssl
         risk_dist = max((recent_bsl - recent_ssl) * 0.12, price_range * 0.04)
@@ -176,7 +200,7 @@ def generate_chart_image(df, title_str, is_long=True):
         sl = entry + risk_dist
         tp = recent_ssl
 
-    # Structural Lines
+    # Setup Horizontal Lines
     hlines_dict = dict(
         hlines=[recent_bsl, recent_ssl, entry, sl, tp],
         colors=['#f23645', '#089981', '#2962ff', '#e53935', '#43a047'],
@@ -184,7 +208,7 @@ def generate_chart_image(df, title_str, is_long=True):
         linewidths=[1.0, 1.0, 1.2, 1.0, 1.0]
     )
 
-    # Restrict shading strictly to rightmost 15 candles
+    # Build shaded regions for Position Box (Rightmost 15 candles)
     fill_tp_data = [np.nan] * len(chart_df)
     fill_sl_data = [np.nan] * len(chart_df)
     box_width = min(15, len(chart_df))
@@ -205,9 +229,25 @@ def generate_chart_image(df, title_str, is_long=True):
         returnfig=True
     )
     
+    # Position SL Zone Shading
     axlist[0].fill_between(
         range(len(chart_df)), fill_sl_data, entry,
         where=~np.isnan(fill_sl_data), color='#f23645', alpha=0.18
+    )
+
+    # MAP VISUAL POI ZONES DIRECTLY ON CHART (Shaded Bands)
+    poi_band_height = price_range * 0.025
+    
+    # BSL POI Zone (Red Band around recent pivot high)
+    axlist[0].axhspan(
+        recent_bsl - poi_band_height, recent_bsl + poi_band_height,
+        color='#f23645', alpha=0.20, label='BSL POI Zone'
+    )
+    
+    # SSL POI Zone (Green Band around recent pivot low)
+    axlist[0].axhspan(
+        recent_ssl - poi_band_height, recent_ssl + poi_band_height,
+        color='#089981', alpha=0.20, label='SSL POI Zone'
     )
 
     axlist[0].set_title(title_str, color='#d1d4dc', fontsize=9, fontweight='bold')
@@ -215,19 +255,19 @@ def generate_chart_image(df, title_str, is_long=True):
     return img_buf
 
 # ==========================================
-# 4. TELEGRAM BOT HANDLERS
+# 5. TELEGRAM BOT HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "🤖 *MULTI-TIMEFRAME CHART ANALYZER*\n\n"
-        "I am hard-locked to enforce 200 EMA macro context across Daily to lower timeframes to prevent counter-trend traps.\n\n"
+        "🤖 *MULTI-TIMEFRAME POI CHART ANALYZER*\n\n"
+        "I map Points of Interest (POIs) directly on charts and enforce 200 EMA macro filters to prevent bull/bear traps.\n\n"
         "📌 *COMMANDS:*\n"
         "• `/analyze [SYMBOL] [TIMEFRAME]`\n"
-        "  _Examples:_ `/analyze GBPUSD 15m`, `/analyze CHFJPY 15m`\n\n"
-        "📊 *KEY FEATURES:*\n"
-        "1. **Gold Line:** 200 EMA Macro Trend Filter.\n"
-        "2. **POI Footprints:** ▼ BSL (Buy-Side Liquidity) & ▲ SSL (Sell-Side Liquidity).\n"
-        "3. **Localized Position Box:** Clean setup shading restricted to recent candles."
+        "  _Examples:_ `/analyze GOLD 15m`, `/analyze GBPUSD 15m`, `/analyze BTC 5m`\n\n"
+        "📊 *ON-CHART MAP KEY:*\n"
+        "1. 🟡 **Gold Line:** 200 EMA Trend Filter.\n"
+        "2. 🔴 **Red Zone (BSL POI):** Buy-Side Liquidity / Short Entry Zone.\n"
+        "3. 🟢 **Green Zone (SSL POI):** Sell-Side Liquidity / Long Entry Zone."
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -235,16 +275,16 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     args = context.args
     
-    symbol = args[0].upper() if len(args) > 0 else "GBPUSD"
+    raw_symbol = args[0].upper() if len(args) > 0 else "GOLD"
     tf = args[1] if len(args) > 1 else "15m"
     
-    status_msg = await update.message.reply_text(f"📊 Running Top-Down Multi-Timeframe Analysis for {symbol}...")
+    status_msg = await update.message.reply_text(f"📊 Mapping POI Zones & 200 EMA for {raw_symbol}...")
     
     try:
-        df_daily, df_entry, macro_is_bearish, daily_ema = fetch_multi_timeframe_data(symbol, tf)
+        df_daily, df_entry, macro_is_bearish, daily_ema, ticker_str = fetch_multi_timeframe_data(raw_symbol, tf)
         
         if df_entry.empty:
-            await status_msg.edit_text(f"❌ Error: Unable to fetch market data for {symbol}.")
+            await status_msg.edit_text(f"❌ Error: Unable to fetch market data for {raw_symbol} ({ticker_str}).")
             return
 
         last_price = df_entry['Close'].iloc[-1]
@@ -254,41 +294,40 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         local_is_bearish = last_price < local_ema
         
-        # Determine strict bias: Must respect 200 EMA
         macro_bias = "BEARISH" if macro_is_bearish else "BULLISH"
         local_bias = "BEARISH" if local_is_bearish else "BULLISH"
         
         prompt = f"""
         You are a quantitative price-action trader.
         CRITICAL RULE:
-        - Daily 200 EMA Macro Bias: {macro_bias} (Daily Close: {df_daily['Close'].iloc[-1]:.5f}, Daily EMA: {daily_ema:.5f})
-        - {tf.upper()} 200 EMA Local Bias: {local_bias} (Current Price: {last_price:.5f}, Local EMA: {local_ema:.5f})
+        - Symbol: {raw_symbol} ({ticker_str})
+        - Daily 200 EMA Macro Bias: {macro_bias} (Daily Close: {df_daily['Close'].iloc[-1]:.2f}, Daily EMA: {daily_ema:.2f})
+        - {tf.upper()} 200 EMA Local Bias: {local_bias} (Current Price: {last_price:.2f}, Local EMA: {local_ema:.2f})
         
-        If price is BELOW the 200 EMA, YOU ARE STRICTLY FORBIDDEN from recommending Buy setups. Any upward push is a RETRACEMENT / BULL TRAP into Buy-Side Liquidity (BSL).
+        If price is BELOW the 200 EMA, DO NOT suggest Buy setups. Any upward push into the Red BSL POI Zone is a RETRACEMENT / BULL TRAP.
         
-        Analyze {symbol} ({tf}):
-        - Recent BSL Pool (High): {recent_high:.5f}
-        - Recent SSL Pool (Low): {recent_low:.5f}
+        Analyze {raw_symbol} ({tf}):
+        - Red BSL POI Zone (High): {recent_high:.2f}
+        - Green SSL POI Zone (Low): {recent_low:.2f}
         
         Format output:
         🎯 AI ANALYSIS & MARKET STORY
-        1. Macro Bias: {macro_bias} (Daily 200 EMA Alignment)
+        1. Macro Bias: {macro_bias} (Daily 200 EMA)
         2. Execution Bias ({tf}): {local_bias}
-        3. Structural Story: Explain BSL/SSL sweeps relative to the 200 EMA.
+        3. POI Interaction: Explain how price is reacting to the mapped Red BSL or Green SSL POI bands.
         4. Realignment Setup: Detail expected entry alignment.
         """
 
         analysis_text = fetch_ai_analysis(prompt)
 
-        # Generate chart based on local 200 EMA trend
         is_long = not local_is_bearish
-        title_str = f"{symbol} ({tf.upper()}) | Trend: {local_bias} (Gold Line = 200 EMA)"
+        title_str = f"{raw_symbol} ({tf.upper()}) | Trend: {local_bias} | Gold Line = 200 EMA"
         chart_img = generate_chart_image(df_entry, title_str, is_long=is_long)
         
         await context.bot.send_photo(
             chat_id=chat_id,
             photo=chart_img,
-            caption=f"🎯 *LIVE CHART: {symbol} ({tf.upper()})*",
+            caption=f"🎯 *LIVE POI MAP: {raw_symbol} ({tf.upper()})*",
             parse_mode="Markdown"
         )
         
@@ -299,17 +338,17 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"❌ Error generating analysis: {str(e)}")
 
 # ==========================================
-# 5. REAL-TIME SIGNAL SCANNER
+# 6. REAL-TIME SIGNAL SCANNER
 # ==========================================
 async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
     """Periodically scans liquidity sweeps aligned with the 200 EMA."""
     if not MY_CHAT_ID:
         return
 
-    symbols = ["GBPUSD", "EURUSD", "BTCUSD"]
+    symbols = ["GOLD", "GBPUSD", "EURUSD", "BTC"]
     for symbol in symbols:
         try:
-            _, df_entry, local_is_bearish, _ = fetch_multi_timeframe_data(symbol, "5m")
+            _, df_entry, local_is_bearish, _, ticker_str = fetch_multi_timeframe_data(symbol, "5m")
             if df_entry.empty:
                 continue
 
@@ -317,20 +356,19 @@ async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
             recent_high = df_entry['High'].tail(20).max()
             recent_low = df_entry['Low'].tail(20).min()
 
-            # Trigger only if sweep aligns with 200 EMA direction
-            if local_is_bearish and abs(last_close - recent_high) < 0.0002:
+            if local_is_bearish and abs(last_close - recent_high) < (recent_high * 0.001):
                 alert_text = (
                     f"🚨 *AUTOMATED BEARISH REALIGNMENT ALERT: {symbol}*\n\n"
-                    f"Price ({last_close:.5f}) swept BSL High ({recent_high:.5f}) below the 200 EMA.\n"
-                    f"⚡ *Action:* Check for potential short entry."
+                    f"Price ({last_close:.2f}) tapped into the Red BSL POI Zone ({recent_high:.2f}) below the 200 EMA.\n"
+                    f"⚡ *Action:* Look for short realignment entries."
                 )
                 await context.bot.send_message(chat_id=MY_CHAT_ID, text=alert_text, parse_mode="Markdown")
                 
-            elif (not local_is_bearish) and abs(last_close - recent_low) < 0.0002:
+            elif (not local_is_bearish) and abs(last_close - recent_low) < (recent_low * 0.001):
                 alert_text = (
                     f"🚨 *AUTOMATED BULLISH REALIGNMENT ALERT: {symbol}*\n\n"
-                    f"Price ({last_close:.5f}) swept SSL Low ({recent_low:.5f}) above the 200 EMA.\n"
-                    f"⚡ *Action:* Check for potential long entry."
+                    f"Price ({last_close:.2f}) tapped into the Green SSL POI Zone ({recent_low:.2f}) above the 200 EMA.\n"
+                    f"⚡ *Action:* Look for long realignment entries."
                 )
                 await context.bot.send_message(chat_id=MY_CHAT_ID, text=alert_text, parse_mode="Markdown")
 
@@ -338,7 +376,7 @@ async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
             print(f"Scanner error for {symbol}: {e}")
 
 # ==========================================
-# 6. APPLICATION INITIALIZATION & THREADING
+# 7. APPLICATION INITIALIZATION & THREADING
 # ==========================================
 def run_telegram_bot():
     """Runs Telegram bot polling cleanly inside an independent AsyncIO loop."""
@@ -350,7 +388,6 @@ def run_telegram_bot():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
 
-    # Run scanner every 5 minutes
     job_queue = application.job_queue
     job_queue.run_repeating(auto_market_scanner, interval=300, first=10)
 
