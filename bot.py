@@ -10,7 +10,7 @@ from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- 1. Flask Health Check Server for Render Free Tier ---
+# --- 1. Flask Health Check Server ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -23,7 +23,7 @@ def run_flask():
 
 threading.Thread(target=run_flask, daemon=True).start()
 
-# --- 2. Gemini API Configuration ---
+# --- 2. Gemini Configuration ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
@@ -31,38 +31,36 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 def resize_image_for_api(image: Image.Image, max_dim: int = 1024) -> Image.Image:
-    """Resizes high-resolution screenshots to reduce token usage and speed up API response."""
+    """Resizes high-res screenshots to prevent token limit errors."""
     img = image.copy()
     img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
     return img
 
 async def generate_content_async(prompt: str, chart_img: Image.Image):
-    """Non-blocking call targeting only active Gemini models on AI Studio."""
+    """Direct non-blocking call using standard Gemini 2.5 Flash."""
     if not GEMINI_API_KEY:
-        raise Exception("GEMINI_API_KEY environment variable is missing in Render settings!")
+        raise Exception("GEMINI_API_KEY environment variable is missing on Render!")
 
     optimized_img = resize_image_for_api(chart_img)
     
-    # Active Gemini 2.5 production models visible on your AI Studio Dashboard
-    models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+    # Exclusively using standard Gemini 2.5 Flash
+    models_to_try = ['gemini-2.5-flash']
     
     last_error = None
     for model_name in models_to_try:
         try:
             model = genai.GenerativeModel(model_name)
-            # Offload synchronous execution to asyncio threadpool
             response = await asyncio.to_thread(model.generate_content, [prompt, optimized_img])
             if response and response.text:
                 return response.text
         except Exception as e:
-            print(f"Model {model_name} execution error: {e}")
+            print(f"Model {model_name} failed: {e}")
             last_error = e
             continue
 
     raise Exception(f"Gemini API Error: {str(last_error)}")
 
 def format_ticker(symbol: str) -> str:
-    """Formats user symbol inputs to standard Yahoo Finance tickers."""
     sym = symbol.upper().replace("/", "").strip()
     forex_pairs = [
         "GBPUSD", "EURUSD", "AUDUSD", "USDCAD", 
@@ -110,7 +108,7 @@ def generate_chart_image(df, title_str):
 
 active_alerts = {}
 
-# --- 3. Telegram Handlers & Commands ---
+# --- 3. Handlers & Commands ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome to Market Vision Bot!*\n\n"
