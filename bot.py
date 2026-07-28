@@ -6,12 +6,11 @@ from flask import Flask
 import yfinance as yf
 import mplfinance as mpf
 import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted, GoogleAPIError
 from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- 1. Flask Health Check Server for Render Free Tier ---
+# --- 1. Flask Health Check Server ---
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -24,7 +23,7 @@ def run_flask():
 
 threading.Thread(target=run_flask, daemon=True).start()
 
-# --- 2. Gemini Configuration & Non-Blocking Content Generator ---
+# --- 2. Gemini Configuration ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
@@ -32,44 +31,36 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 def resize_image_for_api(image: Image.Image, max_dim: int = 1024) -> Image.Image:
-    """Resizes images to drastically reduce token usage on Free Tier."""
+    """Resizes high-res screenshots to prevent token limit errors."""
     img = image.copy()
     img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
     return img
 
-async def generate_content_async(prompt: str, chart_img: Image.Image, retries: int = 2):
-    """Non-blocking generate content targeting supported vision models on Free Tier."""
+async def generate_content_async(prompt: str, chart_img: Image.Image):
+    """Direct non-blocking call using verified standard Gemini models."""
+    if not GEMINI_API_KEY:
+        raise Exception("GEMINI_API_KEY environment variable is missing on Render!")
+
     optimized_img = resize_image_for_api(chart_img)
     
-    # Supported production models for vision/multimodal analysis
-    models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+    # Official free-tier vision model names
+    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro']
     
-    last_err = None
+    last_error = None
     for model_name in models_to_try:
         try:
             model = genai.GenerativeModel(model_name)
-            for attempt in range(retries):
-                try:
-                    # Offload execution to thread so asyncio loop never blocks
-                    response = await asyncio.to_thread(model.generate_content, [prompt, optimized_img])
-                    if response and response.text:
-                        return response
-                except ResourceExhausted:
-                    print(f"Rate limit on {model_name} (Attempt {attempt+1}). Waiting 5s...")
-                    await asyncio.sleep(5)
-                except GoogleAPIError as gerr:
-                    print(f"API Error on {model_name}: {gerr}")
-                    last_err = gerr
-                    break
-        except Exception as err:
-            print(f"Model initialization error on {model_name}: {err}")
-            last_err = err
+            response = await asyncio.to_thread(model.generate_content, [prompt, optimized_img])
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            print(f"Error trying model {model_name}: {e}")
+            last_error = e
             continue
 
-    raise Exception("Gemini Free Tier is currently busy or rate-limited. Please wait 1 minute before trying again.")
+    raise Exception(f"Gemini API Error: {str(last_error)}")
 
 def format_ticker(symbol: str) -> str:
-    """Formats user symbol inputs to standard Yahoo Finance tickers."""
     sym = symbol.upper().replace("/", "").strip()
     forex_pairs = [
         "GBPUSD", "EURUSD", "AUDUSD", "USDCAD", 
@@ -99,13 +90,11 @@ def format_ticker(symbol: str) -> str:
     return sym
 
 def fetch_market_data(ticker_symbol: str, period: str, interval: str):
-    """Fetches market data using Ticker.history to prevent cloud IP blocks on Render."""
     ticker = yf.Ticker(ticker_symbol)
     df = ticker.history(period=period, interval=interval)
     return df
 
 def generate_chart_image(df, title_str):
-    """Synchronous function to generate and render mplfinance chart buffer."""
     img_buf = io.BytesIO()
     mc = mpf.make_marketcolors(up='#00b050', down='#ff0000', edge='inherit', wick='inherit', volume='in')
     s  = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=True)
@@ -135,10 +124,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            "⚠️ *Please specify a symbol.*\n\nExamples:\n• `/analyze GBPUSD`\n• `/analyze BTCUSD 5m`",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("⚠️ Usage: `/analyze GBPUSD`", parse_mode="Markdown")
         return
 
     user_symbol = context.args[0]
@@ -158,24 +144,16 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        # Fetch market data in a background thread
         df = await asyncio.to_thread(fetch_market_data, ticker_sym, period, interval)
         
         if df is None or df.empty:
-            await update.message.reply_text(
-                f"❌ Could not retrieve market data for `{user_symbol}`. Market may be closed or symbol unavailable.", 
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text(f"❌ Could not retrieve market data for `{user_symbol}`.", parse_mode="Markdown")
             return
 
         if hasattr(df.columns, "levels"):
             df.columns = df.columns.droplevel(1)
 
-        # Generate chart in background thread
-        img_buf = await asyncio.to_thread(
-            generate_chart_image, df, f"{user_symbol.upper()} ({tf_input.upper()} Chart)"
-        )
-        
+        img_buf = await asyncio.to_thread(generate_chart_image, df, f"{user_symbol.upper()} ({tf_input.upper()} Chart)")
         chart_img = Image.open(img_buf)
 
         prompt = f"""
@@ -187,24 +165,22 @@ async def analyze_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Keep the output crisp, clear, and structured for a real-time trading alert.
         """
         
-        # 60-second execution timeout
-        response = await asyncio.wait_for(generate_content_async(prompt, chart_img), timeout=60.0)
+        analysis_text = await asyncio.wait_for(generate_content_async(prompt, chart_img), timeout=45.0)
 
         img_buf.seek(0)
         await update.message.reply_photo(
             photo=img_buf,
-            caption=f"🎯 *LIVE AI ANALYSIS: {user_symbol.upper()} ({tf_input.upper()})*\n\n{response.text}",
+            caption=f"🎯 *LIVE AI ANALYSIS: {user_symbol.upper()} ({tf_input.upper()})*\n\n{analysis_text}",
             parse_mode="Markdown"
         )
 
     except asyncio.TimeoutError:
-        await update.message.reply_text("⏱️ *Request timed out.* Gemini API took longer than 60s to respond. Please try again.", parse_mode="Markdown")
+        await update.message.reply_text("⏱️ *Request timed out.* Gemini API took longer than 45s to respond. Please try again.", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error generating analysis: {str(e)}")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles direct uploaded screenshots with thread offloading."""
-    await update.message.reply_text("📸 *Chart screenshot received! Optimizing & analyzing structure...*", parse_mode="Markdown")
+    await update.message.reply_text("📸 *Chart screenshot received! Analyzing structure...*", parse_mode="Markdown")
     
     try:
         photo_file = await update.message.photo[-1].get_file()
@@ -219,91 +195,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Keep the output crisp, clear, and structured for a real-time trading alert.
         """
         
-        response = await asyncio.wait_for(generate_content_async(prompt, chart_img), timeout=60.0)
-        await update.message.reply_text(f"🎯 *AI CHART ANALYSIS*\n\n{response.text}", parse_mode="Markdown")
+        analysis_text = await asyncio.wait_for(generate_content_async(prompt, chart_img), timeout=45.0)
+        await update.message.reply_text(f"🎯 *AI CHART ANALYSIS*\n\n{analysis_text}", parse_mode="Markdown")
         
     except asyncio.TimeoutError:
-        await update.message.reply_text("⏱️ *Request timed out.* Gemini API took too long. Please re-send the screenshot.", parse_mode="Markdown")
+        await update.message.reply_text("⏱️ *Request timed out.* Gemini API took too long.", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error analyzing image: {str(e)}")
-
-async def set_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        await update.message.reply_text("⚠️ Usage: `/alert <SYMBOL> <TARGET_PRICE>`", parse_mode="Markdown")
-        return
-
-    symbol = context.args[0].upper()
-    try:
-        target_price = float(context.args[1])
-    except ValueError:
-        await update.message.reply_text("❌ Invalid price number.")
-        return
-
-    ticker_sym = format_ticker(symbol)
-    df = await asyncio.to_thread(fetch_market_data, ticker_sym, "1d", "1m")
-    
-    if df is None or df.empty:
-        await update.message.reply_text(f"❌ Could not fetch live price for `{symbol}`.", parse_mode="Markdown")
-        return
-
-    if hasattr(df.columns, "levels"):
-        df.columns = df.columns.droplevel(1)
-
-    current_price = float(df['Close'].iloc[-1])
-    direction = "above" if target_price > current_price else "below"
-
-    chat_id = update.effective_chat.id
-    if chat_id not in active_alerts:
-        active_alerts[chat_id] = []
-
-    active_alerts[chat_id].append({
-        'symbol': symbol, 'ticker': ticker_sym, 'target': target_price, 'direction': direction
-    })
-
-    await update.message.reply_text(
-        f"🔔 *Alert set for {symbol}!*\n• Current: `{current_price:.5f}`\n• Target: `{target_price:.5f}`\n• Condition: Price `{direction}` target.",
-        parse_mode="Markdown"
-    )
-
-async def list_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    alerts = active_alerts.get(chat_id, [])
-    if not alerts:
-        await update.message.reply_text("ℹ️ No active price alerts set.")
-        return
-
-    msg = "🔔 *Your Active Alerts:*\n"
-    for i, a in enumerate(alerts, 1):
-        msg += f"{i}. `{a['symbol']}` Target: `{a['target']}` ({a['direction']})\n"
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-async def check_alerts_job(context: ContextTypes.DEFAULT_TYPE):
-    for chat_id, alerts in list(active_alerts.items()):
-        for alert in list(alerts):
-            try:
-                df = await asyncio.to_thread(fetch_market_data, alert['ticker'], "1d", "1m")
-                if df is None or df.empty:
-                    continue
-                if hasattr(df.columns, "levels"):
-                    df.columns = df.columns.droplevel(1)
-
-                current_price = float(df['Close'].iloc[-1])
-                triggered = False
-
-                if alert['direction'] == "above" and current_price >= alert['target']:
-                    triggered = True
-                elif alert['direction'] == "below" and current_price <= alert['target']:
-                    triggered = True
-
-                if triggered:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"🚨 *PRICE ALERT TRIGGERED!*\n\nSymbol: `{alert['symbol']}`\nTarget Level: `{alert['target']}`\nCurrent Price: `{current_price:.5f}`",
-                        parse_mode="Markdown"
-                    )
-                    alerts.remove(alert)
-            except Exception as e:
-                print(f"Alert check error: {e}")
 
 # --- 4. Main App Execution ---
 if __name__ == '__main__':
@@ -311,15 +209,9 @@ if __name__ == '__main__':
         print("Error: TELEGRAM_BOT_TOKEN environment variable missing!")
     else:
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-        
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("analyze", analyze_pair))
-        app.add_handler(CommandHandler("alert", set_alert))
-        app.add_handler(CommandHandler("listalerts", list_alerts))
         app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-        
-        if app.job_queue:
-            app.job_queue.run_repeating(check_alerts_job, interval=60, first=10)
         
         print("Telegram Vision Bot active...")
         app.run_polling()
