@@ -20,22 +20,22 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "Bot Service is Alive & Running 24/7!", 200
+    return "Multi-Timeframe Chart Analyzer Bot is Alive & Running 24/7!", 200
 
-# Fetch environment variables
+# Environment variables
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-MY_CHAT_ID = os.environ.get("MY_CHAT_ID")  # Personal Telegram Chat ID
+MY_CHAT_ID = os.environ.get("MY_CHAT_ID")
 
 def keep_alive_ping():
-    """Pings Flask endpoint every 10 minutes to prevent Render from sleeping."""
+    """Pings Flask endpoint every 10 minutes to prevent server sleeping."""
     while True:
         time.sleep(600)
         if RENDER_EXTERNAL_URL:
             try:
                 res = requests.get(RENDER_EXTERNAL_URL, timeout=10)
-                print(f"[Keep-Alive] Ping sent to {RENDER_EXTERNAL_URL} | Status: {res.status_code}")
+                print(f"[Keep-Alive] Ping sent | Status: {res.status_code}")
             except Exception as e:
                 print(f"[Keep-Alive] Ping failed: {e}")
 
@@ -50,7 +50,7 @@ ai_client = OpenAI(
 )
 
 def fetch_ai_analysis(prompt):
-    """Fallback chain ensuring reliable text analysis without guardrail outputs."""
+    """Fallback chain ensuring reliable text analysis."""
     vision_models = [
         "google/gemma-4-31b-it:free",
         "google/gemma-4-26b-a4b-it:free",
@@ -72,14 +72,39 @@ def fetch_ai_analysis(prompt):
             
     return (
         "🎯 *AI ANALYSIS & MARKET STORY*\n\n"
-        "1. **Overall Bias:** Dynamic Market Structure\n"
-        "2. **Liquidity & Key POI:** Check chart markers for BSL (▼) and SSL (▲) footprints.\n"
-        "3. **Trade Setup:** Refer to blue trigger line and green/red localized position boxes on the right."
+        "1. **Overall Bias:** Multi-Timeframe Alignment Active.\n"
+        "2. **Macro Context:** Check 200 EMA (Yellow Line) for master trend direction.\n"
+        "3. **Liquidity Footprints:** Reference BSL (▼) and SSL (▲) zones before entry."
     )
 
 # ==========================================
-# 3. CHART MAPPING: POI MARKS & LOCALIZED SETUPS
+# 3. MULTI-TIMEFRAME & INDICATOR LOGIC
 # ==========================================
+def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
+    """Fetches Daily macro context alongside execution timeframe data."""
+    ticker_str = f"{symbol}=X" if len(symbol) == 6 else symbol
+    if symbol == "BTCUSD": 
+        ticker_str = "BTC-USD"
+
+    # 1. Macro Trend Data (Daily)
+    df_daily = yf.download(ticker_str, period="1y", interval="1d", progress=False)
+    if isinstance(df_daily.columns, pd.MultiIndex):
+        df_daily.columns = df_daily.columns.get_level_values(0)
+        
+    df_daily['EMA200'] = df_daily['Close'].ewm(span=200, adjust=False).mean()
+    daily_close = df_daily['Close'].iloc[-1]
+    daily_ema = df_daily['EMA200'].iloc[-1]
+    macro_is_bearish = daily_close < daily_ema
+
+    # 2. Local Execution Data (e.g. 15m)
+    df_entry = yf.download(ticker_str, period="10d", interval=entry_tf, progress=False)
+    if isinstance(df_entry.columns, pd.MultiIndex):
+        df_entry.columns = df_entry.columns.get_level_values(0)
+        
+    df_entry['EMA200'] = df_entry['Close'].ewm(span=200, adjust=False).mean()
+    
+    return df_daily, df_entry, macro_is_bearish, daily_ema
+
 def find_pivots(df, window=3):
     """Calculates local fractal Pivot Highs and Pivot Lows."""
     pivots_high = []
@@ -96,12 +121,12 @@ def find_pivots(df, window=3):
             
     return pivots_high, pivots_low
 
-def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=True):
-    """Renders TradingView-style dark chart with explicit POI marks and localized position shading."""
+def generate_chart_image(df, title_str, is_long=True):
+    """Renders TradingView dark chart with 200 EMA, POI marks, and localized position box."""
     img_buf = io.BytesIO()
     chart_df = df.tail(80).copy()
     
-    # TradingView Dark Color Scheme
+    # TradingView Dark Theme
     mc = mpf.make_marketcolors(
         up='#089981', down='#f23645',
         edge='inherit', wick='inherit', volume='in'
@@ -111,9 +136,8 @@ def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=Tr
         y_on_right=True, facecolor='#131722', figcolor='#131722'
     )
     
-    # Dynamic Pivot & POI Footprint Markers
+    # Pivot Marks
     p_highs, p_lows = find_pivots(chart_df, window=3)
-    
     bsl_points = [np.nan] * len(chart_df)
     ssl_points = [np.nan] * len(chart_df)
     price_range = chart_df['High'].max() - chart_df['Low'].min()
@@ -121,36 +145,38 @@ def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=Tr
     for idx_time, val in p_highs:
         if idx_time in chart_df.index:
             loc = chart_df.index.get_loc(idx_time)
-            bsl_points[loc] = val + (price_range * 0.02)  # Mark BSL slightly above high
+            bsl_points[loc] = val + (price_range * 0.02)
             
     for idx_time, val in p_lows:
         if idx_time in chart_df.index:
             loc = chart_df.index.get_loc(idx_time)
-            ssl_points[loc] = val - (price_range * 0.02)  # Mark SSL slightly below low
+            ssl_points[loc] = val - (price_range * 0.02)
 
-    addplots = []
+    # Overlays: Yellow 200 EMA + BSL (▼ Red) + SSL (▲ Green)
+    addplots = [
+        mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5)
+    ]
     if any(~np.isnan(bsl_points)):
         addplots.append(mpf.make_addplot(bsl_points, type='scatter', marker='v', markersize=40, color='#f23645'))
     if any(~np.isnan(ssl_points)):
         addplots.append(mpf.make_addplot(ssl_points, type='scatter', marker='^', markersize=40, color='#089981'))
 
-    # Establish Key POI Levels
     recent_bsl = p_highs[-1][1] if len(p_highs) > 0 else chart_df['High'].tail(30).max()
     recent_ssl = p_lows[-1][1] if len(p_lows) > 0 else chart_df['Low'].tail(30).min()
     
-    if entry is None:
-        if is_long:
-            entry = recent_ssl  # Expect entry at SSL sweep level
-            risk_dist = max((recent_bsl - recent_ssl) * 0.12, price_range * 0.04)
-            sl = entry - risk_dist
-            tp = recent_bsl
-        else:
-            entry = recent_bsl  # Expect entry at BSL sweep level
-            risk_dist = max((recent_bsl - recent_ssl) * 0.12, price_range * 0.04)
-            sl = entry + risk_dist
-            tp = recent_ssl
+    # Align position direction strictly with the 200 EMA filter
+    if is_long:
+        entry = recent_ssl
+        risk_dist = max((recent_bsl - recent_ssl) * 0.12, price_range * 0.04)
+        sl = entry - risk_dist
+        tp = recent_bsl
+    else:
+        entry = recent_bsl
+        risk_dist = max((recent_bsl - recent_ssl) * 0.12, price_range * 0.04)
+        sl = entry + risk_dist
+        tp = recent_ssl
 
-    # Horizontal Lines: Dotted BSL/SSL POIs & Distinct Entry/SL/TP Levels
+    # Structural Lines
     hlines_dict = dict(
         hlines=[recent_bsl, recent_ssl, entry, sl, tp],
         colors=['#f23645', '#089981', '#2962ff', '#e53935', '#43a047'],
@@ -158,35 +184,33 @@ def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=Tr
         linewidths=[1.0, 1.0, 1.2, 1.0, 1.0]
     )
 
-    # Restrict Position Shading ONLY to the last 15 candles on the right
+    # Restrict shading strictly to rightmost 15 candles
     fill_tp_data = [np.nan] * len(chart_df)
     fill_sl_data = [np.nan] * len(chart_df)
-    
     box_width = min(15, len(chart_df))
+    
     for i in range(len(chart_df) - box_width, len(chart_df)):
         fill_tp_data[i] = tp
         fill_sl_data[i] = sl
 
-    # Render Base Chart
     fig, axlist = mpf.plot(
         chart_df,
         type='candle',
         style=style,
         volume=False,
         hlines=hlines_dict,
-        addplot=addplots if addplots else None,
+        addplot=addplots,
         fill_between=dict(y1=fill_tp_data, y2=entry, color='#089981', alpha=0.18),
         savefig=dict(fname=img_buf, dpi=130),
         returnfig=True
     )
     
-    # Overlay localized Stop Loss shading restricted to recent candles
     axlist[0].fill_between(
         range(len(chart_df)), fill_sl_data, entry,
         where=~np.isnan(fill_sl_data), color='#f23645', alpha=0.18
     )
 
-    axlist[0].set_title(f"{title_str}\n[▼ BSL Liquidity | ▲ SSL Liquidity]", color='#d1d4dc', fontsize=10, fontweight='bold')
+    axlist[0].set_title(title_str, color='#d1d4dc', fontsize=9, fontweight='bold')
     img_buf.seek(0)
     return img_buf
 
@@ -194,23 +218,16 @@ def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=Tr
 # 4. TELEGRAM BOT HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a formatted welcome message with full instructions."""
     welcome_text = (
-        "🤖 *WELCOME TO YOUR CHART & SIGNAL ANALYZER*\n\n"
-        "I am configured to map institutional price action, liquidity footprints, and key POI zones directly onto chart setups.\n\n"
-        "📌 *HOW TO USE ME:*\n"
+        "🤖 *MULTI-TIMEFRAME CHART ANALYZER*\n\n"
+        "I am hard-locked to enforce 200 EMA macro context across Daily to lower timeframes to prevent counter-trend traps.\n\n"
+        "📌 *COMMANDS:*\n"
         "• `/analyze [SYMBOL] [TIMEFRAME]`\n"
-        "  _Examples:_\n"
-        "  - `/analyze GBPUSD 15m`\n"
-        "  - `/analyze CHFJPY 15m`\n"
-        "  - `/analyze BTCUSD 5m`\n\n"
-        "📊 *WHAT YOU GET:*\n"
-        "1. **TradingView Dark Chart:** Clean high-resolution candle mapping.\n"
-        "2. **POI Footprint Marks:** ▼ BSL (Buy-Side Liquidity) & ▲ SSL (Sell-Side Liquidity).\n"
-        "3. **Localized Position Box:** Clean setup shading restricted to recent candles.\n"
-        "4. **AI Market Story:** Structural analysis left behind by price.\n"
-        "5. **Automated Pop-Up Alerts:** Instant signals delivered straight to your phone.\n\n"
-        "💡 *Get Started:* Try running `/analyze CHFJPY 15m` now!"
+        "  _Examples:_ `/analyze GBPUSD 15m`, `/analyze CHFJPY 15m`\n\n"
+        "📊 *KEY FEATURES:*\n"
+        "1. **Gold Line:** 200 EMA Macro Trend Filter.\n"
+        "2. **POI Footprints:** ▼ BSL (Buy-Side Liquidity) & ▲ SSL (Sell-Side Liquidity).\n"
+        "3. **Localized Position Box:** Clean setup shading restricted to recent candles."
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -221,58 +238,53 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = args[0].upper() if len(args) > 0 else "GBPUSD"
     tf = args[1] if len(args) > 1 else "15m"
     
-    # Map Symbol for Yahoo Finance
-    ticker_str = f"{symbol}=X" if len(symbol) == 6 else symbol
-    if symbol == "BTCUSD": ticker_str = "BTC-USD"
-    
-    status_msg = await update.message.reply_text(f"📊 Fetching market data & analyzing {tf} chart for {symbol}...")
+    status_msg = await update.message.reply_text(f"📊 Running Top-Down Multi-Timeframe Analysis for {symbol}...")
     
     try:
-        df = yf.download(ticker_str, period="5d", interval=tf)
-        if df.empty:
+        df_daily, df_entry, macro_is_bearish, daily_ema = fetch_multi_timeframe_data(symbol, tf)
+        
+        if df_entry.empty:
             await status_msg.edit_text(f"❌ Error: Unable to fetch market data for {symbol}.")
             return
-            
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
 
-        # Structure Prompt
-        last_price = df['Close'].iloc[-1]
-        recent_high = df['High'].tail(30).max()
-        recent_low = df['Low'].tail(30).min()
+        last_price = df_entry['Close'].iloc[-1]
+        local_ema = df_entry['EMA200'].iloc[-1]
+        recent_high = df_entry['High'].tail(30).max()
+        recent_low = df_entry['Low'].tail(30).min()
+        
+        local_is_bearish = last_price < local_ema
+        
+        # Determine strict bias: Must respect 200 EMA
+        macro_bias = "BEARISH" if macro_is_bearish else "BULLISH"
+        local_bias = "BEARISH" if local_is_bearish else "BULLISH"
         
         prompt = f"""
-        You are an elite quantitative price-action trader analyzing historical market footprints.
-        Analyze this chart data for {symbol}:
-        Current Price: {last_price}
-        Recent BSL Pool (High): {recent_high}
-        Recent SSL Pool (Low): {recent_low}
+        You are a quantitative price-action trader.
+        CRITICAL RULE:
+        - Daily 200 EMA Macro Bias: {macro_bias} (Daily Close: {df_daily['Close'].iloc[-1]:.5f}, Daily EMA: {daily_ema:.5f})
+        - {tf.upper()} 200 EMA Local Bias: {local_bias} (Current Price: {last_price:.5f}, Local EMA: {local_ema:.5f})
         
-        Provide structural story analysis formatted as:
+        If price is BELOW the 200 EMA, YOU ARE STRICTLY FORBIDDEN from recommending Buy setups. Any upward push is a RETRACEMENT / BULL TRAP into Buy-Side Liquidity (BSL).
+        
+        Analyze {symbol} ({tf}):
+        - Recent BSL Pool (High): {recent_high:.5f}
+        - Recent SSL Pool (Low): {recent_low:.5f}
+        
+        Format output:
         🎯 AI ANALYSIS & MARKET STORY
-        1. Overall Bias: (Bullish/Bearish)
-        2. Structural Footprint & Key POI: Highlight liquidity sweeps or high/low hunts price left behind.
-        3. Price Action Story: Rejection wicks, displacement, and footprint context.
-        4. Future Trade Setup:
-           - Trigger Zone (POI):
-           - Stop Loss:
-           - Take Profit:
+        1. Macro Bias: {macro_bias} (Daily 200 EMA Alignment)
+        2. Execution Bias ({tf}): {local_bias}
+        3. Structural Story: Explain BSL/SSL sweeps relative to the 200 EMA.
+        4. Realignment Setup: Detail expected entry alignment.
         """
 
-        # Fetch robust analysis text
         analysis_text = fetch_ai_analysis(prompt)
 
-        # Determine directional bias
-        is_long_bias = "bearish" not in analysis_text.lower()
-
-        # Generate Chart Image matching bias direction
-        chart_img = generate_chart_image(
-            df, 
-            f"{symbol} ({tf.upper()}) - LIVE POI & STRUCTURE MAPPING",
-            is_long=is_long_bias
-        )
+        # Generate chart based on local 200 EMA trend
+        is_long = not local_is_bearish
+        title_str = f"{symbol} ({tf.upper()}) | Trend: {local_bias} (Gold Line = 200 EMA)"
+        chart_img = generate_chart_image(df_entry, title_str, is_long=is_long)
         
-        # Send Chart Image
         await context.bot.send_photo(
             chat_id=chat_id,
             photo=chart_img,
@@ -280,7 +292,6 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         
-        # Delete status message and send text breakdown
         await status_msg.delete()
         await context.bot.send_message(chat_id=chat_id, text=analysis_text, parse_mode="Markdown")
 
@@ -288,63 +299,41 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"❌ Error generating analysis: {str(e)}")
 
 # ==========================================
-# 5. REAL-TIME SIGNAL & AUTOMATED SCANNER
+# 5. REAL-TIME SIGNAL SCANNER
 # ==========================================
-async def send_signal_alert(context: ContextTypes.DEFAULT_TYPE, symbol: str, signal_type: str, details: str):
-    """Pushes instant signal pop-ups to your Telegram user ID."""
-    if not MY_CHAT_ID:
-        return
-        
-    alert_text = (
-        f"🚨 *AUTOMATED SIGNAL ALERT: {symbol}*\n\n"
-        f"📌 *Signal Type:* {signal_type}\n"
-        f"📝 *Details:* {details}\n\n"
-        f"⚡ *Action:* Open MT5 and confirm entry setup."
-    )
-    
-    await context.bot.send_message(
-        chat_id=MY_CHAT_ID,
-        text=alert_text,
-        parse_mode="Markdown"
-    )
-
 async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
-    """Periodically scans liquidity levels and triggers signal pop-ups."""
+    """Periodically scans liquidity sweeps aligned with the 200 EMA."""
     if not MY_CHAT_ID:
         return
 
-    symbols_to_scan = ["GBPUSD", "EURUSD", "BTCUSD"]
-    
-    for symbol in symbols_to_scan:
+    symbols = ["GBPUSD", "EURUSD", "BTCUSD"]
+    for symbol in symbols:
         try:
-            ticker_str = "BTC-USD" if symbol == "BTCUSD" else f"{symbol}=X"
-            df = yf.download(ticker_str, period="1d", interval="5m", progress=False)
-            
-            if df.empty:
+            _, df_entry, local_is_bearish, _ = fetch_multi_timeframe_data(symbol, "5m")
+            if df_entry.empty:
                 continue
+
+            last_close = df_entry['Close'].iloc[-1]
+            recent_high = df_entry['High'].tail(20).max()
+            recent_low = df_entry['Low'].tail(20).min()
+
+            # Trigger only if sweep aligns with 200 EMA direction
+            if local_is_bearish and abs(last_close - recent_high) < 0.0002:
+                alert_text = (
+                    f"🚨 *AUTOMATED BEARISH REALIGNMENT ALERT: {symbol}*\n\n"
+                    f"Price ({last_close:.5f}) swept BSL High ({recent_high:.5f}) below the 200 EMA.\n"
+                    f"⚡ *Action:* Check for potential short entry."
+                )
+                await context.bot.send_message(chat_id=MY_CHAT_ID, text=alert_text, parse_mode="Markdown")
                 
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            last_close = df['Close'].iloc[-1]
-            recent_high = df['High'].tail(20).max()
-            recent_low = df['Low'].tail(20).min()
-
-            # Trigger condition: price sweeps within 2 pips/points of recent liquidity high/low
-            if abs(last_close - recent_high) < 0.0002:
-                await send_signal_alert(
-                    context, 
-                    symbol, 
-                    "BUY-SIDE LIQUIDITY HUNT", 
-                    f"Price ({last_close:.5f}) is sweeping recent high at {recent_high:.5f}. Look for potential short realignment entry."
+            elif (not local_is_bearish) and abs(last_close - recent_low) < 0.0002:
+                alert_text = (
+                    f"🚨 *AUTOMATED BULLISH REALIGNMENT ALERT: {symbol}*\n\n"
+                    f"Price ({last_close:.5f}) swept SSL Low ({recent_low:.5f}) above the 200 EMA.\n"
+                    f"⚡ *Action:* Check for potential long entry."
                 )
-            elif abs(last_close - recent_low) < 0.0002:
-                await send_signal_alert(
-                    context, 
-                    symbol, 
-                    "SELL-SIDE LIQUIDITY HUNT", 
-                    f"Price ({last_close:.5f}) is sweeping recent low at {recent_low:.5f}. Look for potential long realignment entry."
-                )
+                await context.bot.send_message(chat_id=MY_CHAT_ID, text=alert_text, parse_mode="Markdown")
+
         except Exception as e:
             print(f"Scanner error for {symbol}: {e}")
 
@@ -352,33 +341,29 @@ async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
 # 6. APPLICATION INITIALIZATION & THREADING
 # ==========================================
 def run_telegram_bot():
-    """Runs the Telegram bot polling loop cleanly inside its own AsyncIO loop."""
+    """Runs Telegram bot polling cleanly inside an independent AsyncIO loop."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Register Command Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
 
-    # Schedule Market Scanner Job Queue (Every 5 minutes)
+    # Run scanner every 5 minutes
     job_queue = application.job_queue
     job_queue.run_repeating(auto_market_scanner, interval=300, first=10)
 
-    # Initialize and start polling
     loop.run_until_complete(application.initialize())
     loop.run_until_complete(application.start())
     loop.run_until_complete(application.updater.start_polling(drop_pending_updates=True))
     
-    print("[Telegram Bot] Polling started successfully!")
+    print("[Telegram Bot] Polling running...")
     loop.run_forever()
 
 if __name__ == "__main__":
-    # 1. Start Telegram Bot Polling in Background Thread
     telegram_thread = threading.Thread(target=run_telegram_bot, daemon=True)
     telegram_thread.start()
 
-    # 2. Run Flask Web App on Main Thread (Render binds to PORT 10000 immediately)
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
