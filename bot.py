@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import mplfinance as mpf
+import matplotlib
+matplotlib.use('Agg')  # Prevents thread-safety crashes in server environments
 import matplotlib.pyplot as plt
 from datetime import datetime, timezone
 from flask import Flask
@@ -126,7 +128,7 @@ def analyze_with_ai(prompt):
     return "Analysis complete. Refer to structural levels on chart."
 
 # ==========================================
-# 4. DATA ENGINE & TICKER MAPPER (WEEKEND AWARE)
+# 4. DATA ENGINE & TICKER MAPPER (WEEKEND & ASYNC SAFE)
 # ==========================================
 def normalize_ticker(symbol):
     symbol = symbol.strip().upper()
@@ -151,8 +153,6 @@ def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
         ticker_candidates.insert(0, "GC=F")
 
     tf_clean = entry_tf.lower().strip()
-    
-    # Use larger periods on weekends/closures to capture the last active session
     periods = ["10d", "30d", "60d"] if tf_clean in ["1m", "5m", "15m"] else ["1mo", "3mo"]
 
     df_daily, df_entry = pd.DataFrame(), pd.DataFrame()
@@ -182,13 +182,11 @@ def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
             break
 
     if df_daily.empty or df_entry.empty:
-        raise ValueError(f"Unable to retrieve market data for '{symbol}'.")
+        raise ValueError(f"Unable to retrieve market data for '{symbol}'. Market may be closed or ticker invalid.")
 
-    # Detect if market is closed based on last bar timestamp
     last_candle_time = df_entry.index[-1]
     now_utc = datetime.now(timezone.utc)
     
-    # If the last candle is older than 2 hours for crypto or over weekend for commodities/forex
     if hasattr(last_candle_time, 'tz') and last_candle_time.tz is not None:
         delta_hours = (now_utc - last_candle_time).total_seconds() / 3600
     else:
@@ -250,7 +248,7 @@ def analyze_structure_and_setup(df):
     avg_range = abs(closes - opens).mean()
     for i in range(2, n - 1):
         body = abs(closes[i] - opens[i])
-        if body >= (0.8 * avg_range):
+        if body >= (0.6 * avg_range):  # Dynamic threshold for zone detection
             if closes[i] > opens[i] and closes[i-1] < opens[i-1]:
                 ob_top = max(opens[i-1], closes[i-1])
                 ob_bottom = lows[i-1]
@@ -294,7 +292,7 @@ def analyze_structure_and_setup(df):
             reward = entry_price - target_ssl
             rr_ratio = reward / risk if risk > 0 else 0
 
-            if rr_ratio >= 2.5:
+            if rr_ratio >= 2.0:
                 trade_setup = {
                     'direction': 'SELL',
                     'bias': 'BEARISH',
@@ -318,7 +316,7 @@ def analyze_structure_and_setup(df):
             reward = target_bsl - entry_price
             rr_ratio = reward / risk if risk > 0 else 0
 
-            if rr_ratio >= 2.5:
+            if rr_ratio >= 2.0:
                 trade_setup = {
                     'direction': 'BUY',
                     'bias': 'BULLISH',
@@ -334,7 +332,7 @@ def analyze_structure_and_setup(df):
     return results, swing_highs, swing_lows, trade_setup
 
 # ==========================================
-# 6. HIGH-CONTRAST CHART GENERATOR (RENDER-ORDER FIXED)
+# 6. HIGH-CONTRAST CHART GENERATOR (EXPLICIT OVERLAY RENDER)
 # ==========================================
 def generate_chart_image(df, title_str, trade_setup=None):
     img_buf = io.BytesIO()
@@ -356,7 +354,7 @@ def generate_chart_image(df, title_str, trade_setup=None):
     
     addplots = [mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5)]
 
-    # 1. Build figure without instant export
+    # 1. Generate Figure without saving early
     fig, axlist = mpf.plot(
         chart_df,
         type='candle',
@@ -372,25 +370,25 @@ def generate_chart_image(df, title_str, trade_setup=None):
     mid_time = chart_df.index[len(chart_df) // 3]
     last_time = chart_df.index[-20] if len(chart_df) >= 20 else chart_df.index[0]
 
-    # 2. Draw BSL Level
+    # 2. Draw Buy-Side Liquidity (BSL)
     if swing_highs:
         last_bsl = swing_highs[-1]['price']
         ax.axhline(last_bsl, color='#00e676', linestyle=':', linewidth=1.2)
         ax.text(first_time, last_bsl, " BSL (Buy-Side Liquidity)", color='#00e676', fontsize=8, fontweight='bold', verticalalignment='bottom')
 
-    # 3. Draw SSL Level
+    # 3. Draw Sell-Side Liquidity (SSL)
     if swing_lows:
         last_ssl = swing_lows[-1]['price']
         ax.axhline(last_ssl, color='#ff1744', linestyle=':', linewidth=1.2)
         ax.text(first_time, last_ssl, " SSL (Sell-Side Liquidity)", color='#ff1744', fontsize=8, fontweight='bold', verticalalignment='top')
 
-    # 4. Draw MSS Shifts
+    # 4. Draw Market Structure Shifts (MSS)
     for shift in ict_data['shifts'][-2:]:
         color = '#00e676' if 'BULLISH' in shift['type'] else '#ff1744'
         ax.axhline(shift['price'], color=color, linestyle='--', linewidth=1.2)
         ax.text(mid_time, shift['price'], f" {shift['type']} ", color=color, fontsize=8, fontweight='bold', backgroundcolor='#131722')
 
-    # 5. Draw Order Blocks
+    # 5. Draw Order Blocks (OB Shaded Boxes)
     for ob in ict_data['obs'][-3:]:
         color = '#089981' if ob['type'] == 'BULLISH_OB' else '#f23645'
         label = " BULLISH OB" if ob['type'] == 'BULLISH_OB' else " BEARISH OB"
@@ -409,7 +407,7 @@ def generate_chart_image(df, title_str, trade_setup=None):
 
     ax.set_title(title_str, color='#d1d4dc', fontsize=9, fontweight='bold')
 
-    # 7. Render & save to buffer AFTER overlays are drawn
+    # 7. EXPLICIT SAVE AFTER DRAWING OVERLAYS
     fig.savefig(img_buf, format='png', dpi=130, bbox_inches='tight', facecolor='#131722')
     plt.close(fig)
 
@@ -425,7 +423,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I am ready. Ask me anything directly, or issue a request.\n\n"
         "📌 *EXAMPLES:*\n"
         "• `/analyze GOLD 15m`\n"
-        "• Or just type: *'Check Gold on 15m'* or *'Show me my bot stats'*"
+        "• Or just type: *'Check Gold on 15m'*"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -469,14 +467,18 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(f"⏳ Executing calculations for {symbol} ({tf.upper()})...")
 
     try:
-        df_daily, df_entry, macro_is_bearish, daily_ema, ticker_str, is_closed = fetch_multi_timeframe_data(symbol, tf)
+        # RUN FETCH IN BACKGROUND THREAD (PREVENTS LOOP FREEZING)
+        df_daily, df_entry, macro_is_bearish, daily_ema, ticker_str, is_closed = await asyncio.to_thread(
+            fetch_multi_timeframe_data, symbol, tf
+        )
+        
         ict_data, swing_highs, swing_lows, trade_setup = analyze_structure_and_setup(df_entry)
         
         last_price = df_entry['Close'].iloc[-1]
         local_ema = df_entry['EMA200'].iloc[-1]
         local_bias = "BEARISH" if last_price < local_ema else "BULLISH"
         
-        market_status_str = "⚠️ *MARKET CLOSED* (Analysis based on last session close)" if is_closed else "🟢 *MARKET OPEN* (Live Feed)"
+        market_status_str = "⚠️ *MARKET CLOSED* (Last Session Data)" if is_closed else "🟢 *MARKET OPEN*"
 
         if mode == "MODE_ANALYSIS":
             title_str = f"{symbol} ({tf.upper()}) | Structural Market Map"
@@ -520,13 +522,17 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 no_trade_report = (
                     f"🛑 *VERDICT: NO GRADE A+ TRADE SETUP*\n"
                     f"Status: {market_status_str}\n\n"
-                    f"• **Reason:** Price action currently lacks a valid high-probability confluence (Liquidity Sweep + Unmitigated OB + Min 1:2.5 R:R).\n"
+                    f"• **Reason:** Price action currently lacks a valid high-probability confluence.\n"
                     f"• **Desk Rule:** Standing on hands to protect account capital."
                 )
                 await context.bot.send_photo(chat_id=query.message.chat_id, photo=chart_img, caption=no_trade_report, parse_mode="Markdown")
 
     except Exception as e:
-        await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Execution Error: {str(e)}")
+        print(f"[ERROR] Callback error: {e}")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id, 
+            text=f"❌ **Execution Error:** {str(e)}"
+        )
 
 # ==========================================
 # 8. NATURAL CHAT INTELLIGENCE HANDLER
@@ -573,10 +579,12 @@ async def natural_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # ==========================================
 # 9. MAIN APPLICATION RUNNER
 # ==========================================
-def run_telegram_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+def main():
+    if not TELEGRAM_BOT_TOKEN:
+        print("[CRITICAL ERROR] TELEGRAM_BOT_TOKEN is missing!")
+        return
 
+    print("[INIT] Building Telegram Application...")
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     application.add_handler(CommandHandler("start", start_command))
@@ -584,14 +592,19 @@ def run_telegram_bot():
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, natural_chat_handler))
 
-    loop.run_until_complete(application.initialize())
-    loop.run_until_complete(application.start())
-    loop.run_until_complete(application.updater.start_polling(drop_pending_updates=True))
-    loop.run_forever()
+    def start_polling():
+        print("[INIT] Starting Telegram bot polling...")
+        try:
+            application.run_polling(drop_pending_updates=True)
+        except Exception as e:
+            print(f"[CRITICAL ERROR] Polling crashed: {e}")
 
-if __name__ == "__main__":
-    telegram_thread = threading.Thread(target=run_telegram_bot, daemon=True)
-    telegram_thread.start()
+    bot_thread = threading.Thread(target=start_polling, daemon=True)
+    bot_thread.start()
 
     port = int(os.environ.get("PORT", 10000))
+    print(f"[INIT] Starting Flask web server on port {port}...")
     app.run(host="0.0.0.0", port=port)
+
+if __name__ == "__main__":
+    main()
