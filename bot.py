@@ -9,7 +9,7 @@ import yfinance as yf
 import mplfinance as mpf
 from flask import Flask
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes
 from openai import OpenAI
 
 # ==========================================
@@ -25,7 +25,7 @@ def health_check():
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-MY_CHAT_ID = os.environ.get("MY_CHAT_ID")  # Set your Telegram Chat ID for direct alerts
+MY_CHAT_ID = os.environ.get("MY_CHAT_ID")  # Your personal Telegram Chat ID for alerts
 
 def keep_alive_ping():
     """Pings Flask endpoint every 10 minutes to prevent Render from sleeping."""
@@ -50,7 +50,7 @@ ai_client = OpenAI(
 )
 
 def fetch_ai_analysis(prompt):
-    """Fallback chain ensuring reliable text analysis response without moderation outputs."""
+    """Fallback chain ensuring reliable text analysis without guardrail outputs."""
     vision_models = [
         "google/gemma-4-31b-it:free",
         "google/gemma-4-26b-a4b-it:free",
@@ -65,7 +65,7 @@ def fetch_ai_analysis(prompt):
                 max_tokens=600
             )
             content = response.choices[0].message.content
-            # Guard against safety guardrail responses (e.g. 'User Safety: safe')
+            # Guard against guardrail responses (e.g. 'User Safety: safe')
             if content and "User Safety:" not in content and len(content.strip()) > 30:
                 return content
         except Exception:
@@ -98,7 +98,7 @@ def find_pivots(df, window=3):
     return pivots_high, pivots_low
 
 def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=True):
-    """Renders TradingView-style dark chart with clean POI boxes and Pivot trendlines."""
+    """Renders TradingView-style dark chart with dynamic POI boxes and Pivot trendlines."""
     img_buf = io.BytesIO()
     chart_df = df.tail(80)
     
@@ -117,15 +117,15 @@ def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=Tr
     alines_list = []
     
     if len(p_highs) >= 2:
-        alines_list.append([p_highs[-2], p_highs[-1]])  # Dynamic Resistance Trendline
+        alines_list.append([p_highs[-2], p_highs[-1]])  # Dynamic Resistance
     if len(p_lows) >= 2:
-        alines_list.append([p_lows[-2], p_lows[-1]])    # Dynamic Support Trendline
+        alines_list.append([p_lows[-2], p_lows[-1]])    # Dynamic Support
         
     alines_dict = dict(alines=alines_list, colors=['#f23645', '#089981'], linewidths=1.2) if alines_list else None
 
-    # TIGHTENED POI FALLBACK LOGIC (Prevents giant blocks taking over full chart)
+    # Proportional POI Box Logic
     last_close = chart_df['Close'].iloc[-1]
-    range_offset = (chart_df['High'].max() - chart_df['Low'].min()) * 0.15 # 15% range box height
+    range_offset = (chart_df['High'].max() - chart_df['Low'].min()) * 0.15  # 15% chart height
     
     if entry is None:
         entry = last_close
@@ -144,7 +144,7 @@ def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=Tr
         linewidths=[1.2, 1.0, 1.0]
     )
 
-    # Shaded Position Template Boxes
+    # Direction-Aware Shaded Position Boxes
     fill_tp = dict(y1=entry, y2=tp, color='#089981', alpha=0.18)
     fill_sl = dict(y1=entry, y2=sl, color='#f23645', alpha=0.18)
 
@@ -166,8 +166,29 @@ def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=Tr
     return img_buf
 
 # ==========================================
-# 4. TELEGRAM BOT HANDLERS & ANALYSIS LOGIC
+# 4. TELEGRAM BOT HANDLERS
 # ==========================================
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends a formatted welcome message with full instructions."""
+    welcome_text = (
+        "🤖 *WELCOME TO YOUR CHART & SIGNAL ANALYZER*\n\n"
+        "I am configured to map institutional price action, liquidity sweeps, and POI zones directly onto chart setups.\n\n"
+        "📌 *HOW TO USE ME:*\n"
+        "• `/analyze [SYMBOL] [TIMEFRAME]`\n"
+        "  _Examples:_\n"
+        "  - `/analyze GBPUSD 15m`\n"
+        "  - `/analyze EURUSD 1h`\n"
+        "  - `/analyze BTCUSD 5m`\n\n"
+        "📊 *WHAT YOU GET:*\n"
+        "1. **TradingView Dark Chart:** Clean high-resolution chart mapping.\n"
+        "2. **Dynamic Trendlines:** Connected fractal Pivot Highs & Lows.\n"
+        "3. **Position Templates:** Direction-aligned Risk-Reward boxes (Green TP / Red SL).\n"
+        "4. **AI Market Story:** Liquidity sweep & POI breakdown.\n"
+        "5. **Automated Pop-Up Alerts:** Instant signals delivered straight to your phone.\n\n"
+        "💡 *Get Started:* Try running `/analyze GBPUSD 15m` now!"
+    )
+    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     args = context.args
@@ -190,17 +211,6 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Generate Chart Image
-        chart_img = generate_chart_image(df, f"{symbol} ({tf.upper()}) - LIVE POI & STRUCTURE MAPPING")
-        
-        # Send Chart Image First
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=chart_img,
-            caption=f"🎯 *LIVE CHART: {symbol} ({tf.upper()})*",
-            parse_mode="Markdown"
-        )
-        
         # Structure Prompt
         last_price = df['Close'].iloc[-1]
         recent_high = df['High'].tail(30).max()
@@ -224,10 +234,28 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
            - Take Profit:
         """
 
-        # Fetch robust analysis using vision model fallback chain
+        # Fetch robust analysis text
         analysis_text = fetch_ai_analysis(prompt)
+
+        # Determine directional bias to align chart position template correctly
+        is_long_bias = "bearish" not in analysis_text.lower()
+
+        # Generate Chart Image matching bias direction
+        chart_img = generate_chart_image(
+            df, 
+            f"{symbol} ({tf.upper()}) - LIVE POI & STRUCTURE MAPPING",
+            is_long=is_long_bias
+        )
         
-        # Delete status message and send full text breakdown
+        # Send Chart Image
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=chart_img,
+            caption=f"🎯 *LIVE CHART: {symbol} ({tf.upper()})*",
+            parse_mode="Markdown"
+        )
+        
+        # Delete status message and send text breakdown
         await status_msg.delete()
         await context.bot.send_message(chat_id=chat_id, text=analysis_text, parse_mode="Markdown")
 
@@ -235,10 +263,10 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"❌ Error generating analysis: {str(e)}")
 
 # ==========================================
-# 5. REAL-TIME SIGNAL & ALERT SYSTEM
+# 5. REAL-TIME SIGNAL & AUTOMATED SCANNER
 # ==========================================
 async def send_signal_alert(context: ContextTypes.DEFAULT_TYPE, symbol: str, signal_type: str, details: str):
-    """Pushes instant signal pop-ups to your Telegram chat."""
+    """Pushes instant signal pop-ups to your Telegram user ID."""
     if not MY_CHAT_ID:
         return
         
@@ -255,6 +283,46 @@ async def send_signal_alert(context: ContextTypes.DEFAULT_TYPE, symbol: str, sig
         parse_mode="Markdown"
     )
 
+async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
+    """Periodically scans liquidity levels and triggers signal pop-ups."""
+    if not MY_CHAT_ID:
+        return
+
+    symbols_to_scan = ["GBPUSD", "EURUSD", "BTCUSD"]
+    
+    for symbol in symbols_to_scan:
+        try:
+            ticker_str = "BTC-USD" if symbol == "BTCUSD" else f"{symbol}=X"
+            df = yf.download(ticker_str, period="1d", interval="5m", progress=False)
+            
+            if df.empty:
+                continue
+                
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            last_close = df['Close'].iloc[-1]
+            recent_high = df['High'].tail(20).max()
+            recent_low = df['Low'].tail(20).min()
+
+            # Trigger condition: price sweeps within 2 pips/points of recent liquidity high/low
+            if abs(last_close - recent_high) < 0.0002:
+                await send_signal_alert(
+                    context, 
+                    symbol, 
+                    "BUY-SIDE LIQUIDITY HUNT", 
+                    f"Price ({last_close:.5f}) is sweeping recent high at {recent_high:.5f}. Look for potential short realignment entry."
+                )
+            elif abs(last_close - recent_low) < 0.0002:
+                await send_signal_alert(
+                    context, 
+                    symbol, 
+                    "SELL-SIDE LIQUIDITY HUNT", 
+                    f"Price ({last_close:.5f}) is sweeping recent low at {recent_low:.5f}. Look for potential long realignment entry."
+                )
+        except Exception as e:
+            print(f"Scanner error for {symbol}: {e}")
+
 # ==========================================
 # 6. APPLICATION INITIALIZATION
 # ==========================================
@@ -266,9 +334,13 @@ def main():
     # Build Telegram Application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Register Handlers
+    # Register Command Handlers
+    application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
-    application.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Bot active! Use /analyze GBPUSD 15m")))
+
+    # Schedule Market Scanner to run every 5 minutes (300 seconds)
+    job_queue = application.job_queue
+    job_queue.run_repeating(auto_market_scanner, interval=300, first=10)
 
     # Run Telegram Polling Loop
     application.run_polling(drop_pending_updates=True)
