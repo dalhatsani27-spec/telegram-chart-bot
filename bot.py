@@ -80,7 +80,7 @@ def fetch_ai_analysis(prompt):
     )
 
 # ==========================================
-# 3. CHART MAPPING: PIVOTS & TRADINGVIEW POIs
+# 3. CHART MAPPING: PIVOTS & POI LIMIT SETUPS
 # ==========================================
 def find_pivots(df, window=3):
     """Calculates local fractal Pivot Highs and Pivot Lows."""
@@ -99,7 +99,7 @@ def find_pivots(df, window=3):
     return pivots_high, pivots_low
 
 def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=True):
-    """Renders TradingView-style dark chart with dynamic POI boxes and Pivot trendlines."""
+    """Renders TradingView-style dark chart with POI Limit Order setups anchored to Liquidity Pivots."""
     img_buf = io.BytesIO()
     chart_df = df.tail(80)
     
@@ -124,23 +124,28 @@ def generate_chart_image(df, title_str, entry=None, sl=None, tp=None, is_long=Tr
         
     alines_dict = dict(alines=alines_list, colors=['#f23645', '#089981'], linewidths=1.2) if alines_list else None
 
-    # Proportional POI Box Logic
-    last_close = chart_df['Close'].iloc[-1]
-    range_offset = (chart_df['High'].max() - chart_df['Low'].min()) * 0.15  # 15% chart height
+    # POI-BASED LIMIT ORDER ENTRY LOGIC
+    recent_high = chart_df['High'].tail(30).max()
+    recent_low = chart_df['Low'].tail(30).min()
     
     if entry is None:
-        entry = last_close
         if is_long:
-            sl = entry - range_offset
-            tp = entry + (range_offset * 1.5)
+            # BUY LIMIT: Anchor entry at recent Pivot Low / Liquidity Hunt level
+            entry = p_lows[-1][1] if len(p_lows) > 0 else recent_low
+            risk_dist = abs(entry - recent_low) if entry != recent_low else (recent_high - recent_low) * 0.1
+            sl = entry - max(risk_dist, (recent_high - recent_low) * 0.05)
+            tp = recent_high
         else:
-            sl = entry + range_offset
-            tp = entry - (range_offset * 1.5)
+            # SELL LIMIT: Anchor entry at recent Pivot High / Liquidity Hunt level
+            entry = p_highs[-1][1] if len(p_highs) > 0 else recent_high
+            risk_dist = abs(recent_high - entry) if entry != recent_high else (recent_high - recent_low) * 0.1
+            sl = entry + max(risk_dist, (recent_high - recent_low) * 0.05)
+            tp = recent_low
 
-    # Horizontal Level Lines
+    # Horizontal Level Lines (Blue Entry / Red SL / Green TP)
     hlines_dict = dict(
         hlines=[entry, sl, tp],
-        colors=['#2962ff', '#f23645', '#089981'],  # Blue Entry, Red SL, Green TP
+        colors=['#2962ff', '#f23645', '#089981'],
         linestyle=['-.', '--', '--'],
         linewidths=[1.2, 1.0, 1.0]
     )
@@ -183,7 +188,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 *WHAT YOU GET:*\n"
         "1. **TradingView Dark Chart:** Clean high-resolution chart mapping.\n"
         "2. **Dynamic Trendlines:** Connected fractal Pivot Highs & Lows.\n"
-        "3. **Position Templates:** Direction-aligned Risk-Reward boxes (Green TP / Red SL).\n"
+        "3. **Position Templates:** Limit order setups anchored to key POI levels (Green TP / Red SL).\n"
         "4. **AI Market Story:** Liquidity sweep & POI breakdown.\n"
         "5. **Automated Pop-Up Alerts:** Instant signals delivered straight to your phone.\n\n"
         "💡 *Get Started:* Try running `/analyze GBPUSD 15m` now!"
