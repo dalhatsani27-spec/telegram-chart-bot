@@ -231,7 +231,7 @@ def analyze_structure_and_setup(df):
     avg_range = abs(closes - opens).mean()
     for i in range(2, n - 1):
         body = abs(closes[i] - opens[i])
-        if body >= (1.1 * avg_range):
+        if body >= (0.8 * avg_range):
             if closes[i] > opens[i] and closes[i-1] < opens[i-1]:
                 ob_top = max(opens[i-1], closes[i-1])
                 ob_bottom = lows[i-1]
@@ -275,7 +275,6 @@ def analyze_structure_and_setup(df):
             reward = entry_price - target_ssl
             rr_ratio = reward / risk if risk > 0 else 0
 
-            # Strict A+ Filter: Minimum 1:2.5 Risk-to-Reward
             if rr_ratio >= 2.5:
                 trade_setup = {
                     'direction': 'SELL',
@@ -316,12 +315,11 @@ def analyze_structure_and_setup(df):
     return results, swing_highs, swing_lows, trade_setup
 
 # ==========================================
-# 6. HIGH-CONTRAST CHART GENERATOR (DATETIME INDEX PRESERVED)
+# 6. HIGH-CONTRAST CHART GENERATOR (TIMESTAMP MAPPED)
 # ==========================================
 def generate_chart_image(df, title_str, trade_setup=None):
     img_buf = io.BytesIO()
     
-    # Preserve the DatetimeIndex required by mplfinance
     chart_df = df.tail(80).copy()
     if not isinstance(chart_df.index, pd.DatetimeIndex):
         chart_df.index = pd.to_datetime(chart_df.index)
@@ -350,38 +348,45 @@ def generate_chart_image(df, title_str, trade_setup=None):
     )
 
     ax = axlist[0]
-    n_bars = len(chart_df)
+    
+    first_time = chart_df.index[2]
+    mid_time = chart_df.index[len(chart_df) // 3]
+    last_time = chart_df.index[-20] if len(chart_df) >= 20 else chart_df.index[0]
 
+    # Map Buy-Side Liquidity
     if swing_highs:
         last_bsl = swing_highs[-1]['price']
         ax.axhline(last_bsl, color='#00e676', linestyle=':', linewidth=1.2)
-        ax.text(2, last_bsl, " BSL (Buy-Side Liquidity)", color='#00e676', fontsize=8, fontweight='bold', verticalalignment='bottom')
+        ax.text(first_time, last_bsl, " BSL (Buy-Side Liquidity)", color='#00e676', fontsize=8, fontweight='bold', verticalalignment='bottom')
 
+    # Map Sell-Side Liquidity
     if swing_lows:
         last_ssl = swing_lows[-1]['price']
         ax.axhline(last_ssl, color='#ff1744', linestyle=':', linewidth=1.2)
-        ax.text(2, last_ssl, " SSL (Sell-Side Liquidity)", color='#ff1744', fontsize=8, fontweight='bold', verticalalignment='top')
+        ax.text(first_time, last_ssl, " SSL (Sell-Side Liquidity)", color='#ff1744', fontsize=8, fontweight='bold', verticalalignment='top')
 
+    # Map Market Structure Shifts
     for shift in ict_data['shifts'][-2:]:
         color = '#00e676' if 'BULLISH' in shift['type'] else '#ff1744'
         ax.axhline(shift['price'], color=color, linestyle='--', linewidth=1.2)
-        ax.text(n_bars // 3, shift['price'], f" {shift['type']} ", color=color, fontsize=8, fontweight='bold', backgroundcolor='#131722')
+        ax.text(mid_time, shift['price'], f" {shift['type']} ", color=color, fontsize=8, fontweight='bold', backgroundcolor='#131722')
 
+    # Map Order Blocks (Shaded Boxes)
     for ob in ict_data['obs'][-3:]:
         color = '#089981' if ob['type'] == 'BULLISH_OB' else '#f23645'
         label = " BULLISH OB" if ob['type'] == 'BULLISH_OB' else " BEARISH OB"
-        ax.axhspan(ob['bottom'], ob['top'], color=color, alpha=0.30 if not ob['mitigated'] else 0.10)
-        ax.text(max(0, n_bars - 22), ob['top'], label, color=color, fontsize=8, fontweight='bold')
+        ax.axhspan(ob['bottom'], ob['top'], color=color, alpha=0.25 if not ob['mitigated'] else 0.08)
+        ax.text(last_time, ob['top'], label, color=color, fontsize=8, fontweight='bold')
 
+    # Map Active Trade Setup Levels
     if trade_setup:
         ax.axhline(trade_setup['entry'], color='#2962ff', linestyle='-.', linewidth=1.5)
         ax.axhline(trade_setup['sl'], color='#f23645', linestyle='--', linewidth=1.5)
         ax.axhline(trade_setup['tp1'], color='#089981', linestyle='--', linewidth=1.5)
         
-        offset = max(0, n_bars - 35)
-        ax.text(offset, trade_setup['entry'], f" ENTRY: {trade_setup['entry']:.2f}", color='#2962ff', fontsize=8, fontweight='bold', backgroundcolor='#131722')
-        ax.text(offset, trade_setup['sl'], f" SL: {trade_setup['sl']:.2f}", color='#f23645', fontsize=8, fontweight='bold', backgroundcolor='#131722')
-        ax.text(offset, trade_setup['tp1'], f" TP1: {trade_setup['tp1']:.2f}", color='#089981', fontsize=8, fontweight='bold', backgroundcolor='#131722')
+        ax.text(last_time, trade_setup['entry'], f" ENTRY: {trade_setup['entry']:.2f}", color='#2962ff', fontsize=8, fontweight='bold', backgroundcolor='#131722')
+        ax.text(last_time, trade_setup['sl'], f" SL: {trade_setup['sl']:.2f}", color='#f23645', fontsize=8, fontweight='bold', backgroundcolor='#131722')
+        ax.text(last_time, trade_setup['tp1'], f" TP1: {trade_setup['tp1']:.2f}", color='#089981', fontsize=8, fontweight='bold', backgroundcolor='#131722')
 
     ax.set_title(title_str, color='#d1d4dc', fontsize=9, fontweight='bold')
     img_buf.seek(0)
