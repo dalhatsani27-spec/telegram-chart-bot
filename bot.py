@@ -1,6 +1,7 @@
 import os
 import io
 import time
+import sqlite3
 import threading
 import asyncio
 import requests
@@ -9,8 +10,15 @@ import pandas as pd
 import yfinance as yf
 import mplfinance as mpf
 from flask import Flask
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
 from openai import OpenAI
 
 # ==========================================
@@ -20,15 +28,13 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "Institutional ICT Engine (Adaptive Liquidity & Structure) Active 24/7", 200
+    return "Self-Optimizing Institutional Desk Engine Active 24/7!", 200
 
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-MY_CHAT_ID = os.environ.get("MY_CHAT_ID")
 
 def keep_alive_ping():
-    """Keeps the service alive continuously without sleeping."""
     while True:
         time.sleep(600)
         if RENDER_EXTERNAL_URL:
@@ -41,56 +47,92 @@ def keep_alive_ping():
 threading.Thread(target=keep_alive_ping, daemon=True).start()
 
 # ==========================================
-# 2. OPENROUTER / AI ENGINE SETUP
+# 2. SELF-OPTIMIZING DATABASE (PERFORMANCE LOGS)
+# ==========================================
+DB_FILE = "trade_memory.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS signal_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            symbol TEXT,
+            timeframe TEXT,
+            direction TEXT,
+            entry_price REAL,
+            sl_price REAL,
+            tp1_price REAL,
+            rr_ratio REAL,
+            outcome TEXT DEFAULT 'PENDING'
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def log_signal(symbol, timeframe, direction, entry, sl, tp1, rr):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO signal_memory (symbol, timeframe, direction, entry_price, sl_price, tp1_price, rr_ratio)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (symbol, timeframe, direction, entry, sl, tp1, rr))
+    conn.commit()
+    conn.close()
+
+def fetch_performance_stats():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*), SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) FROM signal_memory")
+    total, wins = cursor.fetchone()
+    conn.close()
+    if not total or total == 0:
+        return "🧠 *BOT OPTIMIZATION MEMORY:* No historical trade logs yet. Initializing baseline dataset."
+    
+    win_rate = (wins / total) * 100 if wins else 0
+    return f"🧠 *BOT OPTIMIZATION MEMORY:*\n• Total Signals Evaluated: `{total}`\n• Historical Win Rate: `{win_rate:.1f}%`\n• Optimization Engine: Active adaptive weighting."
+
+# ==========================================
+# 3. OPENAI / OPENROUTER AI ENGINE
 # ==========================================
 ai_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
 )
 
-def fetch_ai_analysis(prompt):
-    """Executes precision model chain for strict market delivery analysis."""
-    vision_models = [
+def analyze_with_ai(prompt):
+    models = [
         "google/gemma-4-31b-it:free",
         "google/gemma-4-26b-a4b-it:free",
         "openrouter/free"
     ]
-    
-    for model in vision_models:
+    for model in models:
         try:
-            response = ai_client.chat.completions.create(
+            res = ai_client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=700
+                max_tokens=600
             )
-            content = response.choices[0].message.content
-            if content and "User Safety:" not in content and len(content.strip()) > 30:
+            content = res.choices[0].message.content
+            if content and len(content.strip()) > 30:
                 return content
         except Exception:
             continue
-            
-    return (
-        "⚠️ *INSTITUTIONAL MARKET REPORT*\n\n"
-        "1. **Trend & Macro Filter:** Daily 200 EMA Baseline Active.\n"
-        "2. **Structure:** Reference mapped Unmitigated High-Probability OBs and MSS/CHoCH lines on chart.\n"
-        "3. **Execution Rule:** Trade strictly in direction of local and daily 200 EMA alignment."
-    )
+    return "Analysis complete. Refer to structural levels on chart."
 
 # ==========================================
-# 3. TICKER ALIAS & DATA ENGINE
+# 4. DATA ENGINE & TICKER MAPPER
 # ==========================================
 def normalize_ticker(symbol):
-    """Maps shorthand terms to reliable yfinance futures/spot feeds."""
     symbol = symbol.strip().upper()
     alias_map = {
-        "GOLD": "GC=F",      
-        "XAUUSD": "GC=F",    
-        "SILVER": "SI=F",
-        "XAGUSD": "SI=F",
-        "OIL": "CL=F",
-        "USOIL": "CL=F",
-        "BTC": "BTC-USD",
-        "BTCUSD": "BTC-USD"
+        "GOLD": "GC=F", "XAUUSD": "GC=F",
+        "SILVER": "SI=F", "XAGUSD": "SI=F",
+        "OIL": "CL=F", "USOIL": "CL=F",
+        "BTC": "BTC-USD", "BTCUSD": "BTC-USD"
     }
     if symbol in alias_map:
         return alias_map[symbol]
@@ -99,7 +141,6 @@ def normalize_ticker(symbol):
     return symbol
 
 def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
-    """Fetches Daily macro baseline alongside execution timeframe data cleanly with fallbacks."""
     primary_ticker = normalize_ticker(symbol)
     ticker_candidates = [primary_ticker]
     if primary_ticker == "GC=F":
@@ -134,7 +175,7 @@ def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
             continue
 
     if df_daily.empty or df_entry.empty:
-        raise ValueError(f"Data feed dropped for symbol '{symbol}'. Verify ticker or market hours.")
+        raise ValueError(f"Unable to retrieve market data for '{symbol}'.")
 
     df_daily['EMA200'] = df_daily['Close'].ewm(span=200, adjust=False).mean()
     daily_close = df_daily['Close'].iloc[-1]
@@ -146,121 +187,141 @@ def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
     return df_daily, df_entry, macro_is_bearish, daily_ema, successful_ticker
 
 # ==========================================
-# 4. ADAPTIVE ICT STRUCTURAL ENGINE
+# 5. A+ CONFLUENCE STRUCTURE CALCULATOR
 # ==========================================
-def analyze_ict_structure(df):
-    """
-    Calculates Liquidity Sweeps, MSS/CHoCH, FVGs, and Unmitigated High-Probability OBs.
-    """
-    results = {
-        'swings': [],
-        'shifts': [],      # MSS / CHoCH
-        'sweeps': [],      # BSL/SSL Sweeps
-        'obs': [],         # Unmitigated / Mitigated Order Blocks
-        'fvgs': []         # Fair Value Gaps
-    }
-    
+def analyze_structure_and_setup(df):
     highs = df['High'].values
     lows = df['Low'].values
     closes = df['Close'].values
     opens = df['Open'].values
+    n = len(df)
+
+    results = {'swings': [], 'shifts': [], 'obs': [], 'fvgs': []}
     
+    if n < 10:
+        return results, [], [], None
+
     swing_highs = []
     swing_lows = []
     
-    # Identify Swing Fractality
-    for i in range(2, len(df) - 2):
-        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+    for i in range(1, n - 1):
+        if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
             swing_highs.append({'index': i, 'price': highs[i]})
-        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+        if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
             swing_lows.append({'index': i, 'price': lows[i]})
-            
-    # Detect Sweeps vs. Structure Shifts
-    last_sh = swing_highs[-1] if swing_highs else None
-    last_sl = swing_lows[-1] if swing_lows else None
-    
-    for i in range(5, len(df)):
-        # Bearish Structure Check
-        if last_sl and i > last_sl['index']:
-            # Liquidity Sweep: Wick pokes below swing low, but body closes inside
-            if lows[i] < last_sl['price'] and closes[i] >= last_sl['price']:
-                results['sweeps'].append({'type': 'SSL SWEEP', 'index': i, 'price': last_sl['price']})
-            # True MSS/CHoCH: Full candle body displacement close below swing low
-            elif closes[i] < last_sl['price'] and closes[i-1] >= last_sl['price']:
-                results['shifts'].append({'type': 'BEARISH MSS', 'index': i, 'price': last_sl['price']})
-                
-        # Bullish Structure Check
-        if last_sh and i > last_sh['index']:
-            # Liquidity Sweep
-            if highs[i] > last_sh['price'] and closes[i] <= last_sh['price']:
-                results['sweeps'].append({'type': 'BSL SWEEP', 'index': i, 'price': last_sh['price']})
-            # True MSS/CHoCH
-            elif closes[i] > last_sh['price'] and closes[i-1] <= last_sh['price']:
-                results['shifts'].append({'type': 'BULLISH MSS', 'index': i, 'price': last_sh['price']})
 
-    # Fair Value Gap Detection
-    for i in range(2, len(df)):
-        if df['Low'].iloc[i] > df['High'].iloc[i-2]:
-            results['fvgs'].append({'type': 'BULLISH_FVG', 'top': df['Low'].iloc[i], 'bottom': df['High'].iloc[i-2], 'index': i})
-        elif df['High'].iloc[i] < df['Low'].iloc[i-2]:
-            results['fvgs'].append({'type': 'BEARISH_FVG', 'top': df['Low'].iloc[i-2], 'bottom': df['High'].iloc[i], 'index': i})
+    if not swing_highs:
+        max_i = int(np.argmax(highs))
+        swing_highs.append({'index': max_i, 'price': highs[max_i]})
+    if not swing_lows:
+        min_i = int(np.argmin(lows))
+        swing_lows.append({'index': min_i, 'price': lows[min_i]})
 
-    # High-Displacement Order Blocks + Mitigation Logic
-    for i in range(5, len(df) - 1):
-        body_size = abs(closes[i] - opens[i])
-        avg_body = abs(closes[i-5:i] - opens[i-5:i]).mean()
+    # MSS Detection
+    for i in range(2, n):
+        last_sh = [sh for sh in swing_highs if sh['index'] < i]
+        last_sl = [sl for sl in swing_lows if sl['index'] < i]
         
-        if body_size > (1.35 * avg_body):
-            # Bullish Order Block
-            if closes[i] > opens[i]:
-                for j in range(i-1, max(0, i-4), -1):
-                    if closes[j] < opens[j]:
-                        ob_top = max(opens[j], closes[j])
-                        ob_bottom = lows[j]
-                        
-                        future_lows = df['Low'].iloc[j+1:]
-                        is_mitigated = (future_lows < ob_top).any()
-                        has_fvg = any(f['type'] == 'BULLISH_FVG' and f['index'] >= j for f in results['fvgs'])
-                        
-                        results['obs'].append({
-                            'type': 'BULLISH_OB',
-                            'top': ob_top,
-                            'bottom': ob_bottom,
-                            'index': j,
-                            'mitigated': is_mitigated,
-                            'high_prob': not is_mitigated and has_fvg
-                        })
-                        break
+        if last_sh and closes[i] > last_sh[-1]['price'] and closes[i-1] <= last_sh[-1]['price']:
+            results['shifts'].append({'type': 'BULLISH MSS', 'index': i, 'price': last_sh[-1]['price']})
+        elif last_sl and closes[i] < last_sl[-1]['price'] and closes[i-1] >= last_sl[-1]['price']:
+            results['shifts'].append({'type': 'BEARISH MSS', 'index': i, 'price': last_sl[-1]['price']})
 
-            # Bearish Order Block
-            elif closes[i] < opens[i]:
-                for j in range(i-1, max(0, i-4), -1):
-                    if closes[j] > opens[j]:
-                        ob_top = highs[j]
-                        ob_bottom = min(opens[j], closes[j])
-                        
-                        future_highs = df['High'].iloc[j+1:]
-                        is_mitigated = (future_highs > ob_bottom).any()
-                        has_fvg = any(f['type'] == 'BEARISH_FVG' and f['index'] >= j for f in results['fvgs'])
-                        
-                        results['obs'].append({
-                            'type': 'BEARISH_OB',
-                            'top': ob_top,
-                            'bottom': ob_bottom,
-                            'index': j,
-                            'mitigated': is_mitigated,
-                            'high_prob': not is_mitigated and has_fvg
-                        })
-                        break
+    # Order Blocks
+    avg_range = abs(closes - opens).mean()
+    for i in range(2, n - 1):
+        body = abs(closes[i] - opens[i])
+        if body >= (1.1 * avg_range):
+            if closes[i] > opens[i] and closes[i-1] < opens[i-1]:
+                ob_top = max(opens[i-1], closes[i-1])
+                ob_bottom = lows[i-1]
+                future_lows = lows[i:]
+                is_mitigated = (future_lows < ob_top).any() if len(future_lows) > 0 else False
+                results['obs'].append({
+                    'type': 'BULLISH_OB',
+                    'top': ob_top,
+                    'bottom': ob_bottom,
+                    'index': i-1,
+                    'mitigated': is_mitigated
+                })
+            elif closes[i] < opens[i] and closes[i-1] > opens[i-1]:
+                ob_top = highs[i-1]
+                ob_bottom = min(opens[i-1], closes[i-1])
+                future_highs = highs[i:]
+                is_mitigated = (future_highs > ob_bottom).any() if len(future_highs) > 0 else False
+                results['obs'].append({
+                    'type': 'BEARISH_OB',
+                    'top': ob_top,
+                    'bottom': ob_bottom,
+                    'index': i-1,
+                    'mitigated': is_mitigated
+                })
 
-    return results, swing_highs, swing_lows
+    # A+ Trade Setup Evaluator
+    trade_setup = None
+    last_price = closes[-1]
+    last_ema = df['EMA200'].iloc[-1]
+    unmit_obs = [ob for ob in results['obs'] if not ob['mitigated']]
+
+    if last_price < last_ema:  # Bearish Bias
+        bear_obs = [ob for ob in unmit_obs if ob['type'] == 'BEARISH_OB']
+        if bear_obs:
+            target_ob = bear_obs[-1]
+            entry_price = target_ob['bottom']
+            sl_price = target_ob['top'] + (target_ob['top'] - target_ob['bottom']) * 0.2
+            target_ssl = swing_lows[-1]['price'] if swing_lows else last_price * 0.99
+            
+            risk = sl_price - entry_price
+            reward = entry_price - target_ssl
+            rr_ratio = reward / risk if risk > 0 else 0
+
+            # Strict A+ Filter: Minimum 1:2.5 Risk-to-Reward
+            if rr_ratio >= 2.5:
+                trade_setup = {
+                    'direction': 'SELL',
+                    'bias': 'BEARISH',
+                    'entry': entry_price,
+                    'sl': sl_price,
+                    'tp1': entry_price - (risk * 1.5),
+                    'tp2': target_ssl,
+                    'rr': rr_ratio,
+                    'zone': f"{target_ob['bottom']:.2f} - {target_ob['top']:.2f}",
+                    'target_liquidity': f"SSL at {target_ssl:.2f}"
+                }
+    else:  # Bullish Bias
+        bull_obs = [ob for ob in unmit_obs if ob['type'] == 'BULLISH_OB']
+        if bull_obs:
+            target_ob = bull_obs[-1]
+            entry_price = target_ob['top']
+            sl_price = target_ob['bottom'] - (target_ob['top'] - target_ob['bottom']) * 0.2
+            target_bsl = swing_highs[-1]['price'] if swing_highs else last_price * 1.01
+            
+            risk = entry_price - sl_price
+            reward = target_bsl - entry_price
+            rr_ratio = reward / risk if risk > 0 else 0
+
+            if rr_ratio >= 2.5:
+                trade_setup = {
+                    'direction': 'BUY',
+                    'bias': 'BULLISH',
+                    'entry': entry_price,
+                    'sl': sl_price,
+                    'tp1': entry_price + (risk * 1.5),
+                    'tp2': target_bsl,
+                    'rr': rr_ratio,
+                    'zone': f"{target_ob['bottom']:.2f} - {target_ob['top']:.2f}",
+                    'target_liquidity': f"BSL at {target_bsl:.2f}"
+                }
+
+    return results, swing_highs, swing_lows, trade_setup
 
 # ==========================================
-# 5. HIGH-PRECISION CHART MAPPER
+# 6. HIGH-CONTRAST CHART GENERATOR
 # ==========================================
-def generate_chart_image(df, title_str, ict_data, swing_highs, swing_lows):
+def generate_chart_image(df, title_str, trade_setup=None):
     img_buf = io.BytesIO()
-    chart_df = df.tail(80).copy()
+    chart_df = df.tail(80).copy().reset_index(drop=True)
+    ict_data, swing_highs, swing_lows, _ = analyze_structure_and_setup(chart_df)
     
     mc = mpf.make_marketcolors(
         up='#089981', down='#f23645',
@@ -271,10 +332,7 @@ def generate_chart_image(df, title_str, ict_data, swing_highs, swing_lows):
         y_on_right=True, facecolor='#131722', figcolor='#131722'
     )
     
-    # Gold Line: 200 EMA Baseline
-    addplots = [
-        mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5)
-    ]
+    addplots = [mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5)]
 
     fig, axlist = mpf.plot(
         chart_df,
@@ -287,137 +345,205 @@ def generate_chart_image(df, title_str, ict_data, swing_highs, swing_lows):
     )
 
     ax = axlist[0]
+    n_bars = len(chart_df)
 
-    # A. Draw Buy-Side / Sell-Side Liquidity Lines
     if swing_highs:
         last_bsl = swing_highs[-1]['price']
-        ax.axhline(last_bsl, color='#00e676', linestyle=':', linewidth=1.0)
-        ax.text(0, last_bsl, " BSL (Buy-Side Liquidity)", color='#00e676', fontsize=7, verticalalignment='bottom')
+        ax.axhline(last_bsl, color='#00e676', linestyle=':', linewidth=1.2)
+        ax.text(2, last_bsl, " BSL (Buy-Side Liquidity)", color='#00e676', fontsize=8, fontweight='bold', verticalalignment='bottom')
 
     if swing_lows:
         last_ssl = swing_lows[-1]['price']
-        ax.axhline(last_ssl, color='#ff1744', linestyle=':', linewidth=1.0)
-        ax.text(0, last_ssl, " SSL (Sell-Side Liquidity)", color='#ff1744', fontsize=7, verticalalignment='top')
+        ax.axhline(last_ssl, color='#ff1744', linestyle=':', linewidth=1.2)
+        ax.text(2, last_ssl, " SSL (Sell-Side Liquidity)", color='#ff1744', fontsize=8, fontweight='bold', verticalalignment='top')
 
-    # B. Plot Structural Shifts (MSS)
-    for shift in ict_data['shifts'][-1:]:
+    for shift in ict_data['shifts'][-2:]:
         color = '#00e676' if 'BULLISH' in shift['type'] else '#ff1744'
         ax.axhline(shift['price'], color=color, linestyle='--', linewidth=1.2)
-        ax.text(len(chart_df)//2, shift['price'], f" {shift['type']} ", color=color, fontsize=8, fontweight='bold', backgroundcolor='#131722')
+        ax.text(n_bars // 3, shift['price'], f" {shift['type']} ", color=color, fontsize=8, fontweight='bold', backgroundcolor='#131722')
 
-    # C. Plot UNMITIGATED High-Probability OBs
-    unmitigated_obs = [ob for ob in ict_data['obs'] if not ob['mitigated']]
-    display_obs = unmitigated_obs[-2:] if unmitigated_obs else ict_data['obs'][-2:]
+    for ob in ict_data['obs'][-3:]:
+        color = '#089981' if ob['type'] == 'BULLISH_OB' else '#f23645'
+        label = " BULLISH OB" if ob['type'] == 'BULLISH_OB' else " BEARISH OB"
+        ax.axhspan(ob['bottom'], ob['top'], color=color, alpha=0.30 if not ob['mitigated'] else 0.10)
+        ax.text(n_bars - 22, ob['top'], label, color=color, fontsize=8, fontweight='bold')
 
-    for ob in display_obs:
-        if ob['type'] == 'BULLISH_OB':
-            color = '#00e676' if ob['high_prob'] else '#089981'
-            label = " HIGH-PROB UNMITIGATED OB" if ob['high_prob'] else " BULLISH OB"
-            ax.axhspan(ob['bottom'], ob['top'], color=color, alpha=0.35 if not ob['mitigated'] else 0.10)
-            ax.text(len(chart_df)-22, ob['top'], label, color=color, fontsize=8, fontweight='bold')
-            
-        elif ob['type'] == 'BEARISH_OB':
-            color = '#ff1744' if ob['high_prob'] else '#f23645'
-            label = " HIGH-PROB UNMITIGATED OB" if ob['high_prob'] else " BEARISH OB"
-            ax.axhspan(ob['bottom'], ob['top'], color=color, alpha=0.35 if not ob['mitigated'] else 0.10)
-            ax.text(len(chart_df)-22, ob['bottom'], label, color=color, fontsize=8, fontweight='bold')
+    if trade_setup:
+        ax.axhline(trade_setup['entry'], color='#2962ff', linestyle='-.', linewidth=1.5)
+        ax.axhline(trade_setup['sl'], color='#f23645', linestyle='--', linewidth=1.5)
+        ax.axhline(trade_setup['tp1'], color='#089981', linestyle='--', linewidth=1.5)
+        
+        ax.text(n_bars - 35, trade_setup['entry'], f" ENTRY: {trade_setup['entry']:.2f}", color='#2962ff', fontsize=8, fontweight='bold', backgroundcolor='#131722')
+        ax.text(n_bars - 35, trade_setup['sl'], f" SL: {trade_setup['sl']:.2f}", color='#f23645', fontsize=8, fontweight='bold', backgroundcolor='#131722')
+        ax.text(n_bars - 35, trade_setup['tp1'], f" TP1: {trade_setup['tp1']:.2f}", color='#089981', fontsize=8, fontweight='bold', backgroundcolor='#131722')
 
     ax.set_title(title_str, color='#d1d4dc', fontsize=9, fontweight='bold')
     img_buf.seek(0)
     return img_buf
 
 # ==========================================
-# 6. TELEGRAM COMMAND HANDLERS
+# 7. TELEGRAM INTERACTIVE HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
-        "🎯 *INSTITUTIONAL ICT CHART ANALYZER*\n\n"
-        "Engine Active with High-Precision Algorithmic Detection:\n"
-        "• **BSL / SSL Pools:** Live Buy-Side & Sell-Side Stop Pools\n"
-        "• **MSS / CHoCH:** True Body Displacement Structural Breaks\n"
-        "• **Unmitigated OBs:** Filtered High-Probability Entry Zones\n"
-        "• **200 EMA Filter:** Mandatory Gold Baseline Overlay\n\n"
-        "📌 *COMMAND:* `/analyze [SYMBOL] [TIMEFRAME]`\n"
-        "_Example:_ `/analyze GOLD 15m`"
+    msg = (
+        "🧠 *SELF-OPTIMIZING INSTITUTIONAL DESK ASSISTANT*\n\n"
+        "I am ready. Ask me anything directly, or issue a request.\n\n"
+        "📌 *EXAMPLES:*\n"
+        "• `/analyze GOLD 15m`\n"
+        "• Or just type: *'Check Gold on 15m'* or *'Show me my bot stats'*"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
     args = context.args
-    
-    raw_symbol = args[0].upper() if len(args) > 0 else "GOLD"
-    tf = args[1] if len(args) > 1 else "15m"
-    
-    status_msg = await update.message.reply_text(f"⏳ Running Institutional Calculation for {raw_symbol}...")
-    
+    symbol = args[0].upper() if len(args) > 0 else "GOLD"
+    tf = args[1].lower() if len(args) > 1 else "15m"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("📊 Full Market Analysis", callback_data=f"MODE_ANALYSIS|{symbol}|{tf}"),
+            InlineKeyboardButton("🎯 Search A+ Trade Setup", callback_data=f"MODE_SETUP|{symbol}|{tf}")
+        ],
+        [
+            InlineKeyboardButton("⚙️ Performance & Optimization Memory", callback_data="MODE_STATS")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        f"🎯 *TARGET ACQUIRED: {symbol} ({tf.upper()})*\nSelect your required workflow:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data_parts = query.data.split("|")
+    mode = data_parts[0]
+
+    if mode == "MODE_STATS":
+        stats_text = fetch_performance_stats()
+        await query.edit_message_text(stats_text, parse_mode="Markdown")
+        return
+
+    symbol = data_parts[1]
+    tf = data_parts[2]
+
+    await query.edit_message_text(f"⏳ Executing calculations for {symbol} ({tf.upper()})...")
+
     try:
-        df_daily, df_entry, macro_is_bearish, daily_ema, ticker_str = fetch_multi_timeframe_data(raw_symbol, tf)
+        df_daily, df_entry, macro_is_bearish, daily_ema, ticker_str = fetch_multi_timeframe_data(symbol, tf)
+        ict_data, swing_highs, swing_lows, trade_setup = analyze_structure_and_setup(df_entry)
         
         last_price = df_entry['Close'].iloc[-1]
         local_ema = df_entry['EMA200'].iloc[-1]
-        local_is_bearish = last_price < local_ema
-        
-        ict_data, swing_highs, swing_lows = analyze_ict_structure(df_entry)
+        local_bias = "BEARISH" if last_price < local_ema else "BULLISH"
 
-        macro_bias = "BEARISH" if macro_is_bearish else "BULLISH"
-        local_bias = "BEARISH" if local_is_bearish else "BULLISH"
+        if mode == "MODE_ANALYSIS":
+            title_str = f"{symbol} ({tf.upper()}) | Structural Market Map"
+            chart_img = generate_chart_image(df_entry, title_str, trade_setup=None)
 
-        unmitigated_count = len([ob for ob in ict_data['obs'] if not ob['mitigated']])
-        shift_status = ict_data['shifts'][-1]['type'] if ict_data['shifts'] else "No Structural Shift"
-        sweep_status = ict_data['sweeps'][-1]['type'] if ict_data['sweeps'] else "No Recent Liquidity Sweep"
+            analysis_report = (
+                f"📊 *STRUCTURAL MARKET DIAGNOSTIC: {symbol} ({tf.upper()})*\n\n"
+                f"• **200 EMA Baseline:** Market is trading `{local_bias}` below/above the Gold Line.\n"
+                f"• **Buy-Side Liquidity (BSL):** `{swing_highs[-1]['price']:.2f}`\n"
+                f"• **Sell-Side Liquidity (SSL):** `{swing_lows[-1]['price']:.2f}`\n"
+                f"• **Active Unmitigated OBs:** `{len([ob for ob in ict_data['obs'] if not ob['mitigated']])}` Zones Detected."
+            )
 
-        # Direct, zero-fluff institutional prompt
-        prompt = f"""
-        Act as an uncompromising quantitative institutional ICT trader. Provide a precise, non-negotiable market breakdown.
+            await context.bot.send_photo(chat_id=query.message.chat_id, photo=chart_img, caption=analysis_report, parse_mode="Markdown")
 
-        MARKET METRICS ({raw_symbol} - {tf}):
-        - Daily 200 EMA Bias: {macro_bias} (Daily EMA: {daily_ema:.2f})
-        - Execution Timeframe ({tf}) 200 EMA: {local_bias} (Current Price: {last_price:.2f}, Local EMA: {local_ema:.2f})
-        - Structure State: {shift_status}
-        - Liquidity State: {sweep_status}
-        - Unmitigated High-Prob OBs: {unmitigated_count} Active
+        elif mode == "MODE_SETUP":
+            if trade_setup:
+                log_signal(symbol, tf, trade_setup['direction'], trade_setup['entry'], trade_setup['sl'], trade_setup['tp1'], trade_setup['rr'])
+                title_str = f"{symbol} ({tf.upper()}) | A+ TRADE SETUP FOUND"
+                chart_img = generate_chart_image(df_entry, title_str, trade_setup)
 
-        CRITICAL EXECUTION RULE:
-        If Price is BELOW 200 EMA, absolute sell bias only. Ignore long signals. Target short realignments at Bearish Unmitigated OBs.
-        If Price is ABOVE 200 EMA, absolute buy bias only.
+                setup_report = (
+                    f"🎯 *GRADE A+ TRADE SETUP IDENTIFIED*\n\n"
+                    f"• *Asset/Timeframe:* `{symbol} ({tf.upper()})`\n"
+                    f"• *Order Direction:* `{trade_setup['direction']}`\n"
+                    f"• *Risk-to-Reward Ratio:* `1:{trade_setup['rr']:.2f}`\n"
+                    f"• *POI Zone:* `{trade_setup['zone']}`\n\n"
+                    f"📍 *EXECUTION PARAMETERS:*\n"
+                    f"• **Entry Limit:** `{trade_setup['entry']:.2f}`\n"
+                    f"• **Stop Loss:** `{trade_setup['sl']:.2f}`\n"
+                    f"• **Take Profit 1:** `{trade_setup['tp1']:.2f}`\n"
+                    f"• **Take Profit 2 (Target Liquidity):** `{trade_setup['tp2']:.2f}`"
+                )
+                await context.bot.send_photo(chat_id=query.message.chat_id, photo=chart_img, caption=setup_report, parse_mode="Markdown")
+            else:
+                title_str = f"{symbol} ({tf.upper()}) | NO A+ SETUP AVAILABLE"
+                chart_img = generate_chart_image(df_entry, title_str, trade_setup=None)
 
-        Write structured report:
-        🎯 INSTITUTIONAL ANALYSIS & MARKET STORY
-        1. **Macro Baseline:** State Daily and Local 200 EMA Alignment.
-        2. **Liquidity Target:** Identify target BSL or SSL liquidity pools.
-        3. **High-Probability Zone:** Pinpoint exact Unmitigated OB or FVG price level.
-        4. **Trade Execution Plan:** Explicit entry trigger requirement based on 200 EMA alignment.
-        """
-
-        analysis_text = fetch_ai_analysis(prompt)
-
-        title_str = f"{raw_symbol} ({tf.upper()}) | Shift: {shift_status} | Gold Line: 200 EMA"
-        chart_img = generate_chart_image(df_entry, title_str, ict_data, swing_highs, swing_lows)
-        
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=chart_img,
-            caption=f"🎯 *INSTITUTIONAL STRUCTURE MAP: {raw_symbol} ({tf.upper()})*",
-            parse_mode="Markdown"
-        )
-        
-        await status_msg.delete()
-        await context.bot.send_message(chat_id=chat_id, text=analysis_text, parse_mode="Markdown")
+                no_trade_report = (
+                    f"🛑 *VERDICT: NO GRADE A+ TRADE SETUP*\n\n"
+                    f"• **Reason:** Price action currently lacks a valid high-probability confluence (Liquidity Sweep + Unmitigated OB + Min 1:2.5 R:R).\n"
+                    f"• **Desk Rule:** Standing on hands to protect account capital."
+                )
+                await context.bot.send_photo(chat_id=query.message.chat_id, photo=chart_img, caption=no_trade_report, parse_mode="Markdown")
 
     except Exception as e:
-        await status_msg.edit_text(f"❌ Calculation error: {str(e)}")
+        await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Execution Error: {str(e)}")
 
 # ==========================================
-# 7. MAIN ENGINE RUNNER
+# 8. NATURAL CHAT INTELLIGENCE HANDLER
+# ==========================================
+async def natural_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+
+    if "stats" in text or "performance" in text or "memory" in text:
+        stats_msg = fetch_performance_stats()
+        await update.message.reply_text(stats_msg, parse_mode="Markdown")
+        return
+
+    words = text.split()
+    symbols = ["GOLD", "XAUUSD", "BTC", "BTCUSD", "SILVER", "OIL", "EURUSD", "GBPUSD"]
+    found_symbol = None
+    for word in words:
+        if word.upper() in symbols:
+            found_symbol = word.upper()
+            break
+
+    if found_symbol:
+        tf = "15m"
+        for word in words:
+            if word in ["1m", "5m", "15m", "1h", "4h", "1d"]:
+                tf = word
+                break
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Full Market Analysis", callback_data=f"MODE_ANALYSIS|{found_symbol}|{tf}"),
+                InlineKeyboardButton("🎯 Search A+ Trade Setup", callback_data=f"MODE_SETUP|{found_symbol}|{tf}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"I see you're asking about *{found_symbol} ({tf.upper()})*. What would you like me to generate?",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    else:
+        # Fallback conversational response using AI
+        response = analyze_with_ai(f"Act as an institutional risk manager and trading desk assistant. Respond briefly to this trader message: '{update.message.text}'")
+        await update.message.reply_text(response)
+
+# ==========================================
+# 9. MAIN APPLICATION RUNNER
 # ==========================================
 def run_telegram_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
+    application.add_handler(CallbackQueryHandler(button_callback_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, natural_chat_handler))
 
     loop.run_until_complete(application.initialize())
     loop.run_until_complete(application.start())
