@@ -4,3 +4,6 @@ yfinance
 mplfinance
 pillow
 openai
+requests
+numpy
+pandas
