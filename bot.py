@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import mplfinance as mpf
+import matplotlib.pyplot as plt
+from datetime import datetime, timezone
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -124,7 +126,7 @@ def analyze_with_ai(prompt):
     return "Analysis complete. Refer to structural levels on chart."
 
 # ==========================================
-# 4. DATA ENGINE & TICKER MAPPER
+# 4. DATA ENGINE & TICKER MAPPER (WEEKEND AWARE)
 # ==========================================
 def normalize_ticker(symbol):
     symbol = symbol.strip().upper()
@@ -149,33 +151,50 @@ def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
         ticker_candidates.insert(0, "GC=F")
 
     tf_clean = entry_tf.lower().strip()
-    entry_period = "5d" if tf_clean in ["1m", "5m"] else "10d"
+    
+    # Use larger periods on weekends/closures to capture the last active session
+    periods = ["10d", "30d", "60d"] if tf_clean in ["1m", "5m", "15m"] else ["1mo", "3mo"]
 
     df_daily, df_entry = pd.DataFrame(), pd.DataFrame()
     successful_ticker = primary_ticker
 
     for ticker_str in ticker_candidates:
-        try:
-            d_data = yf.download(ticker_str, period="1y", interval="1d", progress=False, auto_adjust=True)
-            if isinstance(d_data.columns, pd.MultiIndex):
-                d_data.columns = d_data.columns.get_level_values(0)
-            d_data = d_data.dropna()
+        for period in periods:
+            try:
+                d_data = yf.download(ticker_str, period="1y", interval="1d", progress=False, auto_adjust=True)
+                if isinstance(d_data.columns, pd.MultiIndex):
+                    d_data.columns = d_data.columns.get_level_values(0)
+                d_data = d_data.dropna()
 
-            e_data = yf.download(ticker_str, period=entry_period, interval=tf_clean, progress=False, auto_adjust=True)
-            if isinstance(e_data.columns, pd.MultiIndex):
-                e_data.columns = e_data.columns.get_level_values(0)
-            e_data = e_data.dropna()
+                e_data = yf.download(ticker_str, period=period, interval=tf_clean, progress=False, auto_adjust=True)
+                if isinstance(e_data.columns, pd.MultiIndex):
+                    e_data.columns = e_data.columns.get_level_values(0)
+                e_data = e_data.dropna()
 
-            if not d_data.empty and not e_data.empty:
-                df_daily = d_data
-                df_entry = e_data
-                successful_ticker = ticker_str
-                break
-        except Exception:
-            continue
+                if not d_data.empty and not e_data.empty:
+                    df_daily = d_data
+                    df_entry = e_data
+                    successful_ticker = ticker_str
+                    break
+            except Exception:
+                continue
+        if not df_daily.empty and not df_entry.empty:
+            break
 
     if df_daily.empty or df_entry.empty:
         raise ValueError(f"Unable to retrieve market data for '{symbol}'.")
+
+    # Detect if market is closed based on last bar timestamp
+    last_candle_time = df_entry.index[-1]
+    now_utc = datetime.now(timezone.utc)
+    
+    # If the last candle is older than 2 hours for crypto or over weekend for commodities/forex
+    if hasattr(last_candle_time, 'tz') and last_candle_time.tz is not None:
+        delta_hours = (now_utc - last_candle_time).total_seconds() / 3600
+    else:
+        delta_hours = (now_utc.replace(tzinfo=None) - last_candle_time).total_seconds() / 3600
+
+    is_market_closed = delta_hours > 3.0
 
     df_daily['EMA200'] = df_daily['Close'].ewm(span=200, adjust=False).mean()
     daily_close = df_daily['Close'].iloc[-1]
@@ -184,7 +203,7 @@ def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
 
     df_entry['EMA200'] = df_entry['Close'].ewm(span=200, adjust=False).mean()
 
-    return df_daily, df_entry, macro_is_bearish, daily_ema, successful_ticker
+    return df_daily, df_entry, macro_is_bearish, daily_ema, successful_ticker, is_market_closed
 
 # ==========================================
 # 5. A+ CONFLUENCE STRUCTURE CALCULATOR
@@ -315,7 +334,7 @@ def analyze_structure_and_setup(df):
     return results, swing_highs, swing_lows, trade_setup
 
 # ==========================================
-# 6. HIGH-CONTRAST CHART GENERATOR (TIMESTAMP MAPPED)
+# 6. HIGH-CONTRAST CHART GENERATOR (RENDER-ORDER FIXED)
 # ==========================================
 def generate_chart_image(df, title_str, trade_setup=None):
     img_buf = io.BytesIO()
@@ -337,13 +356,13 @@ def generate_chart_image(df, title_str, trade_setup=None):
     
     addplots = [mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5)]
 
+    # 1. Build figure without instant export
     fig, axlist = mpf.plot(
         chart_df,
         type='candle',
         style=style,
         volume=False,
         addplot=addplots,
-        savefig=dict(fname=img_buf, dpi=130),
         returnfig=True
     )
 
@@ -353,32 +372,32 @@ def generate_chart_image(df, title_str, trade_setup=None):
     mid_time = chart_df.index[len(chart_df) // 3]
     last_time = chart_df.index[-20] if len(chart_df) >= 20 else chart_df.index[0]
 
-    # Map Buy-Side Liquidity
+    # 2. Draw BSL Level
     if swing_highs:
         last_bsl = swing_highs[-1]['price']
         ax.axhline(last_bsl, color='#00e676', linestyle=':', linewidth=1.2)
         ax.text(first_time, last_bsl, " BSL (Buy-Side Liquidity)", color='#00e676', fontsize=8, fontweight='bold', verticalalignment='bottom')
 
-    # Map Sell-Side Liquidity
+    # 3. Draw SSL Level
     if swing_lows:
         last_ssl = swing_lows[-1]['price']
         ax.axhline(last_ssl, color='#ff1744', linestyle=':', linewidth=1.2)
         ax.text(first_time, last_ssl, " SSL (Sell-Side Liquidity)", color='#ff1744', fontsize=8, fontweight='bold', verticalalignment='top')
 
-    # Map Market Structure Shifts
+    # 4. Draw MSS Shifts
     for shift in ict_data['shifts'][-2:]:
         color = '#00e676' if 'BULLISH' in shift['type'] else '#ff1744'
         ax.axhline(shift['price'], color=color, linestyle='--', linewidth=1.2)
         ax.text(mid_time, shift['price'], f" {shift['type']} ", color=color, fontsize=8, fontweight='bold', backgroundcolor='#131722')
 
-    # Map Order Blocks (Shaded Boxes)
+    # 5. Draw Order Blocks
     for ob in ict_data['obs'][-3:]:
         color = '#089981' if ob['type'] == 'BULLISH_OB' else '#f23645'
         label = " BULLISH OB" if ob['type'] == 'BULLISH_OB' else " BEARISH OB"
         ax.axhspan(ob['bottom'], ob['top'], color=color, alpha=0.25 if not ob['mitigated'] else 0.08)
         ax.text(last_time, ob['top'], label, color=color, fontsize=8, fontweight='bold')
 
-    # Map Active Trade Setup Levels
+    # 6. Draw Setup Parameter Lines
     if trade_setup:
         ax.axhline(trade_setup['entry'], color='#2962ff', linestyle='-.', linewidth=1.5)
         ax.axhline(trade_setup['sl'], color='#f23645', linestyle='--', linewidth=1.5)
@@ -389,6 +408,11 @@ def generate_chart_image(df, title_str, trade_setup=None):
         ax.text(last_time, trade_setup['tp1'], f" TP1: {trade_setup['tp1']:.2f}", color='#089981', fontsize=8, fontweight='bold', backgroundcolor='#131722')
 
     ax.set_title(title_str, color='#d1d4dc', fontsize=9, fontweight='bold')
+
+    # 7. Render & save to buffer AFTER overlays are drawn
+    fig.savefig(img_buf, format='png', dpi=130, bbox_inches='tight', facecolor='#131722')
+    plt.close(fig)
+
     img_buf.seek(0)
     return img_buf
 
@@ -445,19 +469,22 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(f"⏳ Executing calculations for {symbol} ({tf.upper()})...")
 
     try:
-        df_daily, df_entry, macro_is_bearish, daily_ema, ticker_str = fetch_multi_timeframe_data(symbol, tf)
+        df_daily, df_entry, macro_is_bearish, daily_ema, ticker_str, is_closed = fetch_multi_timeframe_data(symbol, tf)
         ict_data, swing_highs, swing_lows, trade_setup = analyze_structure_and_setup(df_entry)
         
         last_price = df_entry['Close'].iloc[-1]
         local_ema = df_entry['EMA200'].iloc[-1]
         local_bias = "BEARISH" if last_price < local_ema else "BULLISH"
+        
+        market_status_str = "⚠️ *MARKET CLOSED* (Analysis based on last session close)" if is_closed else "🟢 *MARKET OPEN* (Live Feed)"
 
         if mode == "MODE_ANALYSIS":
             title_str = f"{symbol} ({tf.upper()}) | Structural Market Map"
             chart_img = generate_chart_image(df_entry, title_str, trade_setup=None)
 
             analysis_report = (
-                f"📊 *STRUCTURAL MARKET DIAGNOSTIC: {symbol} ({tf.upper()})*\n\n"
+                f"📊 *STRUCTURAL MARKET DIAGNOSTIC: {symbol} ({tf.upper()})*\n"
+                f"Status: {market_status_str}\n\n"
                 f"• **200 EMA Baseline:** Market is trading `{local_bias}` below/above the Gold Line.\n"
                 f"• **Buy-Side Liquidity (BSL):** `{swing_highs[-1]['price']:.2f}`\n"
                 f"• **Sell-Side Liquidity (SSL):** `{swing_lows[-1]['price']:.2f}`\n"
@@ -473,7 +500,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 chart_img = generate_chart_image(df_entry, title_str, trade_setup)
 
                 setup_report = (
-                    f"🎯 *GRADE A+ TRADE SETUP IDENTIFIED*\n\n"
+                    f"🎯 *GRADE A+ TRADE SETUP IDENTIFIED*\n"
+                    f"Status: {market_status_str}\n\n"
                     f"• *Asset/Timeframe:* `{symbol} ({tf.upper()})`\n"
                     f"• *Order Direction:* `{trade_setup['direction']}`\n"
                     f"• *Risk-to-Reward Ratio:* `1:{trade_setup['rr']:.2f}`\n"
@@ -490,7 +518,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 chart_img = generate_chart_image(df_entry, title_str, trade_setup=None)
 
                 no_trade_report = (
-                    f"🛑 *VERDICT: NO GRADE A+ TRADE SETUP*\n\n"
+                    f"🛑 *VERDICT: NO GRADE A+ TRADE SETUP*\n"
+                    f"Status: {market_status_str}\n\n"
                     f"• **Reason:** Price action currently lacks a valid high-probability confluence (Liquidity Sweep + Unmitigated OB + Min 1:2.5 R:R).\n"
                     f"• **Desk Rule:** Standing on hands to protect account capital."
                 )
