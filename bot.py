@@ -20,9 +20,8 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "Multi-Timeframe POI Chart Analyzer Bot is Active 24/7!", 200
+    return "Multi-Timeframe POI Chart Analyzer (FVG/OB/BB) is Active 24/7!", 200
 
-# Environment variables
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
@@ -74,7 +73,7 @@ def fetch_ai_analysis(prompt):
         "🎯 *AI ANALYSIS & MARKET STORY*\n\n"
         "1. **Overall Bias:** Multi-Timeframe Structural Alignment Active.\n"
         "2. **Macro Context:** Reference the 200 EMA (Yellow Line) for major trend direction.\n"
-        "3. **POI Footprints:** Red shaded zone = BSL (Sell Interest), Green shaded zone = SSL (Buy Interest)."
+        "3. **Mapped POIs:** Green zones represent Bullish OB/FVG demand pools; Red zones represent Bearish OB/FVG supply pools."
     )
 
 # ==========================================
@@ -104,49 +103,105 @@ def normalize_ticker(symbol):
     return symbol
 
 def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
-    """Fetches Daily macro context alongside execution timeframe data."""
+    """Fetches Daily macro context alongside execution timeframe data cleanly."""
     ticker_str = normalize_ticker(symbol)
+    tf_clean = entry_tf.lower().strip()
+    entry_period = "5d" if tf_clean in ["1m", "5m"] else "10d"
 
     # 1. Macro Trend Data (Daily)
-    df_daily = yf.download(ticker_str, period="1y", interval="1d", progress=False)
+    df_daily = yf.download(ticker_str, period="1y", interval="1d", progress=False, auto_adjust=True)
     if isinstance(df_daily.columns, pd.MultiIndex):
         df_daily.columns = df_daily.columns.get_level_values(0)
-        
+    df_daily = df_daily.dropna()
+
+    if df_daily.empty:
+        raise ValueError(f"No Daily data returned for '{symbol}' ({ticker_str}). Try using 'GOLD' or 'XAUUSD'.")
+
     df_daily['EMA200'] = df_daily['Close'].ewm(span=200, adjust=False).mean()
     daily_close = df_daily['Close'].iloc[-1]
     daily_ema = df_daily['EMA200'].iloc[-1]
     macro_is_bearish = daily_close < daily_ema
 
-    # 2. Local Execution Data (e.g. 15m)
-    df_entry = yf.download(ticker_str, period="10d", interval=entry_tf, progress=False)
+    # 2. Local Execution Data
+    df_entry = yf.download(ticker_str, period=entry_period, interval=tf_clean, progress=False, auto_adjust=True)
     if isinstance(df_entry.columns, pd.MultiIndex):
         df_entry.columns = df_entry.columns.get_level_values(0)
-        
+    df_entry = df_entry.dropna()
+
+    if df_entry.empty:
+        raise ValueError(f"No {entry_tf} candles returned for '{symbol}' ({ticker_str}).")
+
     df_entry['EMA200'] = df_entry['Close'].ewm(span=200, adjust=False).mean()
     
     return df_daily, df_entry, macro_is_bearish, daily_ema, ticker_str
 
-def find_pivots(df, window=3):
-    """Calculates local fractal Pivot Highs and Pivot Lows."""
-    pivots_high = []
-    pivots_low = []
-    for i in range(window, len(df) - window):
-        high_window = df['High'].iloc[i-window:i+window+1]
-        low_window = df['Low'].iloc[i-window:i+window+1]
+# ==========================================
+# 4. ALGORITHMIC ICT POI DETECTORS (FVG / OB / BB)
+# ==========================================
+def detect_fvg(df):
+    """Detects active Bullish and Bearish Fair Value Gaps (3-candle imbalance)."""
+    fvgs = []
+    for i in range(2, len(df)):
+        # Bullish FVG: Candle 1 High < Candle 3 Low
+        if df['Low'].iloc[i] > df['High'].iloc[i-2]:
+            bottom = df['High'].iloc[i-2]
+            top = df['Low'].iloc[i]
+            fvgs.append({'type': 'BULLISH_FVG', 'top': top, 'bottom': bottom, 'index': i})
+            
+        # Bearish FVG: Candle 1 Low > Candle 3 High
+        elif df['High'].iloc[i] < df['Low'].iloc[i-2]:
+            top = df['Low'].iloc[i-2]
+            bottom = df['High'].iloc[i]
+            fvgs.append({'type': 'BEARISH_FVG', 'top': top, 'bottom': bottom, 'index': i})
+            
+    return fvgs
+
+def detect_order_blocks(df):
+    """Detects recent Bullish and Bearish Order Blocks (OB) & Breaker Blocks (BB)."""
+    obs = []
+    
+    for i in range(5, len(df) - 1):
+        # Displacement check: Strong body expansion
+        body_size = abs(df['Close'].iloc[i] - df['Open'].iloc[i])
+        avg_body = abs(df['Close'].iloc[i-5:i] - df['Open'].iloc[i-5:i]).mean()
         
-        if df['High'].iloc[i] == high_window.max():
-            pivots_high.append((df.index[i], df['High'].iloc[i], df['Low'].iloc[i]))
-            
-        if df['Low'].iloc[i] == low_window.min():
-            pivots_low.append((df.index[i], df['High'].iloc[i], df['Low'].iloc[i]))
-            
-    return pivots_high, pivots_low
+        # Bullish Order Block: Last down candle before strong up expansion
+        if df['Close'].iloc[i] > df['Open'].iloc[i] and body_size > (1.5 * avg_body):
+            for j in range(i-1, i-4, -1):
+                if df['Close'].iloc[j] < df['Open'].iloc[j]:  # Down candle
+                    ob_top = max(df['Open'].iloc[j], df['Close'].iloc[j])
+                    ob_bottom = df['Low'].iloc[j]
+                    
+                    # Check if broken later (Breaker Block)
+                    current_close = df['Close'].iloc[-1]
+                    if current_close < ob_bottom:
+                        obs.append({'type': 'BEARISH_BB', 'top': ob_top, 'bottom': ob_bottom, 'index': j})
+                    else:
+                        obs.append({'type': 'BULLISH_OB', 'top': ob_top, 'bottom': ob_bottom, 'index': j})
+                    break
+
+        # Bearish Order Block: Last up candle before strong down expansion
+        elif df['Close'].iloc[i] < df['Open'].iloc[i] and body_size > (1.5 * avg_body):
+            for j in range(i-1, i-4, -1):
+                if df['Close'].iloc[j] > df['Open'].iloc[j]:  # Up candle
+                    ob_top = df['High'].iloc[j]
+                    ob_bottom = min(df['Open'].iloc[j], df['Close'].iloc[j])
+                    
+                    # Check if broken later (Breaker Block)
+                    current_close = df['Close'].iloc[-1]
+                    if current_close > ob_top:
+                        obs.append({'type': 'BULLISH_BB', 'top': ob_top, 'bottom': ob_bottom, 'index': j})
+                    else:
+                        obs.append({'type': 'BEARISH_OB', 'top': ob_top, 'bottom': ob_bottom, 'index': j})
+                    break
+
+    return obs
 
 # ==========================================
-# 4. CHART GENERATOR WITH VISUAL POI ZONES
+# 5. CHART GENERATOR WITH VISUAL FVG, OB & BB MAPPING
 # ==========================================
 def generate_chart_image(df, title_str, is_long=True):
-    """Renders dark-themed chart with 200 EMA, POI Zones (Shaded Blocks), and Trade Box."""
+    """Renders TradingView dark chart with 200 EMA and explicitly mapped FVG, OB, & BB POI Zones."""
     img_buf = io.BytesIO()
     chart_df = df.tail(80).copy()
     
@@ -159,64 +214,36 @@ def generate_chart_image(df, title_str, is_long=True):
         y_on_right=True, facecolor='#131722', figcolor='#131722'
     )
     
-    # Calculate Pivots & POI Zones
-    p_highs, p_lows = find_pivots(chart_df, window=3)
-    
-    bsl_points = [np.nan] * len(chart_df)
-    ssl_points = [np.nan] * len(chart_df)
-    price_range = chart_df['High'].max() - chart_df['Low'].min()
-    
-    for idx_time, h_val, _ in p_highs:
-        if idx_time in chart_df.index:
-            loc = chart_df.index.get_loc(idx_time)
-            bsl_points[loc] = h_val + (price_range * 0.02)
-            
-    for idx_time, _, l_val in p_lows:
-        if idx_time in chart_df.index:
-            loc = chart_df.index.get_loc(idx_time)
-            ssl_points[loc] = l_val - (price_range * 0.02)
-
-    # Base Plot: Yellow 200 EMA + Pivot Markers
+    # 200 EMA Line
     addplots = [
         mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5)
     ]
-    if any(~np.isnan(bsl_points)):
-        addplots.append(mpf.make_addplot(bsl_points, type='scatter', marker='v', markersize=40, color='#f23645'))
-    if any(~np.isnan(ssl_points)):
-        addplots.append(mpf.make_addplot(ssl_points, type='scatter', marker='^', markersize=40, color='#089981'))
 
-    recent_bsl = p_highs[-1][1] if len(p_highs) > 0 else chart_df['High'].tail(30).max()
-    recent_ssl = p_lows[-1][2] if len(p_lows) > 0 else chart_df['Low'].tail(30).min()
-    
-    # Align position setup strictly with 200 EMA filter
+    last_close = chart_df['Close'].iloc[-1]
+    recent_high = chart_df['High'].max()
+    recent_low = chart_df['Low'].min()
+    price_range = recent_high - recent_low
+
+    # Position Setup Bounds
     if is_long:
-        entry = recent_ssl
-        risk_dist = max((recent_bsl - recent_ssl) * 0.12, price_range * 0.04)
+        entry = recent_low
+        risk_dist = max((recent_high - recent_low) * 0.12, price_range * 0.04)
         sl = entry - risk_dist
-        tp = recent_bsl
+        tp = recent_high
     else:
-        entry = recent_bsl
-        risk_dist = max((recent_bsl - recent_ssl) * 0.12, price_range * 0.04)
+        entry = recent_high
+        risk_dist = max((recent_high - recent_low) * 0.12, price_range * 0.04)
         sl = entry + risk_dist
-        tp = recent_ssl
+        tp = recent_low
 
-    # Setup Horizontal Lines
     hlines_dict = dict(
-        hlines=[recent_bsl, recent_ssl, entry, sl, tp],
-        colors=['#f23645', '#089981', '#2962ff', '#e53935', '#43a047'],
-        linestyle=[':', ':', '-.', '--', '--'],
-        linewidths=[1.0, 1.0, 1.2, 1.0, 1.0]
+        hlines=[entry, sl, tp],
+        colors=['#2962ff', '#e53935', '#43a047'],
+        linestyle=['-.', '--', '--'],
+        linewidths=[1.2, 1.0, 1.0]
     )
 
-    # Build shaded regions for Position Box (Rightmost 15 candles)
-    fill_tp_data = [np.nan] * len(chart_df)
-    fill_sl_data = [np.nan] * len(chart_df)
-    box_width = min(15, len(chart_df))
-    
-    for i in range(len(chart_df) - box_width, len(chart_df)):
-        fill_tp_data[i] = tp
-        fill_sl_data[i] = sl
-
+    # Base Plotting
     fig, axlist = mpf.plot(
         chart_df,
         type='candle',
@@ -224,50 +251,58 @@ def generate_chart_image(df, title_str, is_long=True):
         volume=False,
         hlines=hlines_dict,
         addplot=addplots,
-        fill_between=dict(y1=fill_tp_data, y2=entry, color='#089981', alpha=0.18),
         savefig=dict(fname=img_buf, dpi=130),
         returnfig=True
     )
-    
-    # Position SL Zone Shading
-    axlist[0].fill_between(
-        range(len(chart_df)), fill_sl_data, entry,
-        where=~np.isnan(fill_sl_data), color='#f23645', alpha=0.18
-    )
 
-    # MAP VISUAL POI ZONES DIRECTLY ON CHART (Shaded Bands)
-    poi_band_height = price_range * 0.025
-    
-    # BSL POI Zone (Red Band around recent pivot high)
-    axlist[0].axhspan(
-        recent_bsl - poi_band_height, recent_bsl + poi_band_height,
-        color='#f23645', alpha=0.20, label='BSL POI Zone'
-    )
-    
-    # SSL POI Zone (Green Band around recent pivot low)
-    axlist[0].axhspan(
-        recent_ssl - poi_band_height, recent_ssl + poi_band_height,
-        color='#089981', alpha=0.20, label='SSL POI Zone'
-    )
+    ax = axlist[0]
 
-    axlist[0].set_title(title_str, color='#d1d4dc', fontsize=9, fontweight='bold')
+    # MAP STRUCTURAL POIs DIRECTLY ON CHART (FVG, OB, BB)
+    fvgs = detect_fvg(chart_df)
+    obs = detect_order_blocks(chart_df)
+
+    # 1. Render Fair Value Gaps (FVGs)
+    recent_fvgs = fvgs[-2:] if len(fvgs) >= 2 else fvgs
+    for fvg in recent_fvgs:
+        if fvg['type'] == 'BULLISH_FVG':
+            ax.axhspan(fvg['bottom'], fvg['top'], color='#089981', alpha=0.25, hatch='//')
+            ax.text(0, fvg['top'], " Bullish FVG", color='#089981', fontsize=7, verticalalignment='bottom')
+        elif fvg['type'] == 'BEARISH_FVG':
+            ax.axhspan(fvg['bottom'], fvg['top'], color='#f23645', alpha=0.25, hatch='\\\\')
+            ax.text(0, fvg['bottom'], " Bearish FVG", color='#f23645', fontsize=7, verticalalignment='top')
+
+    # 2. Render Order Blocks & Breaker Blocks (OB / BB)
+    recent_obs = obs[-2:] if len(obs) >= 2 else obs
+    for ob in recent_obs:
+        if ob['type'] == 'BULLISH_OB':
+            ax.axhspan(ob['bottom'], ob['top'], color='#00e676', alpha=0.30)
+            ax.text(len(chart_df)-15, ob['top'], " Bullish OB", color='#00e676', fontsize=8, fontweight='bold')
+        elif ob['type'] == 'BEARISH_OB':
+            ax.axhspan(ob['bottom'], ob['top'], color='#ff1744', alpha=0.30)
+            ax.text(len(chart_df)-15, ob['bottom'], " Bearish OB", color='#ff1744', fontsize=8, fontweight='bold')
+        elif ob['type'] == 'BEARISH_BB':
+            ax.axhspan(ob['bottom'], ob['top'], color='#ff9100', alpha=0.30)
+            ax.text(len(chart_df)-15, ob['bottom'], " Breaker Block (BB)", color='#ff9100', fontsize=8, fontweight='bold')
+
+    ax.set_title(title_str, color='#d1d4dc', fontsize=9, fontweight='bold')
     img_buf.seek(0)
     return img_buf
 
 # ==========================================
-# 5. TELEGRAM BOT HANDLERS
+# 6. TELEGRAM BOT HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "🤖 *MULTI-TIMEFRAME POI CHART ANALYZER*\n\n"
-        "I map Points of Interest (POIs) directly on charts and enforce 200 EMA macro filters to prevent bull/bear traps.\n\n"
+        "I map structural **Fair Value Gaps (FVG)**, **Order Blocks (OB)**, and **Breaker Blocks (BB)** directly onto your charts while enforcing 200 EMA macro context.\n\n"
         "📌 *COMMANDS:*\n"
         "• `/analyze [SYMBOL] [TIMEFRAME]`\n"
-        "  _Examples:_ `/analyze GOLD 15m`, `/analyze GBPUSD 15m`, `/analyze BTC 5m`\n\n"
-        "📊 *ON-CHART MAP KEY:*\n"
+        "  _Examples:_ `/analyze XAUUSD 15m`, `/analyze GOLD 5m`, `/analyze BTC 15m`\n\n"
+        "📊 *ON-CHART POI LEGEND:*\n"
         "1. 🟡 **Gold Line:** 200 EMA Trend Filter.\n"
-        "2. 🔴 **Red Zone (BSL POI):** Buy-Side Liquidity / Short Entry Zone.\n"
-        "3. 🟢 **Green Zone (SSL POI):** Sell-Side Liquidity / Long Entry Zone."
+        "2. 🟩 **Green Shaded Zone:** Bullish Order Block (OB) / FVG Demand Zone.\n"
+        "3. 🟥 **Red Shaded Zone:** Bearish Order Block (OB) / FVG Supply Zone.\n"
+        "4. 🟧 **Orange Shaded Zone:** Breaker Block (BB) Support/Resistance Flip."
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -278,7 +313,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_symbol = args[0].upper() if len(args) > 0 else "GOLD"
     tf = args[1] if len(args) > 1 else "15m"
     
-    status_msg = await update.message.reply_text(f"📊 Mapping POI Zones & 200 EMA for {raw_symbol}...")
+    status_msg = await update.message.reply_text(f"📊 Mapping FVG, OB & BB POI Zones for {raw_symbol}...")
     
     try:
         df_daily, df_entry, macro_is_bearish, daily_ema, ticker_str = fetch_multi_timeframe_data(raw_symbol, tf)
@@ -289,45 +324,47 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         last_price = df_entry['Close'].iloc[-1]
         local_ema = df_entry['EMA200'].iloc[-1]
-        recent_high = df_entry['High'].tail(30).max()
-        recent_low = df_entry['Low'].tail(30).min()
-        
         local_is_bearish = last_price < local_ema
         
         macro_bias = "BEARISH" if macro_is_bearish else "BULLISH"
         local_bias = "BEARISH" if local_is_bearish else "BULLISH"
+
+        # Detect structural POIs
+        fvgs = detect_fvg(df_entry)
+        obs = detect_order_blocks(df_entry)
         
+        fvg_summary = f"{len(fvgs)} Active FVG(s) detected" if fvgs else "No immediate FVG gaps"
+        ob_summary = f"{len(obs)} Active OB/BB Zone(s) detected" if obs else "No immediate Order Blocks"
+
         prompt = f"""
-        You are a quantitative price-action trader.
-        CRITICAL RULE:
+        You are an ICT quantitative price-action trader.
+        CRITICAL CONTEXT:
         - Symbol: {raw_symbol} ({ticker_str})
         - Daily 200 EMA Macro Bias: {macro_bias} (Daily Close: {df_daily['Close'].iloc[-1]:.2f}, Daily EMA: {daily_ema:.2f})
         - {tf.upper()} 200 EMA Local Bias: {local_bias} (Current Price: {last_price:.2f}, Local EMA: {local_ema:.2f})
+        - Structural POI Map: {fvg_summary} | {ob_summary}
         
-        If price is BELOW the 200 EMA, DO NOT suggest Buy setups. Any upward push into the Red BSL POI Zone is a RETRACEMENT / BULL TRAP.
+        RULE: If price is BELOW the 200 EMA, DO NOT recommend buys. Any pullbacks into Bearish OB or FVG supply zones are sell realignment setups.
         
         Analyze {raw_symbol} ({tf}):
-        - Red BSL POI Zone (High): {recent_high:.2f}
-        - Green SSL POI Zone (Low): {recent_low:.2f}
-        
         Format output:
         🎯 AI ANALYSIS & MARKET STORY
         1. Macro Bias: {macro_bias} (Daily 200 EMA)
         2. Execution Bias ({tf}): {local_bias}
-        3. POI Interaction: Explain how price is reacting to the mapped Red BSL or Green SSL POI bands.
-        4. Realignment Setup: Detail expected entry alignment.
+        3. Structural POI Reaction: Detail how price is interacting with mapped FVG, OB, or Breaker Block zones.
+        4. Realignment Setup: Detail expected entry trigger.
         """
 
         analysis_text = fetch_ai_analysis(prompt)
 
         is_long = not local_is_bearish
-        title_str = f"{raw_symbol} ({tf.upper()}) | Trend: {local_bias} | Gold Line = 200 EMA"
+        title_str = f"{raw_symbol} ({tf.upper()}) | Trend: {local_bias} | Mapped POIs (FVG/OB/BB)"
         chart_img = generate_chart_image(df_entry, title_str, is_long=is_long)
         
         await context.bot.send_photo(
             chat_id=chat_id,
             photo=chart_img,
-            caption=f"🎯 *LIVE POI MAP: {raw_symbol} ({tf.upper()})*",
+            caption=f"🎯 *LIVE POI MAP (FVG / OB / BB): {raw_symbol} ({tf.upper()})*",
             parse_mode="Markdown"
         )
         
@@ -338,10 +375,10 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"❌ Error generating analysis: {str(e)}")
 
 # ==========================================
-# 6. REAL-TIME SIGNAL SCANNER
+# 7. REAL-TIME SIGNAL SCANNER
 # ==========================================
 async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
-    """Periodically scans liquidity sweeps aligned with the 200 EMA."""
+    """Periodically scans liquidity sweeps and POI taps aligned with the 200 EMA."""
     if not MY_CHAT_ID:
         return
 
@@ -353,30 +390,24 @@ async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             last_close = df_entry['Close'].iloc[-1]
-            recent_high = df_entry['High'].tail(20).max()
-            recent_low = df_entry['Low'].tail(20).min()
-
-            if local_is_bearish and abs(last_close - recent_high) < (recent_high * 0.001):
-                alert_text = (
-                    f"🚨 *AUTOMATED BEARISH REALIGNMENT ALERT: {symbol}*\n\n"
-                    f"Price ({last_close:.2f}) tapped into the Red BSL POI Zone ({recent_high:.2f}) below the 200 EMA.\n"
-                    f"⚡ *Action:* Look for short realignment entries."
-                )
-                await context.bot.send_message(chat_id=MY_CHAT_ID, text=alert_text, parse_mode="Markdown")
-                
-            elif (not local_is_bearish) and abs(last_close - recent_low) < (recent_low * 0.001):
-                alert_text = (
-                    f"🚨 *AUTOMATED BULLISH REALIGNMENT ALERT: {symbol}*\n\n"
-                    f"Price ({last_close:.2f}) tapped into the Green SSL POI Zone ({recent_low:.2f}) above the 200 EMA.\n"
-                    f"⚡ *Action:* Look for long realignment entries."
-                )
-                await context.bot.send_message(chat_id=MY_CHAT_ID, text=alert_text, parse_mode="Markdown")
+            fvgs = detect_fvg(df_entry)
+            
+            # Check for FVG taps aligned with trend
+            for fvg in fvgs[-2:]:
+                if local_is_bearish and fvg['type'] == 'BEARISH_FVG' and fvg['bottom'] <= last_close <= fvg['top']:
+                    alert_text = (
+                        f"🚨 *BEARISH POI ALERT: {symbol}*\n\n"
+                        f"Price ({last_close:.2f}) tapped into a **Bearish FVG Zone** ({fvg['bottom']:.2f} - {fvg['top']:.2f}) below the 200 EMA.\n"
+                        f"⚡ *Action:* Look for short realignment entries."
+                    )
+                    await context.bot.send_message(chat_id=MY_CHAT_ID, text=alert_text, parse_mode="Markdown")
+                    break
 
         except Exception as e:
             print(f"Scanner error for {symbol}: {e}")
 
 # ==========================================
-# 7. APPLICATION INITIALIZATION & THREADING
+# 8. APPLICATION INITIALIZATION & THREADING
 # ==========================================
 def run_telegram_bot():
     """Runs Telegram bot polling cleanly inside an independent AsyncIO loop."""
