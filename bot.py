@@ -324,26 +324,28 @@ async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
             print(f"Scanner error for {symbol}: {e}")
 
 # ==========================================
-# 6. APPLICATION INITIALIZATION
+# 6. APPLICATION INITIALIZATION & THREADING
 # ==========================================
-def main():
-    # Start Flask Web App in background thread
-    port = int(os.environ.get("PORT", 5000))
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
-
-    # Build Telegram Application
+def start_telegram_bot():
+    """Runs Telegram bot polling in a dedicated background thread."""
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     # Register Command Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
 
-    # Schedule Market Scanner to run every 5 minutes (300 seconds)
+    # Schedule Market Scanner Job Queue (Every 5 minutes)
     job_queue = application.job_queue
     job_queue.run_repeating(auto_market_scanner, interval=300, first=10)
 
-    # Run Telegram Polling Loop
+    # Start Polling
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main()
+    # 1. Launch Telegram Bot Polling in Background Thread
+    telegram_thread = threading.Thread(target=start_telegram_bot, daemon=True)
+    telegram_thread.start()
+
+    # 2. Run Flask Web App on Main Thread (Render binds to PORT 10000 immediately)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
