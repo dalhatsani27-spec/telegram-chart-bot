@@ -1,8 +1,9 @@
-python-telegram-bot
+python-telegram-bot[job-queue]
 flask
 yfinance
-pandas
-numpy
 mplfinance
-matplotlib
+pillow
+openai
 requests
+numpy
+pandas
