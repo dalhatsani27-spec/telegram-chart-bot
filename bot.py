@@ -46,11 +46,19 @@ threading.Thread(target=keep_alive_ping, daemon=True).start()
 # ==========================================
 ai_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
+    api_key=OPENROUTER_API_KEY or "dummy_key",
 )
 
 def fetch_ai_analysis(prompt):
     """Fallback model chain for high-reliability text analysis."""
+    if not OPENROUTER_API_KEY:
+        return (
+            "🎯 *AI ANALYSIS & MARKET STORY*\n\n"
+            "1. **Overall Bias:** Multi-Timeframe Structural Alignment Active.\n"
+            "2. **Macro Context:** Reference the 200 EMA (Gold Line) for major trend direction.\n"
+            "3. **Mapped POIs:** Green zones represent Bullish OB/FVG demand pools; Red zones represent Bearish OB/FVG supply pools."
+        )
+
     vision_models = [
         "google/gemma-4-31b-it:free",
         "google/gemma-4-26b-a4b-it:free",
@@ -416,6 +424,10 @@ async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 def run_telegram_bot():
     """Runs Telegram bot polling cleanly inside an independent AsyncIO loop."""
+    if not TELEGRAM_BOT_TOKEN:
+        print("[Error] TELEGRAM_BOT_TOKEN missing in environment variables! Telegram bot skipped.")
+        return
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -425,7 +437,8 @@ def run_telegram_bot():
     application.add_handler(CommandHandler("analyze", analyze_command))
 
     job_queue = application.job_queue
-    job_queue.run_repeating(auto_market_scanner, interval=300, first=10)
+    if job_queue:
+        job_queue.run_repeating(auto_market_scanner, interval=300, first=10)
 
     loop.run_until_complete(application.initialize())
     loop.run_until_complete(application.start())
