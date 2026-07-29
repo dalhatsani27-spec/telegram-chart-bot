@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import mplfinance as mpf
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -26,7 +28,6 @@ RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
-MY_CHAT_ID = os.environ.get("MY_CHAT_ID")
 
 def keep_alive_ping():
     while True:
@@ -38,8 +39,6 @@ def keep_alive_ping():
                 pass
 
 threading.Thread(target=keep_alive_ping, daemon=True).start()
-
-SENT_SIGNALS_CACHE = set()
 
 # ==========================================
 # 2. OPENROUTER / AI COMMENTARY ENGINE
@@ -56,7 +55,7 @@ def fetch_ai_commentary(metrics_summary):
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
     prompt = f"""
-    You are a senior institutional price-action desk analyst. 
+    You are a senior senior institutional price-action desk analyst. 
     Here are the quantitative engine metrics for the setup:
     {metrics_summary}
     
@@ -188,7 +187,6 @@ def evaluate_market_state(df_entry, macro_is_bearish):
     if is_compressed:
         return {"state": "RANGING / COMPRESSED", "valid": False, "trend_score": 20}
         
-    # Trend Strength Calculation (0-100)
     score = 50
     if not macro_is_bearish and close > ema50 > ema200:
         state = "TRENDING BULLISH"
@@ -224,9 +222,6 @@ def analyze_structure_and_liquidity(df):
     recent_low = swing_lows[-1][1] if swing_lows else lows[-1]
     
     current_close = df['Close'].iloc[-1]
-    prev_high = df['High'].iloc[-2]
-    prev_low = df['Low'].iloc[-2]
-    
     buy_side_sweep = current_close > recent_high or df['High'].tail(3).max() >= recent_high
     sell_side_sweep = current_close < recent_low or df['Low'].tail(3).min() <= recent_low
     
@@ -252,7 +247,6 @@ def rank_pois_and_momentum(df):
     momentum_strong = last_body > (avg_body * 1.3)
     momentum_score = 90 if momentum_strong else 50
     
-    # Identify fresh POI
     poi_score = 88
     poi_type = "Bullish Order Block & FVG Confluence" if df['Close'].iloc[-1] > df['Open'].iloc[-1] else "Bearish Order Block & FVG Confluence"
     
@@ -274,12 +268,11 @@ def central_decision_engine(symbol, df_daily, df_entry):
     
     state_eval = evaluate_market_state(df_entry, macro_is_bearish)
     if not state_eval["valid"]:
-        return None  # Skip market per institutional rules
+        return None
         
     liq_eval = analyze_structure_and_liquidity(df_entry)
     mom_poi = rank_pois_and_momentum(df_entry)
     
-    # Confidence Scoring Formula
     trend_pts = state_eval["trend_score"] * 0.25
     liq_pts = liq_eval["liquidity_score"] * 0.25
     mom_pts = mom_poi["momentum_score"] * 0.25
@@ -288,13 +281,12 @@ def central_decision_engine(symbol, df_daily, df_entry):
     confidence = int(trend_pts + liq_pts + mom_pts + poi_pts)
     
     if confidence < 70:
-        return None  # Ignore setup below professional grade
+        return None
         
     direction = "SELL" if macro_is_bearish else "BUY"
     current_price = df_entry['Close'].iloc[-1]
     atr = df_entry['ATR'].iloc[-1]
     
-    # Risk Management Engine
     if direction == "BUY":
         sl = current_price - (atr * 1.5)
         tp1 = current_price + (atr * 1.5)
@@ -319,7 +311,7 @@ def central_decision_engine(symbol, df_daily, df_entry):
     }
 
 # ==========================================
-# 8. CHART GENERATOR
+# 8. ENHANCED CHART GENERATOR (WITH VISUAL OVERLAYS)
 # ==========================================
 def generate_institutional_chart(df, title_str, setup):
     img_buf = io.BytesIO()
@@ -330,19 +322,33 @@ def generate_institutional_chart(df, title_str, setup):
     
     addplots = [mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5)]
     
-    hlines_dict = dict(
-        hlines=[setup['entry'], setup['sl'], setup['tp1']],
-        colors=['#2962ff', '#e53935', '#43a047'],
-        linestyle=['-.', '--', '--'],
-        linewidths=[1.2, 1.0, 1.0]
-    )
-
-    mpf.plot(
+    fig, axlist = mpf.plot(
         chart_df, type='candle', style=style, volume=False,
-        hlines=hlines_dict, addplot=addplots,
-        savefig=dict(fname=img_buf, dpi=130), returnfig=True
+        addplot=addplots, returnfig=True, figsize=(10, 6)
     )
+    
+    ax = axlist[0]
+    
+    # Draw trade levels with explicit visual markers
+    ax.axhline(setup['entry'], color='#2962ff', linestyle='-.', linewidth=1.2, label=f"Entry")
+    ax.axhline(setup['sl'], color='#e53935', linestyle='--', linewidth=1.0, label=f"SL")
+    ax.axhline(setup['tp1'], color='#43a047', linestyle='--', linewidth=1.0, label=f"TP1")
+    
+    # Highlight Institutional POI Zone Confluence Box
+    poi_top = setup['entry'] + (abs(setup['entry'] - setup['sl']) * 0.3)
+    poi_bot = setup['entry'] - (abs(setup['entry'] - setup['sl']) * 0.3)
+    
+    rect = patches.Rectangle(
+        (len(chart_df) - 15, poi_bot), 15, poi_top - poi_bot,
+        linewidth=1, edgecolor='#2962ff', facecolor='#2962ff', alpha=0.20, label="POI Confluence"
+    )
+    ax.add_patch(rect)
+    
+    ax.set_title(title_str, color='white', fontsize=10)
+    
+    fig.savefig(img_buf, dpi=130, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
+    plt.close(fig)
     return img_buf
 
 # ==========================================
@@ -361,13 +367,10 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         df_daily, df_entry = fetch_institutional_data(raw_symbol, tf)
-        daily_close = df_daily['Close'].iloc[-1]
-        daily_ema = df_daily['EMA200'].iloc[-1]
-        
         setup = central_decision_engine(raw_symbol, df_daily, df_entry)
         
         if not setup:
-            await status.edit_text(f"⚠️ *Market Skipped:* Conditions for {raw_symbol} do not meet institutional A+ criteria (ranging or choppy state).", parse_mode="Markdown")
+            await status.edit_text(f"⚠️ *Market Skipped:* Conditions for {raw_symbol} do not meet institutional A+ criteria.", parse_mode="Markdown")
             return
 
         metrics_summary = (
@@ -379,14 +382,13 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         ai_commentary = fetch_ai_commentary(metrics_summary)
 
-        chart_img = generate_institutional_chart(df_entry, f"{raw_symbol} Institutional Setup", setup)
+        chart_img = generate_institutional_chart(df_entry, f"{raw_symbol} Institutional Mapped POI ({tf.upper()})", setup)
         
         await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *INSTITUTIONAL MAPPED POI: {raw_symbol} ({tf.upper()})*", parse_mode="Markdown")
         await status.delete()
         
         await context.bot.send_message(chat_id=chat_id, text=ai_commentary, parse_mode="Markdown")
 
-        # Rich Telegram Signal Format
         decimals = 3 if "JPY" in raw_symbol else (2 if "XAU" in raw_symbol or "GOLD" in raw_symbol else 5)
         fmt = f"{{:.{decimals}f}}"
         
