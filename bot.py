@@ -55,7 +55,7 @@ def fetch_ai_commentary(metrics_summary):
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
     prompt = f"""
-    You are a senior senior institutional price-action desk analyst. 
+    You are a senior institutional price-action desk analyst. 
     Here are the quantitative engine metrics for the setup:
     {metrics_summary}
     
@@ -84,11 +84,11 @@ def fetch_ai_commentary(metrics_summary):
 # 3. RESILIENT DATA CLEANING & NORMALIZATION ENGINE
 # ==========================================
 def normalize_ticker_twelve_data(symbol):
-    symbol = symbol.strip().upper()
+    symbol = symbol.strip().upper().replace("[", "").replace("]", "").replace("'", "")
     mapping = {
         "GOLD": "XAU/USD", "XAUUSD": "XAU/USD",
         "SILVER": "XAG/USD", "XAGUSD": "XAG/USD",
-        "OIL": "WTI/USD", "USOIL": "WTI/USD",
+        "OIL": "WTI/USD", "USOIL": "WTI/USD", "WTI": "WTI/USD",
         "BTC": "BTC/USD", "BTCUSD": "BTC/USD",
         "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "GBPAUD": "GBP/AUD", "CHFJPY": "CHF/JPY"
     }
@@ -122,8 +122,13 @@ def fetch_twelve_data(symbol, interval="15m", outputsize=150):
     return pd.DataFrame()
 
 def normalize_ticker_yfinance(symbol):
-    symbol = symbol.strip().upper()
-    alias_map = {"GOLD": "GC=F", "XAUUSD": "GC=F", "SILVER": "SI=F", "OIL": "CL=F", "BTC": "BTC-USD", "BTCUSD": "BTC-USD"}
+    symbol = symbol.strip().upper().replace("[", "").replace("]", "").replace("'", "")
+    alias_map = {
+        "GOLD": "GC=F", "XAUUSD": "GC=F", 
+        "SILVER": "SI=F", 
+        "OIL": "CL=F", "USOIL": "CL=F", "WTI": "CL=F", 
+        "BTC": "BTC-USD", "BTCUSD": "BTC-USD"
+    }
     if symbol in alias_map:
         return alias_map[symbol]
     if len(symbol) == 6 and not symbol.endswith("=X"):
@@ -131,7 +136,6 @@ def normalize_ticker_yfinance(symbol):
     return symbol
 
 def clean_and_normalize_data(df):
-    """Normalizes raw OHLC data and calculates True Range & ATR."""
     if df.empty or len(df) < 50:
         return pd.DataFrame()
     df = df.copy()
@@ -173,7 +177,6 @@ def fetch_institutional_data(symbol, entry_tf="15m"):
 # 4. MARKET STATE & TREND QUALITY ENGINE
 # ==========================================
 def evaluate_market_state(df_entry, macro_is_bearish):
-    """Engine 2 & 3: Evaluates market state and calculates Trend Quality Score (0-100)."""
     close = df_entry['Close'].iloc[-1]
     ema50 = df_entry['EMA50'].iloc[-1]
     ema200 = df_entry['EMA200'].iloc[-1]
@@ -206,7 +209,6 @@ def evaluate_market_state(df_entry, macro_is_bearish):
 # 5. MARKET STRUCTURE & LIQUIDITY ENGINE
 # ==========================================
 def analyze_structure_and_liquidity(df):
-    """Engine 4 & 5: Detects structural swing points and liquidity sweeps."""
     highs = df['High'].values
     lows = df['Low'].values
     
@@ -239,7 +241,6 @@ def analyze_structure_and_liquidity(df):
 # 6. MOMENTUM & POI RANKING ENGINE
 # ==========================================
 def rank_pois_and_momentum(df):
-    """Engine 6 & 7: Measures candle displacement and ranks Order Blocks / FVGs."""
     bodies = abs(df['Close'] - df['Open'])
     avg_body = bodies.rolling(14).mean().iloc[-1]
     last_body = bodies.iloc[-1]
@@ -261,7 +262,6 @@ def rank_pois_and_momentum(df):
 # 7. CENTRAL DECISION & CONFIDENCE ENGINE
 # ==========================================
 def central_decision_engine(symbol, df_daily, df_entry):
-    """Engine 8, 9, 10: Aggregates evidence across all modules and issues final verdict."""
     daily_close = df_daily['Close'].iloc[-1]
     daily_ema = df_daily['EMA200'].iloc[-1]
     macro_is_bearish = daily_close < daily_ema
@@ -329,12 +329,10 @@ def generate_institutional_chart(df, title_str, setup):
     
     ax = axlist[0]
     
-    # Draw trade levels with explicit visual markers
     ax.axhline(setup['entry'], color='#2962ff', linestyle='-.', linewidth=1.2, label=f"Entry")
     ax.axhline(setup['sl'], color='#e53935', linestyle='--', linewidth=1.0, label=f"SL")
     ax.axhline(setup['tp1'], color='#43a047', linestyle='--', linewidth=1.0, label=f"TP1")
     
-    # Highlight Institutional POI Zone Confluence Box
     poi_top = setup['entry'] + (abs(setup['entry'] - setup['sl']) * 0.3)
     poi_bot = setup['entry'] - (abs(setup['entry'] - setup['sl']) * 0.3)
     
