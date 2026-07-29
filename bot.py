@@ -26,6 +26,7 @@ def health_check():
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 MY_CHAT_ID = os.environ.get("MY_CHAT_ID")
 
 def keep_alive_ping():
@@ -89,12 +90,76 @@ def fetch_ai_analysis(prompt):
     )
 
 # ==========================================
-# 3. RESILIENT TICKER ALIAS & DATA ENGINE
+# 3. RESILIENT DATA ENGINE (TWELVE DATA + YFINANCE FALLBACK)
 # ==========================================
-def normalize_ticker(symbol):
-    """Maps shorthand terms to clean Yahoo Finance tickers with GC=F gold feed."""
+def normalize_ticker_twelve_data(symbol):
+    """Normalizes symbols for Twelve Data API."""
     symbol = symbol.strip().upper()
-    
+    mapping = {
+        "GOLD": "XAU/USD",
+        "XAUUSD": "XAU/USD",
+        "SILVER": "XAG/USD",
+        "XAGUSD": "XAG/USD",
+        "OIL": "WTI/USD",
+        "USOIL": "WTI/USD",
+        "BTC": "BTC/USD",
+        "BTCUSD": "BTC/USD",
+        "EURUSD": "EUR/USD",
+        "GBPUSD": "GBP/USD",
+        "GBPAUD": "GBP/AUD"
+    }
+    if symbol in mapping:
+        return mapping[symbol]
+    if len(symbol) == 6 and "/" not in symbol:
+        return f"{symbol[:3]}/{symbol[3:]}"
+    return symbol
+
+def fetch_twelve_data(symbol, interval="15m", outputsize=100):
+    """Fetches market data using Twelve Data API."""
+    if not TWELVE_DATA_API_KEY:
+        return pd.DataFrame()
+
+    clean_symbol = normalize_ticker_twelve_data(symbol)
+    tf_map = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1h", "1d": "1day"}
+    tw_interval = tf_map.get(interval.lower(), "15min")
+
+    url = "https://api.twelvedata.com/time_series"
+    params = {
+        "symbol": clean_symbol,
+        "interval": tw_interval,
+        "outputsize": outputsize,
+        "apikey": TWELVE_DATA_API_KEY
+    }
+
+    try:
+        res = requests.get(url, params=params, timeout=10)
+        data = res.json()
+        if res.status_code == 200 and "values" in data:
+            df = pd.DataFrame(data["values"])
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            df.set_index('datetime', inplace=True)
+            df = df.sort_index()
+
+            numeric_cols = ['open', 'high', 'low', 'close']
+            for col in numeric_cols:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            df.rename(columns={
+                'open': 'Open',
+                'high': 'High',
+                'low': 'Low',
+                'close': 'Close'
+            }, inplace=True)
+
+            return df[['Open', 'High', 'Low', 'Close']].dropna()
+    except Exception as e:
+        print(f"[Twelve Data Error] Failed for {symbol}: {e}")
+
+    return pd.DataFrame()
+
+def normalize_ticker_yfinance(symbol):
+    """Maps shorthand terms to clean Yahoo Finance tickers."""
+    symbol = symbol.strip().upper()
     alias_map = {
         "GOLD": "GC=F",      
         "XAUUSD": "GC=F",    
@@ -105,51 +170,51 @@ def normalize_ticker(symbol):
         "BTC": "BTC-USD",
         "BTCUSD": "BTC-USD"
     }
-    
     if symbol in alias_map:
         return alias_map[symbol]
-    
     if len(symbol) == 6 and not symbol.endswith("=X"):
         return f"{symbol}=X"
-        
     return symbol
 
 def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
-    """Fetches Daily macro context alongside execution timeframe data cleanly with fallbacks."""
-    primary_ticker = normalize_ticker(symbol)
-    
-    ticker_candidates = [primary_ticker]
-    if primary_ticker == "GC=F":
-        ticker_candidates.append("XAUUSD=X")
-    elif primary_ticker == "XAUUSD=X":
-        ticker_candidates.insert(0, "GC=F")
-
+    """Fetches Daily macro context & execution timeframe data using Twelve Data with YFinance fallback."""
     tf_clean = entry_tf.lower().strip()
-    entry_period = "5d" if tf_clean in ["1m", "5m"] else "10d"
 
-    df_daily = pd.DataFrame()
-    df_entry = pd.DataFrame()
-    successful_ticker = primary_ticker
+    # 1. Try Twelve Data Primary Engine
+    df_daily = fetch_twelve_data(symbol, interval="1d", outputsize=200)
+    df_entry = fetch_twelve_data(symbol, interval=tf_clean, outputsize=100)
+    successful_ticker = symbol
 
-    for ticker_str in ticker_candidates:
-        try:
-            d_data = yf.download(ticker_str, period="1y", interval="1d", progress=False, auto_adjust=True)
-            if isinstance(d_data.columns, pd.MultiIndex):
-                d_data.columns = d_data.columns.get_level_values(0)
-            d_data = d_data.dropna()
+    # 2. Fallback to Yahoo Finance if Twelve Data is empty
+    if df_daily.empty or df_entry.empty:
+        primary_ticker = normalize_ticker_yfinance(symbol)
+        ticker_candidates = [primary_ticker]
+        if primary_ticker == "GC=F":
+            ticker_candidates.append("XAUUSD=X")
+        elif primary_ticker == "XAUUSD=X":
+            ticker_candidates.insert(0, "GC=F")
 
-            e_data = yf.download(ticker_str, period=entry_period, interval=tf_clean, progress=False, auto_adjust=True)
-            if isinstance(e_data.columns, pd.MultiIndex):
-                e_data.columns = e_data.columns.get_level_values(0)
-            e_data = e_data.dropna()
+        entry_period = "5d" if tf_clean in ["1m", "5m"] else "10d"
 
-            if not d_data.empty and not e_data.empty:
-                df_daily = d_data
-                df_entry = e_data
-                successful_ticker = ticker_str
-                break
-        except Exception:
-            continue
+        for ticker_str in ticker_candidates:
+            try:
+                d_data = yf.download(ticker_str, period="1y", interval="1d", progress=False, auto_adjust=True)
+                if isinstance(d_data.columns, pd.MultiIndex):
+                    d_data.columns = d_data.columns.get_level_values(0)
+                d_data = d_data.dropna()
+
+                e_data = yf.download(ticker_str, period=entry_period, interval=tf_clean, progress=False, auto_adjust=True)
+                if isinstance(e_data.columns, pd.MultiIndex):
+                    e_data.columns = e_data.columns.get_level_values(0)
+                e_data = e_data.dropna()
+
+                if not d_data.empty and not e_data.empty:
+                    df_daily = d_data
+                    df_entry = e_data
+                    successful_ticker = ticker_str
+                    break
+            except Exception:
+                continue
 
     if df_daily.empty or df_entry.empty:
         raise ValueError(f"Unable to retrieve market data for '{symbol}'.")
