@@ -88,9 +88,8 @@ def normalize_ticker_twelve_data(symbol):
     mapping = {
         "GOLD": "XAU/USD", "XAUUSD": "XAU/USD",
         "SILVER": "XAG/USD", "XAGUSD": "XAG/USD",
-        "OIL": "WTI/USD", "USOIL": "WTI/USD", "WTI": "WTI/USD",
-        "BTC": "BTC/USD", "BTCUSD": "BTC/USD",
-        "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "GBPAUD": "GBP/AUD", "CHFJPY": "CHF/JPY"
+        "OIL": "WTI/USD", "USOIL": "WTI/USD", "WTI": "WTI/USD", "BRENT": "BRENT/USD",
+        "BTC": "BTC/USD", "BTCUSD": "BTC/USD"
     }
     if symbol in mapping:
         return mapping[symbol]
@@ -268,7 +267,7 @@ def central_decision_engine(symbol, df_daily, df_entry):
     
     state_eval = evaluate_market_state(df_entry, macro_is_bearish)
     if not state_eval["valid"]:
-        return None
+        return None, f"Market State is '{state_eval['state']}' (Ranging, compressed, or failing trend criteria)."
         
     liq_eval = analyze_structure_and_liquidity(df_entry)
     mom_poi = rank_pois_and_momentum(df_entry)
@@ -281,7 +280,7 @@ def central_decision_engine(symbol, df_daily, df_entry):
     confidence = int(trend_pts + liq_pts + mom_pts + poi_pts)
     
     if confidence < 70:
-        return None
+        return None, f"Confidence score too low ({confidence}%). Required: min 70%."
         
     direction = "SELL" if macro_is_bearish else "BUY"
     current_price = df_entry['Close'].iloc[-1]
@@ -308,7 +307,7 @@ def central_decision_engine(symbol, df_daily, df_entry):
         "tp1": tp1,
         "tp2": tp2,
         "poi_desc": mom_poi["poi_type"]
-    }
+    }, None
 
 # ==========================================
 # 8. ENHANCED CHART GENERATOR (WITH VISUAL OVERLAYS)
@@ -365,10 +364,14 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         df_daily, df_entry = fetch_institutional_data(raw_symbol, tf)
-        setup = central_decision_engine(raw_symbol, df_daily, df_entry)
+        setup, skip_reason = central_decision_engine(raw_symbol, df_daily, df_entry)
         
         if not setup:
-            await status.edit_text(f"⚠️ *Market Skipped:* Conditions for {raw_symbol} do not meet institutional A+ criteria.", parse_mode="Markdown")
+            await status.edit_text(
+                f"⚠️ *Market Skipped: {raw_symbol}*\n\n"
+                f"**Reason:** {skip_reason}", 
+                parse_mode="Markdown"
+            )
             return
 
         metrics_summary = (
