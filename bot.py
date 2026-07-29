@@ -1,17 +1,20 @@
 import os
 import io
 import time
+import gc
 import threading
 import asyncio
 import requests
 import numpy as np
 import pandas as pd
 import yfinance as yf
-import mplfinance as mpf
+
+# Force Matplotlib to non-GUI Agg backend before importing pyplot/mplfinance
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from datetime import datetime, timezone
+import mplfinance as mpf
+
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -66,12 +69,15 @@ def normalize_ticker(symbol):
 def fetch_data(symbol, entry_tf="15m"):
     ticker = normalize_ticker(symbol)
     tf_clean = entry_tf.lower().strip()
-    period = "10d" if tf_clean in ["1m", "5m", "15m"] else "60d"
+    period = "5d" if tf_clean in ["1m", "5m", "15m"] else "30d"
 
     df = yf.download(ticker, period=period, interval=tf_clean, progress=False, auto_adjust=True)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df = df.dropna()
+    
+    # Keep only necessary columns to minimize memory footprint
+    needed_cols = ['Open', 'High', 'Low', 'Close']
+    df = df[needed_cols].dropna()
 
     if df.empty:
         raise ValueError(f"No market data retrieved for {symbol}.")
@@ -119,11 +125,11 @@ def analyze_market_structure(df):
     return swing_highs, swing_lows, obs
 
 # ==========================================
-# 4. CHART GENERATOR WITH TRENDLINES & SMC
+# 4. MEMORY-LEAN CHART GENERATOR
 # ==========================================
 def generate_chart_image(df, title_str):
     img_buf = io.BytesIO()
-    chart_df = df.tail(80).copy()
+    chart_df = df.tail(60).copy()  # Reduced candle count to save RAM
     if not isinstance(chart_df.index, pd.DatetimeIndex):
         chart_df.index = pd.to_datetime(chart_df.index)
 
@@ -146,12 +152,13 @@ def generate_chart_image(df, title_str):
         style=style,
         volume=False,
         addplot=addplots,
-        returnfig=True
+        returnfig=True,
+        figsize=(8, 5)  # Constrained figure size to minimize RAM spike
     )
 
     ax = axlist[0]
     first_time = chart_df.index[2]
-    last_time = chart_df.index[-15] if len(chart_df) >= 15 else chart_df.index[0]
+    last_time = chart_df.index[-12] if len(chart_df) >= 12 else chart_df.index[0]
 
     # Draw Buy-Side / Sell-Side Liquidity Levels
     if swing_highs:
@@ -164,7 +171,7 @@ def generate_chart_image(df, title_str):
         ax.axhline(ssl, color='#ff1744', linestyle=':', linewidth=1.2)
         ax.text(first_time, ssl, " SSL (Sell-Side Liquidity)", color='#ff1744', fontsize=8, fontweight='bold', verticalalignment='top')
 
-    # Draw Resistance Trendline across Swing Highs
+    # Draw Resistance Trendline
     if len(swing_highs) >= 2:
         sh1, sh2 = swing_highs[-2], swing_highs[-1]
         x_vals = [sh1['index'], sh2['index']]
@@ -175,7 +182,7 @@ def generate_chart_image(df, title_str):
         y_ext = y_vals[0] + slope * (x_ext - sh1['index'])
         ax.plot(x_ext, y_ext, color='#00b0ff', linestyle='--', linewidth=1.5)
 
-    # Draw Support Trendline across Swing Lows
+    # Draw Support Trendline
     if len(swing_lows) >= 2:
         sl1, sl2 = swing_lows[-2], swing_lows[-1]
         x_vals = [sl1['index'], sl2['index']]
@@ -195,8 +202,15 @@ def generate_chart_image(df, title_str):
 
     ax.set_title(title_str, color='#d1d4dc', fontsize=9, fontweight='bold')
 
-    fig.savefig(img_buf, format='png', dpi=130, bbox_inches='tight', facecolor='#131722')
-    plt.close(fig)
+    # Lower DPI (100) to keep memory usage very low while maintaining clarity
+    fig.savefig(img_buf, format='png', dpi=100, bbox_inches='tight', facecolor='#131722')
+
+    # AGGRESSIVE MEMORY CLEANUP
+    plt.close('all')
+    plt.clf()
+    plt.cla()
+    del fig, axlist, ax
+    gc.collect()
 
     img_buf.seek(0)
     return img_buf
@@ -264,6 +278,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         )
 
         await context.bot.send_photo(chat_id=query.message.chat_id, photo=chart_img, caption=report, parse_mode="Markdown")
+        
+        # Cleanup local dataframe
+        del df, chart_img
+        gc.collect()
 
     except Exception as e:
         await context.bot.send_message(
