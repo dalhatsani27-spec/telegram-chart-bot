@@ -20,7 +20,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "Multi-Timeframe POI Chart Analyzer (FVG/OB/BB) is Active 24/7!", 200
+    return "Multi-Timeframe POI Chart Analyzer & Scalp Signal Bot is Active 24/7!", 200
 
 # Environment variables
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
@@ -40,6 +40,9 @@ def keep_alive_ping():
                 print(f"[Keep-Alive] Ping failed: {e}")
 
 threading.Thread(target=keep_alive_ping, daemon=True).start()
+
+# Track recent signals to avoid duplicate alert spam
+SENT_SIGNALS_CACHE = set()
 
 # ==========================================
 # 2. OPENROUTER / AI VISION SETUP
@@ -149,7 +152,7 @@ def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
             continue
 
     if df_daily.empty or df_entry.empty:
-        raise ValueError(f"Unable to retrieve market data for '{symbol}'. Please check symbol status or try again.")
+        raise ValueError(f"Unable to retrieve market data for '{symbol}'.")
 
     df_daily['EMA200'] = df_daily['Close'].ewm(span=200, adjust=False).mean()
     daily_close = df_daily['Close'].iloc[-1]
@@ -216,7 +219,64 @@ def detect_order_blocks(df):
     return obs
 
 # ==========================================
-# 5. CHART GENERATOR WITH MAPPED POI ZONES
+# 5. DYNAMIC SIGNAL FORMATTER (KING STYLE)
+# ==========================================
+def format_scalp_signal(symbol, direction, entry_price):
+    """Formats high-impact Telegram scalping signals with dynamic TP/SL levels."""
+    direction_upper = direction.upper()
+    emoji = "💥" if direction_upper == "BUY" else "🔻"
+
+    # Determine asset step size based on price magnitude
+    if "BTC" in symbol:
+        tp_step = 250.0
+        sl_dist = 800.0
+        decimals = 1
+    elif any(k in symbol for k in ["GOLD", "XAU", "GC=F"]):
+        tp_step = 3.0
+        sl_dist = 10.0
+        decimals = 2
+    elif "JPY" in symbol:
+        tp_step = 0.20
+        sl_dist = 0.60
+        decimals = 3
+    else:  # Standard Forex (EURUSD, GBPUSD)
+        tp_step = 0.0010  # 10 pips
+        sl_dist = 0.0030  # 30 pips
+        decimals = 5
+
+    if direction_upper == "BUY":
+        tp1 = entry_price + (tp_step * 1)
+        tp2 = entry_price + (tp_step * 2)
+        tp3 = entry_price + (tp_step * 3)
+        tp4 = entry_price + (tp_step * 4)
+        tp5 = entry_price + (tp_step * 5)
+        sl  = entry_price - sl_dist
+    else:  # SELL
+        tp1 = entry_price - (tp_step * 1)
+        tp2 = entry_price - (tp_step * 2)
+        tp3 = entry_price - (tp_step * 3)
+        tp4 = entry_price - (tp_step * 4)
+        tp5 = entry_price - (tp_step * 5)
+        sl  = entry_price + sl_dist
+
+    fmt = f"{{:.{decimals}f}}"
+
+    signal_text = (
+        f"🔜 *𝐆𝐄𝐓 𝐑𝐄𝐀𝐃𝐘 𝐒𝐈𝐆𝐍𝐀𝐋𝐒 𝐂𝐎𝐌𝐈𝐍𝐆 𝐒𝐎𝐎𝐍* 🔜\n"
+        f"‼️‼️‼️‼️‼️‼️‼️\n\n"
+        f"{emoji} *{symbol} {direction_upper}* {fmt.format(entry_price)}\n\n"
+        f"✔️ *TP1.* {fmt.format(tp1)}\n"
+        f"✔️ *TP2.* {fmt.format(tp2)}\n"
+        f"✔️ *TP3.* {fmt.format(tp3)}\n"
+        f"✔️ *TP4.* {fmt.format(tp4)}\n"
+        f"✔️ *TP5.* {fmt.format(tp5)}\n\n"
+        f"❌ *SL.*  {fmt.format(sl)}📌\n\n"
+        f"⚠️ *Use Money Management*"
+    )
+    return signal_text
+
+# ==========================================
+# 6. CHART GENERATOR
 # ==========================================
 def generate_chart_image(df, title_str, is_long=True):
     """Renders dark-themed chart with 200 EMA (Gold Line) and mapped FVG, OB, & BB POI Zones."""
@@ -232,7 +292,6 @@ def generate_chart_image(df, title_str, is_long=True):
         y_on_right=True, facecolor='#131722', figcolor='#131722'
     )
     
-    # Gold Line: 200 EMA Overlay
     addplots = [
         mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5)
     ]
@@ -272,11 +331,9 @@ def generate_chart_image(df, title_str, is_long=True):
 
     ax = axlist[0]
 
-    # Map Structural POIs
     fvgs = detect_fvg(chart_df)
     obs = detect_order_blocks(chart_df)
 
-    # 1. Render Fair Value Gaps (FVGs)
     recent_fvgs = fvgs[-2:] if len(fvgs) >= 2 else fvgs
     for fvg in recent_fvgs:
         if fvg['type'] == 'BULLISH_FVG':
@@ -286,7 +343,6 @@ def generate_chart_image(df, title_str, is_long=True):
             ax.axhspan(fvg['bottom'], fvg['top'], color='#f23645', alpha=0.25, hatch='\\\\')
             ax.text(0, fvg['bottom'], " Bearish FVG", color='#f23645', fontsize=7, verticalalignment='top')
 
-    # 2. Render Order Blocks & Breaker Blocks (OB / BB)
     recent_obs = obs[-2:] if len(obs) >= 2 else obs
     for ob in recent_obs:
         if ob['type'] == 'BULLISH_OB':
@@ -304,20 +360,16 @@ def generate_chart_image(df, title_str, is_long=True):
     return img_buf
 
 # ==========================================
-# 6. TELEGRAM BOT HANDLERS
+# 7. TELEGRAM BOT HANDLERS
 # ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "🤖 *MULTI-TIMEFRAME POI CHART ANALYZER*\n\n"
-        "I map structural **Fair Value Gaps (FVG)**, **Order Blocks (OB)**, and **Breaker Blocks (BB)** directly onto your charts while enforcing 200 EMA macro context.\n\n"
+        "🤖 *MULTI-PAIR AUTOMATED SCALPER BOT*\n\n"
+        "I monitor multiple pairs (GOLD, EURUSD, GBPUSD, BTC, etc.) for high-probability 200 EMA realignment scalp setups.\n\n"
         "📌 *COMMANDS:*\n"
-        "• `/analyze [SYMBOL] [TIMEFRAME]`\n"
-        "  _Examples:_ `/analyze GOLD 15m`, `/analyze XAUUSD 5m`, `/analyze GBPUSD 15m`\n\n"
-        "📊 *ON-CHART POI LEGEND:*\n"
-        "1. 🟡 **Gold Line:** 200 EMA Trend Filter.\n"
-        "2. 🟩 **Green Zone:** Bullish Order Block (OB) / FVG Demand Zone.\n"
-        "3. 🟥 **Red Zone:** Bearish Order Block (OB) / FVG Supply Zone.\n"
-        "4. 🟧 **Orange Zone:** Breaker Block (BB) Support/Resistance Flip."
+        "• `/analyze [SYMBOL] [TIMEFRAME]` - Request chart and AI analysis.\n"
+        "  _Example:_ `/analyze XAUUSD 5m`\n"
+        "• `/signal [SYMBOL] [BUY/SELL] [PRICE]` - Generate a manual signal prompt."
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
@@ -328,15 +380,11 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_symbol = args[0].upper() if len(args) > 0 else "GOLD"
     tf = args[1] if len(args) > 1 else "15m"
     
-    status_msg = await update.message.reply_text(f"📊 Mapping FVG, OB & BB POI Zones for {raw_symbol}...")
+    status_msg = await update.message.reply_text(f"📊 Mapping POI Zones for {raw_symbol}...")
     
     try:
         df_daily, df_entry, macro_is_bearish, daily_ema, ticker_str = fetch_multi_timeframe_data(raw_symbol, tf)
         
-        if df_entry.empty:
-            await status_msg.edit_text(f"❌ Error: Unable to fetch market data for {raw_symbol} ({ticker_str}).")
-            return
-
         last_price = df_entry['Close'].iloc[-1]
         local_ema = df_entry['EMA200'].iloc[-1]
         local_is_bearish = last_price < local_ema
@@ -347,38 +395,35 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fvgs = detect_fvg(df_entry)
         obs = detect_order_blocks(df_entry)
         
-        fvg_summary = f"{len(fvgs)} Active FVG(s) detected" if fvgs else "No immediate FVG gaps"
-        ob_summary = f"{len(obs)} Active OB/BB Zone(s) detected" if obs else "No immediate Order Blocks"
+        fvg_summary = f"{len(fvgs)} Active FVG(s)" if fvgs else "No immediate FVG"
+        ob_summary = f"{len(obs)} Active OB/BB Zone(s)" if obs else "No immediate Order Blocks"
 
         prompt = f"""
-        You are an ICT quantitative price-action trader.
-        CRITICAL CONTEXT:
-        - Symbol: {raw_symbol} ({ticker_str})
-        - Daily 200 EMA Macro Bias: {macro_bias} (Daily Close: {df_daily['Close'].iloc[-1]:.2f}, Daily EMA: {daily_ema:.2f})
-        - {tf.upper()} 200 EMA Local Bias: {local_bias} (Current Price: {last_price:.2f}, Local EMA: {local_ema:.2f})
-        - Structural POI Map: {fvg_summary} | {ob_summary}
+        You are an ICT price-action scalping trader.
+        Context:
+        - Symbol: {raw_symbol}
+        - Macro Bias: {macro_bias} (Daily 200 EMA)
+        - Execution Bias ({tf}): {local_bias}
+        - Structural POIs: {fvg_summary} | {ob_summary}
         
-        RULE: If price is BELOW the 200 EMA (Gold Line), DO NOT recommend buys. Any pullbacks into Bearish OB or FVG supply zones are sell realignment setups.
-        
-        Analyze {raw_symbol} ({tf}):
         Format output:
         🎯 AI ANALYSIS & MARKET STORY
-        1. Macro Bias: {macro_bias} (Daily 200 EMA)
+        1. Macro Context: {macro_bias}
         2. Execution Bias ({tf}): {local_bias}
-        3. Structural POI Reaction: Detail how price is interacting with mapped FVG, OB, or Breaker Block zones.
-        4. Realignment Setup: Detail expected entry trigger.
+        3. Structural POI Reaction: Detail active FVG or OB levels.
+        4. Realignment Setup: Next probable scalp trigger.
         """
 
         analysis_text = fetch_ai_analysis(prompt)
 
         is_long = not local_is_bearish
-        title_str = f"{raw_symbol} ({tf.upper()}) | Trend: {local_bias} | Gold Line = 200 EMA"
+        title_str = f"{raw_symbol} ({tf.upper()}) | Trend: {local_bias} | 200 EMA Gold Line"
         chart_img = generate_chart_image(df_entry, title_str, is_long=is_long)
         
         await context.bot.send_photo(
             chat_id=chat_id,
             photo=chart_img,
-            caption=f"🎯 *LIVE POI MAP (FVG / OB / BB): {raw_symbol} ({tf.upper()})*",
+            caption=f"🎯 *LIVE POI MAP: {raw_symbol} ({tf.upper()})*",
             parse_mode="Markdown"
         )
         
@@ -388,44 +433,100 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await status_msg.edit_text(f"❌ Error generating analysis: {str(e)}")
 
+async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual signal command generator: /signal XAUUSD BUY 4028"""
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text("⚠️ Usage: `/signal [SYMBOL] [BUY/SELL] [ENTRY_PRICE]`", parse_mode="Markdown")
+        return
+
+    symbol = args[0].upper()
+    direction = args[1].upper()
+    try:
+        entry = float(args[2])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid price format.")
+        return
+
+    signal_msg = format_scalp_signal(symbol, direction, entry)
+    await update.message.reply_text(signal_msg, parse_mode="Markdown")
+
 # ==========================================
-# 7. REAL-TIME SIGNAL SCANNER
+# 8. AUTOMATED MULTI-PAIR SCALPING SIGNAL SCANNER
 # ==========================================
 async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
-    """Periodically scans liquidity sweeps and POI taps aligned with the 200 EMA."""
+    """Monitors all pairs on 5m timeframe and broadcasts live scalping signals when price taps POI."""
     if not MY_CHAT_ID:
         return
 
-    symbols = ["GOLD", "GBPUSD", "EURUSD", "BTC"]
-    for symbol in symbols:
+    watchlist = ["GOLD", "EURUSD", "GBPUSD", "BTCUSD", "USOIL", "GBPAUD"]
+    
+    for symbol in watchlist:
         try:
             _, df_entry, local_is_bearish, _, ticker_str = fetch_multi_timeframe_data(symbol, "5m")
             if df_entry.empty:
                 continue
 
             last_close = df_entry['Close'].iloc[-1]
-            fvgs = detect_fvg(df_entry)
+            last_timestamp = str(df_entry.index[-1])
             
-            for fvg in fvgs[-2:]:
-                if local_is_bearish and fvg['type'] == 'BEARISH_FVG' and fvg['bottom'] <= last_close <= fvg['top']:
-                    alert_text = (
-                        f"🚨 *BEARISH POI ALERT: {symbol}*\n\n"
-                        f"Price ({last_close:.2f}) tapped into a **Bearish FVG Zone** ({fvg['bottom']:.2f} - {fvg['top']:.2f}) below the 200 EMA.\n"
-                        f"⚡ *Action:* Look for short realignment entries."
-                    )
-                    await context.bot.send_message(chat_id=MY_CHAT_ID, text=alert_text, parse_mode="Markdown")
-                    break
+            fvgs = detect_fvg(df_entry)
+            obs = detect_order_blocks(df_entry)
+
+            setup_found = None
+            direction = None
+
+            # 1. Check Bearish Realignment (Price BELOW 200 EMA & inside Bearish POI)
+            if local_is_bearish:
+                for fvg in fvgs[-2:]:
+                    if fvg['type'] == 'BEARISH_FVG' and fvg['bottom'] <= last_close <= fvg['top']:
+                        setup_found = "BEARISH_FVG"
+                        direction = "SELL"
+                        break
+                if not setup_found:
+                    for ob in obs[-2:]:
+                        if ob['type'] in ['BEARISH_OB', 'BEARISH_BB'] and ob['bottom'] <= last_close <= ob['top']:
+                            setup_found = ob['type']
+                            direction = "SELL"
+                            break
+
+            # 2. Check Bullish Realignment (Price ABOVE 200 EMA & inside Bullish POI)
+            else:
+                for fvg in fvgs[-2:]:
+                    if fvg['type'] == 'BULLISH_FVG' and fvg['bottom'] <= last_close <= fvg['top']:
+                        setup_found = "BULLISH_FVG"
+                        direction = "BUY"
+                        break
+                if not setup_found:
+                    for ob in obs[-2:]:
+                        if ob['type'] in ['BULLISH_OB', 'BULLISH_BB'] and ob['bottom'] <= last_close <= ob['top']:
+                            setup_found = ob['type']
+                            direction = "BUY"
+                            break
+
+            # If setup exists and hasn't been broadcasted recently
+            if setup_found and direction:
+                cache_key = f"{symbol}_{direction}_{last_timestamp}"
+                if cache_key not in SENT_SIGNALS_CACHE:
+                    SENT_SIGNALS_CACHE.add(cache_key)
+                    
+                    # Clean cache if too large
+                    if len(SENT_SIGNALS_CACHE) > 200:
+                        SENT_SIGNALS_CACHE.clear()
+
+                    signal_msg = format_scalp_signal(symbol, direction, last_close)
+                    await context.bot.send_message(chat_id=MY_CHAT_ID, text=signal_msg, parse_mode="Markdown")
 
         except Exception as e:
-            print(f"Scanner error for {symbol}: {e}")
+            print(f"[Scanner Error] {symbol}: {e}")
 
 # ==========================================
-# 8. APPLICATION INITIALIZATION & THREADING
+# 9. APPLICATION INITIALIZATION & THREADING
 # ==========================================
 def run_telegram_bot():
     """Runs Telegram bot polling cleanly inside an independent AsyncIO loop."""
     if not TELEGRAM_BOT_TOKEN:
-        print("[Error] TELEGRAM_BOT_TOKEN missing in environment variables! Telegram bot skipped.")
+        print("[Error] TELEGRAM_BOT_TOKEN missing! Skipping bot startup.")
         return
 
     loop = asyncio.new_event_loop()
@@ -435,16 +536,18 @@ def run_telegram_bot():
     
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
+    application.add_handler(CommandHandler("signal", signal_command))
 
+    # Automatic Scanner runs every 3 minutes (180s)
     job_queue = application.job_queue
     if job_queue:
-        job_queue.run_repeating(auto_market_scanner, interval=300, first=10)
+        job_queue.run_repeating(auto_market_scanner, interval=180, first=10)
 
     loop.run_until_complete(application.initialize())
     loop.run_until_complete(application.start())
     loop.run_until_complete(application.updater.start_polling(drop_pending_updates=True))
     
-    print("[Telegram Bot] Polling running...")
+    print("[Telegram Bot] Live Scanner and Polling active...")
     loop.run_forever()
 
 if __name__ == "__main__":
