@@ -64,7 +64,7 @@ def fetch_ai_analysis(prompt):
         "google/gemma-4-26b-a4b-it:free",
         "openrouter/free"
     ]
-    
+
     for model in vision_models:
         try:
             response = ai_client.chat.completions.create(
@@ -77,7 +77,7 @@ def fetch_ai_analysis(prompt):
                 return content
         except Exception:
             continue
-            
+
     return (
         "🎯 *AI ANALYSIS & MARKET STORY*\n\n"
         "1. **Overall Bias:** Multi-Timeframe Structural Alignment Active.\n"
@@ -91,10 +91,10 @@ def fetch_ai_analysis(prompt):
 def normalize_ticker(symbol):
     """Maps shorthand terms to clean Yahoo Finance tickers with GC=F gold feed."""
     symbol = symbol.strip().upper()
-    
+
     alias_map = {
-        "GOLD": "GC=F",      
-        "XAUUSD": "GC=F",    
+        "GOLD": "GC=F",
+        "XAUUSD": "GC=F",
         "SILVER": "SI=F",
         "XAGUSD": "SI=F",
         "OIL": "CL=F",
@@ -102,19 +102,19 @@ def normalize_ticker(symbol):
         "BTC": "BTC-USD",
         "BTCUSD": "BTC-USD"
     }
-    
+
     if symbol in alias_map:
         return alias_map[symbol]
-    
+
     if len(symbol) == 6 and not symbol.endswith("=X"):
         return f"{symbol}=X"
-        
+
     return symbol
 
 def fetch_multi_timeframe_data(symbol, entry_tf="15m"):
     """Fetches Daily macro context alongside execution timeframe data cleanly with fallbacks."""
     primary_ticker = normalize_ticker(symbol)
-    
+
     ticker_candidates = [primary_ticker]
     if primary_ticker == "GC=F":
         ticker_candidates.append("XAUUSD=X")
@@ -171,28 +171,28 @@ def detect_fvg(df):
             bottom = df['High'].iloc[i-2]
             top = df['Low'].iloc[i]
             fvgs.append({'type': 'BULLISH_FVG', 'top': top, 'bottom': bottom, 'index': i})
-            
+
         elif df['High'].iloc[i] < df['Low'].iloc[i-2]:
             top = df['Low'].iloc[i-2]
             bottom = df['High'].iloc[i]
             fvgs.append({'type': 'BEARISH_FVG', 'top': top, 'bottom': bottom, 'index': i})
-            
+
     return fvgs
 
 def detect_order_blocks(df):
     """Detects recent Bullish and Bearish Order Blocks (OB) & Breaker Blocks (BB)."""
     obs = []
-    
+
     for i in range(5, len(df) - 1):
         body_size = abs(df['Close'].iloc[i] - df['Open'].iloc[i])
         avg_body = abs(df['Close'].iloc[i-5:i] - df['Open'].iloc[i-5:i]).mean()
-        
+
         if df['Close'].iloc[i] > df['Open'].iloc[i] and body_size > (1.5 * avg_body):
             for j in range(i-1, i-4, -1):
                 if df['Close'].iloc[j] < df['Open'].iloc[j]:
                     ob_top = max(df['Open'].iloc[j], df['Close'].iloc[j])
                     ob_bottom = df['Low'].iloc[j]
-                    
+
                     current_close = df['Close'].iloc[-1]
                     if current_close < ob_bottom:
                         obs.append({'type': 'BEARISH_BB', 'top': ob_top, 'bottom': ob_bottom, 'index': j})
@@ -205,7 +205,7 @@ def detect_order_blocks(df):
                 if df['Close'].iloc[j] > df['Open'].iloc[j]:
                     ob_top = df['High'].iloc[j]
                     ob_bottom = min(df['Open'].iloc[j], df['Close'].iloc[j])
-                    
+
                     current_close = df['Close'].iloc[-1]
                     if current_close > ob_top:
                         obs.append({'type': 'BULLISH_BB', 'top': ob_top, 'bottom': ob_bottom, 'index': j})
@@ -222,16 +222,17 @@ def generate_chart_image(df, title_str, is_long=True):
     """Renders dark-themed chart with 200 EMA (Gold Line) and mapped FVG, OB, & BB POI Zones."""
     img_buf = io.BytesIO()
     chart_df = df.tail(80).copy()
-    
+    n = len(chart_df)
+
     mc = mpf.make_marketcolors(
         up='#089981', down='#f23645',
         edge='inherit', wick='inherit', volume='in'
     )
     style = mpf.make_mpf_style(
-        marketcolors=mc, gridstyle=':', gridcolor='#2a2e39', 
+        marketcolors=mc, gridstyle=':', gridcolor='#2a2e39',
         y_on_right=True, facecolor='#131722', figcolor='#131722'
     )
-    
+
     # Gold Line: 200 EMA Overlay
     addplots = [
         mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5)
@@ -276,28 +277,39 @@ def generate_chart_image(df, title_str, is_long=True):
     fvgs = detect_fvg(chart_df)
     obs = detect_order_blocks(chart_df)
 
-    # 1. Render Fair Value Gaps (FVGs)
+    def idx_to_frac(i):
+        """Convert a candle index into an axes-fraction x position (0-1),
+        which is what axhspan's xmin/xmax actually expect."""
+        return max(0.0, min(1.0, i / n))
+
+    # 1. Render Fair Value Gaps (FVGs) — band now starts at the candle that formed it
     recent_fvgs = fvgs[-2:] if len(fvgs) >= 2 else fvgs
     for fvg in recent_fvgs:
+        x0 = idx_to_frac(fvg['index'])
         if fvg['type'] == 'BULLISH_FVG':
-            ax.axhspan(fvg['bottom'], fvg['top'], color='#089981', alpha=0.25, hatch='//')
-            ax.text(0, fvg['top'], " Bullish FVG", color='#089981', fontsize=7, verticalalignment='bottom')
+            ax.axhspan(fvg['bottom'], fvg['top'], xmin=x0, xmax=1, color='#089981', alpha=0.25, hatch='//')
+            ax.text(fvg['index'], fvg['top'], " Bullish FVG", color='#089981', fontsize=7, verticalalignment='bottom')
         elif fvg['type'] == 'BEARISH_FVG':
-            ax.axhspan(fvg['bottom'], fvg['top'], color='#f23645', alpha=0.25, hatch='\\\\')
-            ax.text(0, fvg['bottom'], " Bearish FVG", color='#f23645', fontsize=7, verticalalignment='top')
+            ax.axhspan(fvg['bottom'], fvg['top'], xmin=x0, xmax=1, color='#f23645', alpha=0.25, hatch='\\\\')
+            ax.text(fvg['index'], fvg['bottom'], " Bearish FVG", color='#f23645', fontsize=7, verticalalignment='top')
 
-    # 2. Render Order Blocks & Breaker Blocks (OB / BB)
+    # 2. Render Order Blocks & Breaker Blocks (OB / BB) — same fix, plus BULLISH_BB was missing entirely
     recent_obs = obs[-2:] if len(obs) >= 2 else obs
     for ob in recent_obs:
+        x0 = idx_to_frac(ob['index'])
+        label_x = ob['index']
         if ob['type'] == 'BULLISH_OB':
-            ax.axhspan(ob['bottom'], ob['top'], color='#00e676', alpha=0.30)
-            ax.text(len(chart_df)-15, ob['top'], " Bullish OB", color='#00e676', fontsize=8, fontweight='bold')
+            ax.axhspan(ob['bottom'], ob['top'], xmin=x0, xmax=1, color='#00e676', alpha=0.30)
+            ax.text(label_x, ob['top'], " Bullish OB", color='#00e676', fontsize=8, fontweight='bold')
         elif ob['type'] == 'BEARISH_OB':
-            ax.axhspan(ob['bottom'], ob['top'], color='#ff1744', alpha=0.30)
-            ax.text(len(chart_df)-15, ob['bottom'], " Bearish OB", color='#ff1744', fontsize=8, fontweight='bold')
+            ax.axhspan(ob['bottom'], ob['top'], xmin=x0, xmax=1, color='#ff1744', alpha=0.30)
+            ax.text(label_x, ob['bottom'], " Bearish OB", color='#ff1744', fontsize=8, fontweight='bold')
         elif ob['type'] == 'BEARISH_BB':
-            ax.axhspan(ob['bottom'], ob['top'], color='#ff9100', alpha=0.30)
-            ax.text(len(chart_df)-15, ob['bottom'], " Breaker Block (BB)", color='#ff9100', fontsize=8, fontweight='bold')
+            ax.axhspan(ob['bottom'], ob['top'], xmin=x0, xmax=1, color='#ff9100', alpha=0.30)
+            ax.text(label_x, ob['bottom'], " Breaker Block (BB)", color='#ff9100', fontsize=8, fontweight='bold')
+        elif ob['type'] == 'BULLISH_BB':
+            ax.axhspan(ob['bottom'], ob['top'], xmin=x0, xmax=1, color='#00b0ff', alpha=0.30)
+            ax.text(label_x, ob['top'], " Breaker Block (BB)", color='#00b0ff', fontsize=8, fontweight='bold')
 
     ax.set_title(title_str, color='#d1d4dc', fontsize=9, fontweight='bold')
     img_buf.seek(0)
@@ -324,15 +336,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     args = context.args
-    
+
     raw_symbol = args[0].upper() if len(args) > 0 else "GOLD"
     tf = args[1] if len(args) > 1 else "15m"
-    
+
     status_msg = await update.message.reply_text(f"📊 Mapping FVG, OB & BB POI Zones for {raw_symbol}...")
-    
+
     try:
         df_daily, df_entry, macro_is_bearish, daily_ema, ticker_str = fetch_multi_timeframe_data(raw_symbol, tf)
-        
+
         if df_entry.empty:
             await status_msg.edit_text(f"❌ Error: Unable to fetch market data for {raw_symbol} ({ticker_str}).")
             return
@@ -340,13 +352,13 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_price = df_entry['Close'].iloc[-1]
         local_ema = df_entry['EMA200'].iloc[-1]
         local_is_bearish = last_price < local_ema
-        
+
         macro_bias = "BEARISH" if macro_is_bearish else "BULLISH"
         local_bias = "BEARISH" if local_is_bearish else "BULLISH"
 
         fvgs = detect_fvg(df_entry)
         obs = detect_order_blocks(df_entry)
-        
+
         fvg_summary = f"{len(fvgs)} Active FVG(s) detected" if fvgs else "No immediate FVG gaps"
         ob_summary = f"{len(obs)} Active OB/BB Zone(s) detected" if obs else "No immediate Order Blocks"
 
@@ -357,9 +369,9 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         - Daily 200 EMA Macro Bias: {macro_bias} (Daily Close: {df_daily['Close'].iloc[-1]:.2f}, Daily EMA: {daily_ema:.2f})
         - {tf.upper()} 200 EMA Local Bias: {local_bias} (Current Price: {last_price:.2f}, Local EMA: {local_ema:.2f})
         - Structural POI Map: {fvg_summary} | {ob_summary}
-        
+
         RULE: If price is BELOW the 200 EMA (Gold Line), DO NOT recommend buys. Any pullbacks into Bearish OB or FVG supply zones are sell realignment setups.
-        
+
         Analyze {raw_symbol} ({tf}):
         Format output:
         🎯 AI ANALYSIS & MARKET STORY
@@ -374,14 +386,14 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_long = not local_is_bearish
         title_str = f"{raw_symbol} ({tf.upper()}) | Trend: {local_bias} | Gold Line = 200 EMA"
         chart_img = generate_chart_image(df_entry, title_str, is_long=is_long)
-        
+
         await context.bot.send_photo(
             chat_id=chat_id,
             photo=chart_img,
             caption=f"🎯 *LIVE POI MAP (FVG / OB / BB): {raw_symbol} ({tf.upper()})*",
             parse_mode="Markdown"
         )
-        
+
         await status_msg.delete()
         await context.bot.send_message(chat_id=chat_id, text=analysis_text, parse_mode="Markdown")
 
@@ -405,7 +417,7 @@ async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
 
             last_close = df_entry['Close'].iloc[-1]
             fvgs = detect_fvg(df_entry)
-            
+
             for fvg in fvgs[-2:]:
                 if local_is_bearish and fvg['type'] == 'BEARISH_FVG' and fvg['bottom'] <= last_close <= fvg['top']:
                     alert_text = (
@@ -432,7 +444,7 @@ def run_telegram_bot():
     asyncio.set_event_loop(loop)
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
+
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
 
@@ -443,7 +455,7 @@ def run_telegram_bot():
     loop.run_until_complete(application.initialize())
     loop.run_until_complete(application.start())
     loop.run_until_complete(application.updater.start_polling(drop_pending_updates=True))
-    
+
     print("[Telegram Bot] Polling running...")
     loop.run_forever()
 
