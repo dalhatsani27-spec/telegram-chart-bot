@@ -1,9 +1,8 @@
-flask
-requests
-numpy
-pandas
-yfinance
-mplfinance
-matplotlib
-openai
-python-telegram-bot[all]
+python-telegram-bot==20.7
+flask==3.0.0
+yfinance==0.2.36
+pandas==2.2.0
+numpy==1.26.4
+mplfinance==0.12.10b0
+matplotlib==3.8.2
+requests==2.31.0
