@@ -284,31 +284,31 @@ def detect_order_blocks(df):
     return obs
 
 # ==========================================
-# 5. DYNAMIC SIGNAL FORMATTER (KING STYLE)
+# 5. DYNAMIC SIGNAL FORMATTER
 # ==========================================
 def format_scalp_signal(symbol, direction, entry_price):
-    """Formats high-impact Telegram scalping signals with dynamic TP/SL levels."""
+    """Formats signals with dynamic TP/SL levels."""
     direction_upper = direction.upper()
-    emoji = "💥" if direction_upper == "BUY" else "🔻"
-
-    # Determine asset step size based on price magnitude
-    if "BTC" in symbol:
+    
+    # Determine step size based on symbol type
+    if any(k in symbol.upper() for k in ["GOLD", "XAU", "GC=F"]):
+        tp_step = 3.0   # 30 pips per TP on Gold
+        sl_dist = 10.0  # 100 pips SL
+        decimals = 2
+    elif "BTC" in symbol.upper():
         tp_step = 250.0
         sl_dist = 800.0
         decimals = 1
-    elif any(k in symbol for k in ["GOLD", "XAU", "GC=F"]):
-        tp_step = 3.0
-        sl_dist = 10.0
-        decimals = 2
-    elif "JPY" in symbol:
+    elif "JPY" in symbol.upper():
         tp_step = 0.20
         sl_dist = 0.60
         decimals = 3
-    else:  # Standard Forex (EURUSD, GBPUSD)
+    else:  # Forex Pairs (EURUSD, GBPUSD, etc.)
         tp_step = 0.0010  # 10 pips
         sl_dist = 0.0030  # 30 pips
         decimals = 5
 
+    # Calculate TP and SL
     if direction_upper == "BUY":
         tp1 = entry_price + (tp_step * 1)
         tp2 = entry_price + (tp_step * 2)
@@ -325,18 +325,18 @@ def format_scalp_signal(symbol, direction, entry_price):
         sl  = entry_price + sl_dist
 
     fmt = f"{{:.{decimals}f}}"
+    clean_sym = symbol.replace("=", "").replace("-USD", "").replace("GC=F", "XAUUSD")
 
     signal_text = (
-        f"🔜 *𝐆𝐄𝐓 𝐑𝐄𝐀𝐃𝐘 𝐒𝐈𝐆𝐍𝐀𝐋𝐒 𝐂𝐎𝐌𝐈𝐍𝐆 𝐒𝐎𝐎𝐍* 🔜\n"
-        f"‼️‼️‼️‼️‼️‼️‼️\n\n"
-        f"{emoji} *{symbol} {direction_upper}* {fmt.format(entry_price)}\n\n"
-        f"✔️ *TP1.* {fmt.format(tp1)}\n"
-        f"✔️ *TP2.* {fmt.format(tp2)}\n"
-        f"✔️ *TP3.* {fmt.format(tp3)}\n"
-        f"✔️ *TP4.* {fmt.format(tp4)}\n"
-        f"✔️ *TP5.* {fmt.format(tp5)}\n\n"
-        f"❌ *SL.*  {fmt.format(sl)}📌\n\n"
-        f"⚠️ *Use Money Management*"
+        f"💥{clean_sym} {direction_upper} 💥 {fmt.format(entry_price)}\n\n"
+        f"✔️TP1. {fmt.format(tp1)}\n"
+        f"✔️TP2. {fmt.format(tp2)}\n"
+        f"✔️TP3. {fmt.format(tp3)}\n"
+        f"✔️TP4. {fmt.format(tp4)}\n"
+        f"✔️TP5. {fmt.format(tp5)}\n\n"
+        f"❌SL.   {fmt.format(sl)}📌\n\n\n"
+        f"⚠️Use Money Management\n\n"
+        f"Don't miss my signal confirm {direction.lower()} 💯💯"
     )
     return signal_text
 
@@ -485,6 +485,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title_str = f"{raw_symbol} ({tf.upper()}) | Trend: {local_bias} | 200 EMA Gold Line"
         chart_img = generate_chart_image(df_entry, title_str, is_long=is_long)
         
+        # 1. Send Chart Photo
         await context.bot.send_photo(
             chat_id=chat_id,
             photo=chart_img,
@@ -493,7 +494,14 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         await status_msg.delete()
+
+        # 2. Send AI Detailed Analysis Text
         await context.bot.send_message(chat_id=chat_id, text=analysis_text, parse_mode="Markdown")
+
+        # 3. Append Signal Message Directly After Analysis
+        direction = "BUY" if is_long else "SELL"
+        signal_msg = format_scalp_signal(raw_symbol, direction, last_price)
+        await context.bot.send_message(chat_id=chat_id, text=signal_msg)
 
     except Exception as e:
         await status_msg.edit_text(f"❌ Error generating analysis: {str(e)}")
@@ -514,7 +522,7 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     signal_msg = format_scalp_signal(symbol, direction, entry)
-    await update.message.reply_text(signal_msg, parse_mode="Markdown")
+    await update.message.reply_text(signal_msg)
 
 # ==========================================
 # 8. AUTOMATED MULTI-PAIR SCALPING SIGNAL SCANNER
@@ -580,7 +588,7 @@ async def auto_market_scanner(context: ContextTypes.DEFAULT_TYPE):
                         SENT_SIGNALS_CACHE.clear()
 
                     signal_msg = format_scalp_signal(symbol, direction, last_close)
-                    await context.bot.send_message(chat_id=MY_CHAT_ID, text=signal_msg, parse_mode="Markdown")
+                    await context.bot.send_message(chat_id=MY_CHAT_ID, text=signal_msg)
 
         except Exception as e:
             print(f"[Scanner Error] {symbol}: {e}")
