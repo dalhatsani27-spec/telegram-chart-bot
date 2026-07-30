@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from openai import OpenAI
 
 # ==========================================
@@ -75,7 +75,7 @@ def translate_text(text, target_language):
 
 def fetch_ai_commentary(metrics_summary, target_language="English"):
     if not OPENROUTER_API_KEY:
-        base_text = "🎯 *AI TOP-DOWN MARKET DESK COMMENTARY*\n\nInstitutional channel alignment verified across 4H, 1H, and 15M/5M execution engines."
+        base_text = "🎯 *AI MISSED BREAKOUT PULLBACK DESK COMMENTARY*\n\nWaiting for price to retrace and test the parallel channel boundary for a high-probability discount pullback entry."
         return translate_text(base_text, target_language)
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
@@ -84,11 +84,11 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
     Here are the quantitative top-down multi-timeframe metrics for the setup:
     {metrics_summary}
     
-    Provide a professional top-down breakdown in 4 concise points:
+    Provide a professional breakdown in 4 concise points:
     1. Macro 4-Hour Context & Structure
     2. Intermediate 1-Hour Timeframe Alignment
-    3. 15-Minute Execution TF, Parallel Sloped Channel Geometry, Breakout Flip Status & 5m Tight Stop-Loss Sweet Spot
-    4. Execution Outlook & Risk Parameters
+    3. 15-Minute Parallel Sloped Channel, Missed Breakout & Retest Pullback Discount Zone Setup
+    4. 5-Minute Sweet Spot Tight SL & Pullback Execution Outlook
     
     Write the response directly in {target_language}.
     """
@@ -105,7 +105,7 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
         except Exception:
             continue
             
-    fallback = "🎯 *AI TOP-DOWN MARKET DESK COMMENTARY*\n\nInstitutional confluence verified across 4H, 1H, 15M, and 5M layers with dynamic channel flip adaptation."
+    fallback = "🎯 *AI MISSED BREAKOUT PULLBACK DESK COMMENTARY*\n\nPrice has moved past the initial breakout. Awaiting retracement to test the parallel channel boundary for a clean discount pullback entry."
     return translate_text(fallback, target_language)
 
 # ==========================================
@@ -118,12 +118,13 @@ def normalize_ticker_twelve_data(symbol):
         "SILVER": "XAG/USD", "XAGUSD": "XAG/USD",
         "OIL": "WTI/USD", "USOIL": "WTI/USD", "WTI": "WTI/USD", "BRENT": "BRENT/USD",
         "BTC": "BTC/USD", "BTCUSD": "BTC/USD",
-        "TESLA": "TSLA", "AAPL": "AAPL",
+        "ETH": "ETH/USD", "ETHUSD": "ETH/USD",
+        "AAPL": "AAPL", "TSLA": "TSLA", "NVDA": "NVDA", "MSFT": "MSFT", "AMZN": "AMZN", "GOOGL": "GOOGL", "META": "META",
         "US30": "DJI", "NAS100": "IXIC", "SPX500": "SPX"
     }
     if symbol in mapping:
         return mapping[symbol]
-    if len(symbol) == 6 and "/" not in symbol and symbol not in ["US30", "NAS100"]:
+    if len(symbol) == 6 and "/" not in symbol and symbol not in ["US30", "NAS100", "SPX500"]:
         return f"{symbol[:3]}/{symbol[3:]}"
     return symbol
 
@@ -157,12 +158,13 @@ def normalize_ticker_yfinance(symbol):
         "SILVER": "SI=F", 
         "OIL": "CL=F", "USOIL": "CL=F", "WTI": "CL=F", 
         "BTC": "BTC-USD", "BTCUSD": "BTC-USD",
-        "TESLA": "TSLA", "AAPL": "AAPL",
+        "ETH": "ETH-USD", "ETHUSD": "ETH-USD",
+        "AAPL": "AAPL", "TSLA": "TSLA", "NVDA": "NVDA", "MSFT": "MSFT", "AMZN": "AMZN", "GOOGL": "GOOGL", "META": "META",
         "US30": "^DJI", "NAS100": "^IXIC", "SPX500": "^GSPC"
     }
     if symbol in alias_map:
         return alias_map[symbol]
-    if len(symbol) == 6 and not symbol.endswith("=X") and symbol not in ["US30", "NAS100"]:
+    if len(symbol) == 6 and not symbol.endswith("=X") and symbol not in ["US30", "NAS100", "SPX500"]:
         return f"{symbol}=X"
     return symbol
 
@@ -178,7 +180,6 @@ def clean_and_normalize_data(df):
     return df
 
 def fetch_top_down_institutional_data(symbol):
-    # Hierarchy: 4H (Macro), 1H (Intermediate), 15M (Execution), 5M (Sweet Spot SL)
     df_4h = clean_and_normalize_data(fetch_twelve_data(symbol, interval="4h", outputsize=150))
     df_1h = clean_and_normalize_data(fetch_twelve_data(symbol, interval="1h", outputsize=150))
     df_15m = clean_and_normalize_data(fetch_twelve_data(symbol, interval="15m", outputsize=150))
@@ -188,7 +189,7 @@ def fetch_top_down_institutional_data(symbol):
         ticker = normalize_ticker_yfinance(symbol)
         try:
             if df_4h.empty:
-                h4_data = yf.download(ticker, period="60d", interval="60m", progress=False, auto_adjust=True) # Yfinance 60m proxy for 4h or 1h
+                h4_data = yf.download(ticker, period="60d", interval="60m", progress=False, auto_adjust=True)
                 if isinstance(h4_data.columns, pd.MultiIndex): h4_data.columns = h4_data.columns.get_level_values(0)
                 df_4h = clean_and_normalize_data(h4_data)
             if df_1h.empty:
@@ -207,7 +208,7 @@ def fetch_top_down_institutional_data(symbol):
             pass
 
     if df_4h.empty or df_1h.empty or df_15m.empty or df_5m.empty:
-        raise ValueError(f"Unable to retrieve verified 4H/1H/15M/5M multi-timeframe data for '{symbol}'.")
+        raise ValueError(f"Unable to retrieve verified multi-timeframe data for '{symbol}'.")
         
     df_4h['EMA200'] = df_4h['Close'].ewm(span=200, adjust=False).mean() if len(df_4h) >= 200 else df_4h['Close'].ewm(span=len(df_4h)//2, adjust=False).mean()
     df_1h['EMA50'] = df_1h['Close'].ewm(span=50, adjust=False).mean()
@@ -217,7 +218,7 @@ def fetch_top_down_institutional_data(symbol):
     return df_4h, df_1h, df_15m, df_5m
 
 # ==========================================
-# 4. PARALLEL SLOPED CHANNEL & SMART FLIP ENGINE
+# 4. PARALLEL SLOPED CHANNEL & MISSED BREAKOUT PULLBACK ENGINE
 # ==========================================
 def calculate_parallel_sloped_channel(chart_df):
     highs = chart_df['High'].values
@@ -233,7 +234,6 @@ def calculate_parallel_sloped_channel(chart_df):
             
     x_vals = np.arange(len(chart_df))
     
-    # Construct Upper Sloped Trendline connecting swing highs
     if len(swing_highs) >= 2:
         p1, p2 = swing_highs[-2], swing_highs[-1]
         slope_upper = (p2[1] - p1[1]) / (p2[0] - p1[0] if p2[0] != p1[0] else 1)
@@ -243,7 +243,6 @@ def calculate_parallel_sloped_channel(chart_df):
         slope_upper = 0.0
         upper_line = np.full(len(chart_df), chart_df['High'].max())
         
-    # Construct Lower Sloped Parallel Trendline connecting swing lows
     if len(swing_lows) >= 2:
         p1_l, p2_l = swing_lows[-2], swing_lows[-1]
         slope_lower = (p2_l[1] - p1_l[1]) / (p2_l[0] - p1_l[0] if p2_l[0] != p1_l[0] else 1)
@@ -256,33 +255,33 @@ def calculate_parallel_sloped_channel(chart_df):
     projected_upper = upper_line[-1]
     projected_lower = lower_line[-1]
     
-    # Smart Breakout Flip Logic
     break_above = current_close > projected_upper
     break_below = current_close < projected_lower
     
-    if break_above:
+    # Missed Breakout Pullback Detection: Identify if a breakout occurred earlier and price is pulling back to test the boundary as support/resistance
+    has_broken_out_previously = any(h > projected_upper for h in chart_df['High'].tail(25).values) or any(l < projected_lower for l in chart_df['Low'].tail(25).values)
+    
+    if break_above or has_broken_out_previously:
+        # Bullish context: Missed breakout -> waiting for pullback to upper channel boundary test
         direction = "BUY"
-        status_msg = "Bullish Channel Break & Close Confirmed (Structural Flip)"
-    elif break_below:
-        direction = "SELL"
-        status_msg = "Bearish Channel Break & Close Confirmed (Structural Flip)"
+        pullback_target = projected_upper
+        status_msg = "Missed Breakout: Awaiting Pullback to Upper Channel Support"
     else:
-        direction = "NEUTRAL"
-        status_msg = "Within Sloped Parallel Channel: Awaiting Breakout Flip"
+        direction = "SELL"
+        pullback_target = projected_lower
+        status_msg = "Missed Breakout: Awaiting Pullback to Lower Channel Resistance"
 
     return {
         "x_vals": x_vals,
         "upper_line": upper_line,
         "lower_line": lower_line,
         "direction": direction,
-        "break_above": break_above,
-        "break_below": break_below,
-        "score": 95 if (break_above or break_below) else 60,
+        "pullback_target": pullback_target,
         "status_msg": status_msg
     }
 
 # ==========================================
-# 5. MARKET STATE & CENTRAL DECISION ENGINE (4H -> 1H -> 15M -> 5M)
+# 5. MARKET STATE & CENTRAL DECISION ENGINE (PULLBACK FOCUS)
 # ==========================================
 def central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m):
     h4_close = df_4h['Close'].iloc[-1]
@@ -293,38 +292,26 @@ def central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m):
     h1_ema50 = df_1h['EMA50'].iloc[-1]
     intermediate_bullish = h1_close > h1_ema50
     
-    # 15M Channel & Breakout Evaluation
     chart_slice = df_15m.tail(80).copy()
     channel_eval = calculate_parallel_sloped_channel(chart_slice)
     
-    # Smart Flip Overrides baseline macro if breakout occurs
-    if channel_eval["break_above"]:
-        direction = "BUY"
-        execution_state = "BULLISH BREAKOUT FLIP CONFIRMED"
-    elif channel_eval["break_below"]:
-        direction = "SELL"
-        execution_state = "BEARISH BREAKOUT FLIP CONFIRMED"
-    else:
-        direction = "BUY" if (macro_bullish and intermediate_bullish) else "SELL"
-        execution_state = "TOP-DOWN ALIGNED TREND"
-        
-    confidence = channel_eval["score"]
+    direction = channel_eval["direction"]
+    confidence = 90
     current_price = df_15m['Close'].iloc[-1]
     
-    # 5-Minute Sweet Spot Tight Stop-Loss calculation
+    # Pullback Limit Entry: Set entry at the channel boundary retest level for missed breakout
+    pullback_entry = channel_eval["pullback_target"]
+    
+    # 5-Minute Sweet Spot Tight Stop-Loss calculation based on pullback swing structure
     df_5m_tail = df_5m.tail(15).copy()
     if direction == "BUY":
-        sweet_spot_sl = df_5m_tail['Low'].min() - (df_5m_tail['ATR'].iloc[-1] * 0.5)
-        if sweet_spot_sl >= current_price:
-            sweet_spot_sl = current_price - (df_15m['ATR'].iloc[-1] * 1.0)
-        tp1 = current_price + (abs(current_price - sweet_spot_sl) * 1.5)
-        tp2 = current_price + (abs(current_price - sweet_spot_sl) * 3.0)
+        sweet_spot_sl = df_5m_tail['Low'].min() - (df_5m_tail['ATR'].iloc[-1] * 0.4)
+        tp1 = pullback_entry + (abs(pullback_entry - sweet_spot_sl) * 1.5)
+        tp2 = pullback_entry + (abs(pullback_entry - sweet_spot_sl) * 3.0)
     else:
-        sweet_spot_sl = df_5m_tail['High'].max() + (df_5m_tail['ATR'].iloc[-1] * 0.5)
-        if sweet_spot_sl <= current_price:
-            sweet_spot_sl = current_price + (df_15m['ATR'].iloc[-1] * 1.0)
-        tp1 = current_price - (abs(sweet_spot_sl - current_price) * 1.5)
-        tp2 = current_price - (abs(sweet_spot_sl - current_price) * 3.0)
+        sweet_spot_sl = df_5m_tail['High'].max() + (df_5m_tail['ATR'].iloc[-1] * 0.4)
+        tp1 = pullback_entry - (abs(sweet_spot_sl - pullback_entry) * 1.5)
+        tp2 = pullback_entry - (abs(sweet_spot_sl - pullback_entry) * 3.0)
         
     return {
         "symbol": symbol,
@@ -332,17 +319,18 @@ def central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m):
         "confidence": confidence,
         "macro_bias": "Bullish (4H > EMA200)" if macro_bullish else "Bearish (4H < EMA200)",
         "intermediate_bias": "Bullish (1H > EMA50)" if intermediate_bullish else "Bearish (1H < EMA50)",
-        "execution_state": execution_state,
+        "execution_state": "MISSED BREAKOUT PULLBACK SETUP",
         "trendline_status": channel_eval["status_msg"],
-        "break_confirmed": channel_eval["break_above"] or channel_eval["break_below"],
-        "entry": current_price,
+        "break_confirmed": True,
+        "entry": pullback_entry,
+        "current_market_price": current_price,
         "sl": sweet_spot_sl,
         "tp1": tp1,
         "tp2": tp2
     }
 
 # ==========================================
-# 6. 15M CHART RENDERER WITH SLOPED CHANNELS
+# 6. 15M CHART RENDERER WITH PULLBACK ZONES
 # ==========================================
 def generate_15m_execution_chart(df_15m, title_str, setup):
     img_buf = io.BytesIO()
@@ -367,12 +355,12 @@ def generate_15m_execution_chart(df_15m, title_str, setup):
     )
     
     ax = axlist[0]
-    ax.axhline(setup['entry'], color='#2962ff', linestyle='-.', linewidth=1.2, label=f"Entry Level")
+    ax.axhline(setup['entry'], color='#ffd700', linestyle='-.', linewidth=1.5, label=f"Pullback Limit Entry")
     ax.axhline(setup['sl'], color='#e53935', linestyle='--', linewidth=1.0, label=f"5m Sweet Spot SL")
     ax.axhline(setup['tp1'], color='#43a047', linestyle='--', linewidth=1.0, label=f"TP1")
     
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-    ax.set_title(f"{title_str}\n4H->1H->15M Top-Down Confluence | {current_time_str}", color='white', fontsize=9)
+    ax.set_title(f"{title_str}\nMissed Breakout Pullback Zone | {current_time_str}", color='white', fontsize=9)
     
     fig.savefig(img_buf, dpi=130, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -380,10 +368,20 @@ def generate_15m_execution_chart(df_15m, title_str, setup):
     return img_buf
 
 # ==========================================
-# 7. PROFESSIONAL TELEGRAM MENU & SCANNER
+# 7. PROFESSIONAL TELEGRAM MENU & ASSET CONTAINER
 # ==========================================
 user_languages = {}
 active_subscribers = set()
+
+# Complete asset container organized by categories
+ASSET_CONTAINER = {
+    "Forex Majors": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD"],
+    "Forex Crosses": ["EURGBP", "EURJPY", "GBPJPY", "GBPAUD", "AUDJPY", "EURAUD"],
+    "Commodities": ["XAUUSD", "XAGUSD", "OIL"],
+    "Crypto": ["BTCUSD", "ETHUSD"],
+    "Indices": ["US30", "NAS100", "SPX500"],
+    "Stocks": ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META"]
+}
 
 def get_home_menu(lang="English", auto_active=False):
     lang_flags = {"English": "🇬🇧 English", "Hausa": "🇳🇬 Hausa", "Pidgin": "🇳🇬 Pidgin"}
@@ -391,8 +389,9 @@ def get_home_menu(lang="English", auto_active=False):
     auto_status = "🟢 GBPAUD Continuous Scanner: ON" if auto_active else "🔴 GBPAUD Continuous Scanner: OFF"
     
     keyboard = [
-        [InlineKeyboardButton("📊 Run 4H/1H/15M Analysis", callback_data="menu_analysis"),
-         InlineKeyboardButton("🚨 Generate Signal", callback_data="menu_signal")],
+        [InlineKeyboardButton("📊 Run Pullback Analysis", callback_data="menu_analysis"),
+         InlineKeyboardButton("🚨 Generate Pullback Signal", callback_data="menu_signal")],
+        [InlineKeyboardButton("🔍 Type Custom Ticker / Pair", callback_data="prompt_custom_ticker")],
         [InlineKeyboardButton(auto_status, callback_data="toggle_auto_scan")],
         [InlineKeyboardButton(f"🌐 Language: {current_flag}", callback_data="menu_lang_select")],
         [InlineKeyboardButton("ℹ️ Help & Instructions", callback_data="menu_help")]
@@ -405,16 +404,57 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_auto = chat_id in active_subscribers
     
     welcome_text = (
-        "🏛️ *INSTITUTIONAL TOP-DOWN MARKET DESK*\n"
+        "🏛️ *INSTITUTIONAL MISSED BREAKOUT PULLBACK DESK*\n"
         "━━━━━━━━━━━━━━━━━━━\n"
-        "Terminal online with **4H → 1H → 15M Top-Down Hierarchy**, **Parallel Sloped Channel Flip Adaptation**, and **5M Sweet Spot Tight Stop-Loss**.\n\n"
-        "📌 *Status:* Ready for execution."
+        "Terminal online with **Missed Breakout Pullback Entry Logic**, **Parallel Channel Boundary Retests**, **Complete Asset Container (Forex, Commodities, Crypto, Indices, Stocks)**, and **5M Sweet Spot Tight Stop-Loss**.\n\n"
+        "📌 *Status:* Ready. Select an asset category or type any ticker symbol directly into chat."
     )
     await update.message.reply_text(
         welcome_text,
         reply_markup=get_home_menu("English", is_auto),
         parse_mode="Markdown"
     )
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    text = update.message.text.strip()
+    lang = user_languages.get(chat_id, "English")
+    is_auto = chat_id in active_subscribers
+    
+    symbol = text.upper()
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
+    
+    await update.message.reply_text(f"🔍 Analyzing missed breakout pullback zones for **{symbol}** at `{ts}`...")
+    try:
+        df_4h, df_1h, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
+        setup = central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m)
+
+        metrics = f"- Timestamp: {ts}\n- 4H Bias: {setup['macro_bias']}\n- 1H Bias: {setup['intermediate_bias']}\n- Status: {setup['trendline_status']}\n- Direction: {setup['direction']}\n"
+        ai_commentary = fetch_ai_commentary(metrics, lang)
+        chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Pullback Setup", setup)
+        
+        decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else 5
+        fmt = f"{{:.{decimals}f}}"
+        
+        price_box = (
+            f"📌 *MISSED BREAKOUT PULLBACK SETUP ({symbol}):*\n"
+            f"⏱️ *Timestamp:* `{ts}`\n"
+            f"• 4H Macro Bias: {setup['macro_bias']}\n"
+            f"• Status: {setup['trendline_status']}\n"
+            f"• Direction: {setup['direction']}\n"
+            f"• Current Price: {fmt.format(setup['current_market_price'])}\n"
+            f"• 🟡 **Pullback Entry Limit:** {fmt.format(setup['entry'])}\n"
+            f"• 5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
+            f"• TP1: {fmt.format(setup['tp1'])}\n"
+            f"• TP2: {fmt.format(setup['tp2'])}\n"
+        )
+        
+        await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *PULLBACK CHART: {symbol}*\n⏱️ `{ts}`", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=chat_id, text=price_box, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=chat_id, text=ai_commentary, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=chat_id, text="📌 *Complete.* Choose next action:", reply_markup=get_home_menu(lang, is_auto), parse_mode="Markdown")
+    except Exception as e:
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed to analyze '{symbol}': {str(e)}\n\nPlease ensure the ticker symbol is correct.", reply_markup=get_home_menu(lang, is_auto))
 
 async def background_continuous_scanner(application):
     await asyncio.sleep(10)
@@ -425,29 +465,29 @@ async def background_continuous_scanner(application):
                 df_4h, df_1h, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
                 setup = central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m)
                 
-                if setup['confidence'] >= 80 and setup['break_confirmed']:
+                if setup['confidence'] >= 80:
                     decimals = 3 if "JPY" in symbol else (2 if "XAU" in symbol or "GOLD" in symbol else 5)
                     fmt = f"{{:.{decimals}f}}"
                     scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
                     
                     raw_signal_text = (
-                        f"🚨 **CONTINUOUS A+ SIGNAL ALERT ({symbol})** 🚨\n"
+                        f"🚨 **MISSED BREAKOUT PULLBACK SIGNAL ({symbol})** 🚨\n"
                         f"⏱️ *Timestamp:* {scan_timestamp}\n\n"
                         f"Direction: {setup['direction']}\n"
                         f"Status: {setup['trendline_status']}\n"
-                        f"Entry: {fmt.format(setup['entry'])}\n"
+                        f"🟡 Pullback Entry Limit: {fmt.format(setup['entry'])}\n"
                         f"5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
                         f"TP1: {fmt.format(setup['tp1'])}\n"
                         f"TP2: {fmt.format(setup['tp2'])}\n"
                     )
                     
-                    chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Channel Flip Breakout", setup)
+                    chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Pullback Zone", setup)
 
                     for chat_id in list(active_subscribers):
                         lang = user_languages.get(chat_id, "English")
                         final_signal_text = translate_text(raw_signal_text, lang)
                         try:
-                            await application.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *A+ BREAKOUT FLIP: {symbol}*\n⏱️ `{scan_timestamp}`", parse_mode="Markdown")
+                            await application.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *PULLBACK SIGNAL: {symbol}*\n⏱️ `{scan_timestamp}`", parse_mode="Markdown")
                             chart_img.seek(0)
                             await application.bot.send_message(chat_id=chat_id, text=final_signal_text, parse_mode="Markdown")
                         except Exception:
@@ -467,6 +507,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     
     if data == "menu_home":
         await query.edit_message_text(text="🏛️ *Main Control Menu:*", reply_markup=get_home_menu(lang, is_auto), parse_mode="Markdown")
+
+    elif data == "prompt_custom_ticker":
+        await query.edit_message_text(
+            text="✍️ **Type Any Ticker / Pair:**\n\nSimply type any asset symbol (e.g., `EURUSD`, `XAUUSD`, `BTCUSD`, `US30`, `NVDA`) directly into this chat, and the terminal will instantly run the institutional pullback analysis.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_home")]]),
+            parse_mode="Markdown"
+        )
 
     elif data == "toggle_auto_scan":
         if chat_id in active_subscribers:
@@ -494,55 +541,71 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "menu_analysis":
         kb = [
-            [InlineKeyboardButton("GBPAUD", callback_data="run_an|GBPAUD"),
-             InlineKeyboardButton("EURUSD", callback_data="run_an|EURUSD")],
-            [InlineKeyboardButton("XAUUSD (GOLD)", callback_data="run_an|XAUUSD"),
-             InlineKeyboardButton("BTCUSD", callback_data="run_an|BTCUSD")],
-            [InlineKeyboardButton("AAPL", callback_data="run_an|AAPL"),
-             InlineKeyboardButton("TESLA", callback_data="run_an|TESLA")],
-            [InlineKeyboardButton("US30", callback_data="run_an|US30"),
-             InlineKeyboardButton("NAS100", callback_data="run_an|NAS100")],
+            [InlineKeyboardButton("💱 Forex Majors", callback_data="cat_an|Forex Majors"),
+             InlineKeyboardButton("💱 Forex Crosses", callback_data="cat_an|Forex Crosses")],
+            [InlineKeyboardButton("🥇 Commodities", callback_data="cat_an|Commodities"),
+             InlineKeyboardButton("🪙 Crypto", callback_data="cat_an|Crypto")],
+            [InlineKeyboardButton("📈 Indices", callback_data="cat_an|Indices"),
+             InlineKeyboardButton("📈 Stocks", callback_data="cat_an|Stocks")],
+            [InlineKeyboardButton("🔍 Type Custom Ticker", callback_data="prompt_custom_ticker")],
             [InlineKeyboardButton("« Back", callback_data="menu_home")]
         ]
-        await query.edit_message_text(text="📊 *Select Asset for Top-Down Channel Analysis:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text(text="📊 *Select Asset Category for Pullback Analysis:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
     elif data == "menu_signal":
         kb = [
-            [InlineKeyboardButton("GBPAUD", callback_data="run_sig|GBPAUD"),
-             InlineKeyboardButton("EURUSD", callback_data="run_sig|EURUSD")],
-            [InlineKeyboardButton("XAUUSD (GOLD)", callback_data="run_sig|XAUUSD"),
-             InlineKeyboardButton("BTCUSD", callback_data="run_sig|BTCUSD")],
-            [InlineKeyboardButton("AAPL", callback_data="run_sig|AAPL"),
-             InlineKeyboardButton("TESLA", callback_data="run_sig|TESLA")],
-            [InlineKeyboardButton("US30", callback_data="run_sig|US30"),
-             InlineKeyboardButton("NAS100", callback_data="run_sig|NAS100")],
+            [InlineKeyboardButton("💱 Forex Majors", callback_data="cat_sig|Forex Majors"),
+             InlineKeyboardButton("💱 Forex Crosses", callback_data="cat_sig|Forex Crosses")],
+            [InlineKeyboardButton("🥇 Commodities", callback_data="cat_sig|Commodities"),
+             InlineKeyboardButton("🪙 Crypto", callback_data="cat_sig|Crypto")],
+            [InlineKeyboardButton("📈 Indices", callback_data="cat_sig|Indices"),
+             InlineKeyboardButton("📈 Stocks", callback_data="cat_sig|Stocks")],
+            [InlineKeyboardButton("🔍 Type Custom Ticker", callback_data="prompt_custom_ticker")],
             [InlineKeyboardButton("« Back", callback_data="menu_home")]
         ]
-        await query.edit_message_text(text="🚨 *Select Asset for Breakout Signal:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text(text="🚨 *Select Asset Category for Pullback Signal:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+
+    elif data.startswith("cat_an|") or data.startswith("cat_sig|"):
+        action_type, cat_name = data.split("|")
+        pairs = ASSET_CONTAINER.get(cat_name, [])
+        prefix = "run_an" if action_type == "cat_an" else "run_sig"
+        
+        kb = []
+        row = []
+        for pair in pairs:
+            row.append(InlineKeyboardButton(pair, callback_data=f"{prefix}|{pair}"))
+            if len(row) == 2:
+                kb.append(row)
+                row = []
+        if row:
+            kb.append(row)
+        kb.append([InlineKeyboardButton("« Back to Categories", callback_data="menu_analysis" if prefix=="run_an" else "menu_signal")])
+        
+        await query.edit_message_text(text=f"📁 *{cat_name} Assets:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
     elif data.startswith("run_an|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"🧠 Running 4H/1H/15M Top-Down Analysis for {symbol} at {ts}...")
+        await query.edit_message_text(text=f"🧠 Running Pullback Analysis for {symbol} at {ts}...")
         try:
             df_4h, df_1h, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m)
 
             metrics = f"- Timestamp: {ts}\n- 4H Bias: {setup['macro_bias']}\n- 1H Bias: {setup['intermediate_bias']}\n- Status: {setup['trendline_status']}\n- Direction: {setup['direction']}\n"
             ai_commentary = fetch_ai_commentary(metrics, lang)
-            chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Channel Flip Confluence", setup)
+            chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Pullback Setup", setup)
             
-            decimals = 2 if symbol in ["AAPL", "TESLA", "XAUUSD", "GOLD", "US30", "NAS100"] else 5
+            decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else 5
             fmt = f"{{:.{decimals}f}}"
             
             price_box = (
-                f"📌 *TOP-DOWN CHANNEL FLIP ZONE:*\n"
+                f"📌 *MISSED BREAKOUT PULLBACK ZONE ({symbol}):*\n"
                 f"⏱️ *Timestamp:* `{ts}`\n"
                 f"• 4H Macro Bias: {setup['macro_bias']}\n"
-                f"• 1H Intermediate: {setup['intermediate_bias']}\n"
                 f"• Status: {setup['trendline_status']}\n"
                 f"• Direction: {setup['direction']}\n"
-                f"• Entry: {fmt.format(setup['entry'])}\n"
+                f"• Current Price: {fmt.format(setup['current_market_price'])}\n"
+                f"• 🟡 **Pullback Entry Limit:** {fmt.format(setup['entry'])}\n"
                 f"• 5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
                 f"• TP1: {fmt.format(setup['tp1'])}\n"
                 f"• TP2: {fmt.format(setup['tp2'])}\n"
@@ -558,22 +621,20 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_sig|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"🚨 Verifying Breakout Flip Signal for {symbol} at {ts}...")
+        await query.edit_message_text(text=f"🚨 Verifying Pullback Signal for {symbol} at {ts}...")
         try:
             df_4h, df_1h, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m)
 
-            decimals = 2 if symbol in ["AAPL", "TESLA", "XAUUSD", "GOLD", "US30", "NAS100"] else 5
+            decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else 5
             fmt = f"{{:.{decimals}f}}"
             
             raw_sig = (
-                f"🚨 **A+ CHANNEL FLIP SIGNAL** 🚨\n"
+                f"🚨 **MISSED BREAKOUT PULLBACK SIGNAL ({symbol})** 🚨\n"
                 f"⏱️ *Timestamp:* {ts}\n\n"
-                f"PAIR: {symbol}\n"
                 f"Direction: {setup['direction']}\n"
-                f"Confidence: {setup['confidence']}%\n"
                 f"Status: {setup['trendline_status']}\n"
-                f"Entry: {fmt.format(setup['entry'])}\n"
+                f"🟡 Pullback Entry Limit: {fmt.format(setup['entry'])}\n"
                 f"5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
                 f"TP1: {fmt.format(setup['tp1'])}\n"
                 f"TP2: {fmt.format(setup['tp2'])}\n"
@@ -587,9 +648,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "menu_help":
         help_text = (
             "ℹ️ *TERMINAL GUIDE*\n\n"
-            "• **Top-Down Hierarchy**: Evaluates 4H macro trend, 1H intermediate structure, and 15M/5M execution.\n"
-            "• **Channel Flip Adaptation**: Automatically overrides baseline macro bias when price breaks and closes outside sloped channel boundaries.\n"
-            "• **5M Sweet Spot SL**: Automatically identifies optimal structure-based stop-loss levels on the 5-minute timeframe."
+            "• **Missed Breakout Pullback Entry**: Computes limit entry levels at the parallel channel boundary test zone when initial breakouts are missed.\n"
+            "• **Asset Container**: Organized categories for Forex Majors/Crosses, Commodities, Crypto, Indices, and Stocks.\n"
+            "• **Custom Tickers**: Type any ticker directly into chat anytime."
         )
         kb = [[InlineKeyboardButton("« Back to Home", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
@@ -602,6 +663,7 @@ def run_telegram_bot():
     app_bot = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start_command))
     app_bot.add_handler(CallbackQueryHandler(button_callback_handler))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     
     loop.create_task(background_continuous_scanner(app_bot))
 
