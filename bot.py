@@ -265,9 +265,6 @@ def central_decision_engine(symbol, df_daily, df_entry):
     macro_is_bearish = daily_close < daily_ema
     
     state_eval = evaluate_market_state(df_entry, macro_is_bearish)
-    if not state_eval["valid"]:
-        return None, f"Market State is '{state_eval['state']}' (Ranging, compressed, or failing trend criteria)."
-        
     liq_eval = analyze_structure_and_liquidity(df_entry)
     mom_poi = rank_pois_and_momentum(df_entry)
     
@@ -278,9 +275,6 @@ def central_decision_engine(symbol, df_daily, df_entry):
     
     confidence = int(trend_pts + liq_pts + mom_pts + poi_pts)
     
-    if confidence < 70:
-        return None, f"Confidence score too low ({confidence}%). Required: min 70%."
-        
     direction = "SELL" if macro_is_bearish else "BUY"
     current_price = df_entry['Close'].iloc[-1]
     atr = df_entry['ATR'].iloc[-1]
@@ -306,7 +300,7 @@ def central_decision_engine(symbol, df_daily, df_entry):
         "tp1": tp1,
         "tp2": tp2,
         "poi_desc": mom_poi["poi_type"]
-    }, None
+    }
 
 # ==========================================
 # 8. ENHANCED CHART GENERATOR
@@ -358,18 +352,6 @@ async def background_gbpaud_scan(context: ContextTypes.DEFAULT_TYPE):
         df_daily, df_entry = fetch_institutional_data(raw_symbol, tf)
         setup, skip_reason = central_decision_engine(raw_symbol, df_daily, df_entry)
         
-        # If NO setup occurs, send a clean hourly analysis update letting you know it checked
-        if not setup:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"📊 *Hourly Automated Scan: {raw_symbol} ({tf.upper()})*\n\n"
-                     f"⚠️ *Market Skipped:* {skip_reason}\n"
-                     f"_Continuing to monitor every hour automatically._",
-                parse_mode="Markdown"
-            )
-            return
-
-        # If a VALID setup occurs, automatically push the full trade package!
         metrics_summary = (
             f"- Trend State: {setup['trend_state']}\n"
             f"- Liquidity Status: {setup['liquidity']}\n"
@@ -445,11 +427,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         df_daily, df_entry = fetch_institutional_data(raw_symbol, tf)
-        setup, skip_reason = central_decision_engine(raw_symbol, df_daily, df_entry)
-        
-        if not setup:
-            await status.edit_text(f"⚠️ *Market Skipped: {raw_symbol}*\n\n**Reason:** {skip_reason}", parse_mode="Markdown")
-            return
+        setup = central_decision_engine(raw_symbol, df_daily, df_entry)
 
         metrics_summary = f"- Trend State: {setup['trend_state']}\n- Liquidity Status: {setup['liquidity']}\n- Momentum: {setup['momentum']}\n- POI Quality: {setup['poi_desc']}\n- Confidence Score: {setup['confidence']}%\n"
         ai_commentary = fetch_ai_commentary(metrics_summary)
@@ -459,18 +437,43 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.delete()
         await context.bot.send_message(chat_id=chat_id, text=ai_commentary, parse_mode="Markdown")
 
+    except Exception as e:
+        await status.edit_text(f"❌ Analysis failed: {str(e)}")
+
+async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    args = context.args
+    raw_symbol = args[0].upper() if len(args) > 0 else "GBPAUD"
+    tf = args[1] if len(args) > 1 else "15m"
+    
+    status = await update.message.reply_text(f"🚨 Generating Institutional Signal for {raw_symbol}...")
+    
+    try:
+        df_daily, df_entry = fetch_institutional_data(raw_symbol, tf)
+        setup = central_decision_engine(raw_symbol, df_daily, df_entry)
+
         decimals = 3 if "JPY" in raw_symbol else (2 if "XAU" in raw_symbol or "GOLD" in raw_symbol else 5)
         fmt = f"{{:.{decimals}f}}"
         
         signal_text = (
-            f"PAIR: {raw_symbol}\nDirection: {setup['direction']}\nConfidence: {setup['confidence']}%\n"
-            f"Trend: {setup['trend_state']}\nMomentum: {setup['momentum']}\nLiquidity: {setup['liquidity']}\n"
-            f"Entry: {fmt.format(setup['entry'])}\nSL: {fmt.format(setup['sl'])}\nTP1: {fmt.format(setup['tp1'])}\nTP2: {fmt.format(setup['tp2'])}\n"
+            f"🚨 **INSTITUTIONAL SIGNAL ALERT** 🚨\n\n"
+            f"PAIR: {raw_symbol}\n"
+            f"Direction: {setup['direction']}\n"
+            f"Confidence: {setup['confidence']}%\n"
+            f"Trend: {setup['trend_state']}\n"
+            f"Momentum: {setup['momentum']}\n"
+            f"Liquidity: {setup['liquidity']}\n"
+            f"Entry: {fmt.format(setup['entry'])}\n"
+            f"SL: {fmt.format(setup['sl'])}\n"
+            f"TP1: {fmt.format(setup['tp1'])}\n"
+            f"TP2: {fmt.format(setup['tp2'])}\n"
+            f"Reason: {setup['poi_desc']} after liquidity sweep with strong displacement.\n"
         )
-        await context.bot.send_message(chat_id=chat_id, text=signal_text)
+        await status.delete()
+        await context.bot.send_message(chat_id=chat_id, text=signal_text, parse_mode="Markdown")
 
     except Exception as e:
-        await status.edit_text(f"❌ Analysis failed: {str(e)}")
+        await status.edit_text(f"❌ Signal generation failed: {str(e)}")
 
 def run_telegram_bot():
     if not TELEGRAM_BOT_TOKEN:
@@ -480,6 +483,7 @@ def run_telegram_bot():
     app_bot = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start_command))
     app_bot.add_handler(CommandHandler("analyze", analyze_command))
+    app_bot.add_handler(CommandHandler("signal", signal_command))
     
     loop.run_until_complete(app_bot.initialize())
     loop.run_until_complete(app_bot.start())
