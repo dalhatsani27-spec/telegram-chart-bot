@@ -49,7 +49,6 @@ ai_client = OpenAI(
 )
 
 def fetch_ai_commentary(metrics_summary):
-    """AI acts as a desk analyst explaining the quantified metrics, not deciding trades."""
     if not OPENROUTER_API_KEY:
         return "🎯 *AI MARKET DESK COMMENTARY*\n\nInstitutional alignment verified via multi-engine scoring."
 
@@ -310,7 +309,7 @@ def central_decision_engine(symbol, df_daily, df_entry):
     }, None
 
 # ==========================================
-# 8. ENHANCED CHART GENERATOR (WITH VISUAL OVERLAYS)
+# 8. ENHANCED CHART GENERATOR
 # ==========================================
 def generate_institutional_chart(df, title_str, setup):
     img_buf = io.BytesIO()
@@ -327,7 +326,6 @@ def generate_institutional_chart(df, title_str, setup):
     )
     
     ax = axlist[0]
-    
     ax.axhline(setup['entry'], color='#2962ff', linestyle='-.', linewidth=1.2, label=f"Entry")
     ax.axhline(setup['sl'], color='#e53935', linestyle='--', linewidth=1.0, label=f"SL")
     ax.axhline(setup['tp1'], color='#43a047', linestyle='--', linewidth=1.0, label=f"TP1")
@@ -340,7 +338,6 @@ def generate_institutional_chart(df, title_str, setup):
         linewidth=1, edgecolor='#2962ff', facecolor='#2962ff', alpha=0.20, label="POI Confluence"
     )
     ax.add_patch(rect)
-    
     ax.set_title(title_str, color='white', fontsize=10)
     
     fig.savefig(img_buf, dpi=130, bbox_inches='tight', facecolor=fig.get_facecolor())
@@ -349,31 +346,30 @@ def generate_institutional_chart(df, title_str, setup):
     return img_buf
 
 # ==========================================
-# 9. TELEGRAM BOT HANDLERS
+# 9. AUTOMATED BACKGROUND SCANNER JOB
 # ==========================================
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 *Institutional Market Reasoning Engine Active*\n\nUse `/analyze [SYMBOL] [TF]` (e.g., `/analyze CHFJPY 15m`)", parse_mode="Markdown")
-
-async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    args = context.args
-    raw_symbol = args[0].upper() if len(args) > 0 else "XAUUSD"
-    tf = args[1] if len(args) > 1 else "15m"
-    
-    status = await update.message.reply_text(f"🧠 Running Institutional Reasoning Engines for {raw_symbol}...")
+async def background_gbpaud_scan(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    chat_id = job.chat_id
+    raw_symbol = "GBPAUD"
+    tf = "15m"
     
     try:
         df_daily, df_entry = fetch_institutional_data(raw_symbol, tf)
         setup, skip_reason = central_decision_engine(raw_symbol, df_daily, df_entry)
         
+        # If NO setup occurs, send a clean hourly analysis update letting you know it checked
         if not setup:
-            await status.edit_text(
-                f"⚠️ *Market Skipped: {raw_symbol}*\n\n"
-                f"**Reason:** {skip_reason}", 
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"📊 *Hourly Automated Scan: {raw_symbol} ({tf.upper())}*\n\n"
+                     f"⚠️ *Market Skipped:* {skip_reason}\n"
+                     f"_Continuing to monitor every hour automatically._",
                 parse_mode="Markdown"
             )
             return
 
+        # If a VALID setup occurs, automatically push the full trade package!
         metrics_summary = (
             f"- Trend State: {setup['trend_state']}\n"
             f"- Liquidity Status: {setup['liquidity']}\n"
@@ -382,18 +378,21 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"- Confidence Score: {setup['confidence']}%\n"
         )
         ai_commentary = fetch_ai_commentary(metrics_summary)
-
         chart_img = generate_institutional_chart(df_entry, f"{raw_symbol} Institutional Mapped POI ({tf.upper()})", setup)
         
-        await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *INSTITUTIONAL MAPPED POI: {raw_symbol} ({tf.upper()})*", parse_mode="Markdown")
-        await status.delete()
-        
+        await context.bot.send_photo(
+            chat_id=chat_id, 
+            photo=chart_img, 
+            caption=f"🎯 *AUTOMATED A+ SETUP DETECTED: {raw_symbol} ({tf.upper()})*", 
+            parse_mode="Markdown"
+        )
         await context.bot.send_message(chat_id=chat_id, text=ai_commentary, parse_mode="Markdown")
 
-        decimals = 3 if "JPY" in raw_symbol else (2 if "XAU" in raw_symbol or "GOLD" in raw_symbol else 5)
+        decimals = 5
         fmt = f"{{:.{decimals}f}}"
         
         signal_text = (
+            f"🚨 **INSTITUTIONAL SIGNAL ALERT** 🚨\n\n"
             f"PAIR: {raw_symbol}\n"
             f"Direction: {setup['direction']}\n"
             f"Confidence: {setup['confidence']}%\n"
@@ -404,17 +403,78 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"SL: {fmt.format(setup['sl'])}\n"
             f"TP1: {fmt.format(setup['tp1'])}\n"
             f"TP2: {fmt.format(setup['tp2'])}\n"
-            f"Reason: {setup['poi_desc']} after liquidity sweep with strong displacement. Trend remains intact.\n"
-            f"Warnings: Monitor active session liquidity sweeps."
+            f"Reason: {setup['poi_desc']} after liquidity sweep with strong displacement.\n"
+        )
+        await context.bot.send_message(chat_id=chat_id, text=signal_text, parse_mode="Markdown")
+
+    except Exception as e:
+        print(f"Background scan error for {raw_symbol}: {str(e)}")
+
+# ==========================================
+# 10. TELEGRAM BOT HANDLERS & INITIALIZATION
+# ==========================================
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    # Clear any existing jobs to avoid duplicates if /start is pressed twice
+    current_jobs = context.job_queue.get_jobs_by_name("gbpaud_hourly_job")
+    for job in current_jobs:
+        job.schedule_removal()
+        
+    # Schedule the background scan to run every 1 hour (3600 seconds)
+    context.job_queue.run_repeating(
+        background_gbpaud_scan,
+        interval=3600,
+        first=10, # Runs 10 seconds after clicking /start for the first time
+        chat_id=chat_id,
+        name="gbpaud_hourly_job"
+    )
+    
+    await update.message.reply_text(
+        "🤖 *Institutional Automated Bot Initialized!*\n\n"
+        "✅ Automatic hourly scans for **GBPAUD (15m)** have been activated.\n"
+        "You will receive regular analysis updates and instant trade signals the moment an A+ setup fires, without needing to ask.",
+        parse_mode="Markdown"
+    )
+
+async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Retained manual override command if you want to check other symbols instantly
+    chat_id = update.effective_chat.id
+    args = context.args
+    raw_symbol = args[0].upper() if len(args) > 0 else "GBPAUD"
+    tf = args[1] if len(args) > 1 else "15m"
+    
+    status = await update.message.reply_text(f"🧠 Running Manual Institutional Engine for {raw_symbol}...")
+    
+    try:
+        df_daily, df_entry = fetch_institutional_data(raw_symbol, tf)
+        setup, skip_reason = central_decision_engine(raw_symbol, df_daily, df_entry)
+        
+        if not setup:
+            await status.edit_text(f"⚠️ *Market Skipped: {raw_symbol}*\n\n**Reason:** {skip_reason}", parse_mode="Markdown")
+            return
+
+        metrics_summary = f"- Trend State: {setup['trend_state']}\n- Liquidity Status: {setup['liquidity']}\n- Momentum: {setup['momentum']}\n- POI Quality: {setup['poi_desc']}\n- Confidence Score: {setup['confidence']}%\n"
+        ai_commentary = fetch_ai_commentary(metrics_summary)
+        chart_img = generate_institutional_chart(df_entry, f"{raw_symbol} Institutional Mapped POI ({tf.upper()})", setup)
+        
+        await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *INSTITUTIONAL MAPPED POI: {raw_symbol} ({tf.upper()})*", parse_mode="Markdown")
+        await status.delete()
+        await context.bot.send_message(chat_id=chat_id, text=ai_commentary, parse_mode="Markdown")
+
+        decimals = 3 if "JPY" in raw_symbol else (2 if "XAU" in raw_symbol or "GOLD" in raw_symbol else 5)
+        fmt = f"{{:.{decimals}f}}"
+        
+        signal_text = (
+            f"PAIR: {raw_symbol}\nDirection: {setup['direction']}\nConfidence: {setup['confidence']}%\n"
+            f"Trend: {setup['trend_state']}\nMomentum: {setup['momentum']}\nLiquidity: {setup['liquidity']}\n"
+            f"Entry: {fmt.format(setup['entry'])}\nSL: {fmt.format(setup['sl'])}\nTP1: {fmt.format(setup['tp1'])}\nTP2: {fmt.format(setup['tp2'])}\n"
         )
         await context.bot.send_message(chat_id=chat_id, text=signal_text)
 
     except Exception as e:
         await status.edit_text(f"❌ Analysis failed: {str(e)}")
 
-# ==========================================
-# 10. APP INITIALIZATION
-# ==========================================
 def run_telegram_bot():
     if not TELEGRAM_BOT_TOKEN:
         return
