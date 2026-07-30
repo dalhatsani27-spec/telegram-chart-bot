@@ -117,11 +117,13 @@ def normalize_ticker_twelve_data(symbol):
         "GOLD": "XAU/USD", "XAUUSD": "XAU/USD",
         "SILVER": "XAG/USD", "XAGUSD": "XAG/USD",
         "OIL": "WTI/USD", "USOIL": "WTI/USD", "WTI": "WTI/USD", "BRENT": "BRENT/USD",
-        "BTC": "BTC/USD", "BTCUSD": "BTC/USD"
+        "BTC": "BTC/USD", "BTCUSD": "BTC/USD",
+        "TESLA": "TSLA", "TSLA": "TSLA", "AAPL": "AAPL",
+        "US30": "DJI", "NAS100": "IXIC", "SPX500": "SPX"
     }
     if symbol in mapping:
         return mapping[symbol]
-    if len(symbol) == 6 and "/" not in symbol:
+    if len(symbol) == 6 and "/" not in symbol and symbol not in ["US30", "NAS100"]:
         return f"{symbol[:3]}/{symbol[3:]}"
     return symbol
 
@@ -154,11 +156,13 @@ def normalize_ticker_yfinance(symbol):
         "GOLD": "GC=F", "XAUUSD": "GC=F", 
         "SILVER": "SI=F", 
         "OIL": "CL=F", "USOIL": "CL=F", "WTI": "CL=F", 
-        "BTC": "BTC-USD", "BTCUSD": "BTC-USD"
+        "BTC": "BTC-USD", "BTCUSD": "BTC-USD",
+        "TESLA": "TSLA", "TSLA": "TSLA", "AAPL": "AAPL",
+        "US30": "^DJI", "NAS100": "^IXIC", "SPX500": "^GSPC"
     }
     if symbol in alias_map:
         return alias_map[symbol]
-    if len(symbol) == 6 and not symbol.endswith("=X"):
+    if len(symbol) == 6 and not symbol.endswith("=X") and symbol not in ["US30", "NAS100"]:
         return f"{symbol}=X"
     return symbol
 
@@ -187,7 +191,7 @@ def fetch_top_down_institutional_data(symbol):
                 if isinstance(d_data.columns, pd.MultiIndex): d_data.columns = d_data.columns.get_level_values(0)
                 df_daily = clean_and_normalize_data(d_data)
             if df_4h.empty:
-                h_data = yf.download(ticker, period="60d", interval="60m", progress=False, auto_adjust=True) # Proxy 4h via 1h or direct if supported
+                h_data = yf.download(ticker, period="60d", interval="60m", progress=False, auto_adjust=True)
                 if isinstance(h_data.columns, pd.MultiIndex): h_data.columns = h_data.columns.get_level_values(0)
                 df_4h = clean_and_normalize_data(h_data)
             if df_15m.empty:
@@ -223,7 +227,6 @@ def evaluate_top_down_state(df_daily, df_4h, df_15m):
     m15_ema50 = df_15m['EMA50'].iloc[-1]
     m15_ema200 = df_15m['EMA200'].iloc[-1]
     
-    # Alignment check
     if not macro_bearish and not h4_bearish and m15_close > m15_ema50:
         trend_state = "TOP-DOWN BULLISH ALIGNMENT"
         trend_score = 90
@@ -381,7 +384,7 @@ def generate_15m_execution_chart(df_15m, title_str, setup):
 # 9. PROFESSIONAL TELEGRAM MENU & CONTINUOUS A+ SCANNER
 # ==========================================
 user_languages = {}
-active_subscribers = set() # Stores chat_ids that enabled continuous auto-scans for GBPAUD
+active_subscribers = set()
 
 def get_home_menu(lang="English", auto_active=False):
     lang_flags = {"English": "🇬🇧 English", "Hausa": "🇳🇬 Hausa", "Pidgin": "🇳🇬 Pidgin"}
@@ -406,7 +409,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🏛️ *INSTITUTIONAL TOP-DOWN MARKET DESK*\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         "Welcome to your professional algorithmic trading terminal. "
-        "Top-down macro-to-15m analytical execution engine ready.\n\n"
+        "Top-down macro-to-15m analytical execution engine ready for Forex, Stocks, Indices, and Commodities.\n\n"
         "📌 *Status:* Terminal online and operational."
     )
     await update.message.reply_text(
@@ -416,7 +419,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def background_continuous_scanner(application):
-    """Continuously monitors GBPAUD at high frequency (every 5 minutes) for A+ setups using top-down logic."""
     await asyncio.sleep(10)
     while True:
         try:
@@ -425,7 +427,6 @@ async def background_continuous_scanner(application):
                 df_daily, df_4h, df_15m = fetch_top_down_institutional_data(symbol)
                 setup = central_decision_engine(symbol, df_daily, df_4h, df_15m)
                 
-                # A+ Threshold: Confidence >= 78% with liquidity sweep
                 if setup['confidence'] >= 78:
                     decimals = 3 if "JPY" in symbol else (2 if "XAU" in symbol or "GOLD" in symbol else 5)
                     fmt = f"{{:.{decimals}f}}"
@@ -459,7 +460,6 @@ async def background_continuous_scanner(application):
         except Exception:
             pass
             
-        # High-frequency polling check every 5 minutes
         await asyncio.sleep(300)
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -484,7 +484,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             status_msg = "🔴 Continuous GBPAUD A+ scanner has been **disabled**."
         else:
             active_subscribers.add(chat_id)
-            status_msg = "🟢 Continuous GBPAUD A+ scanner has been **enabled**. The bot is now actively monitoring price action every 5 minutes and will push instant A+ signals."
+            status_msg = "🟢 Continuous GBPAUD A+ scanner has been **enabled**. The bot is now actively monitoring price action every 5 minutes."
         
         is_auto = chat_id in active_subscribers
         await query.edit_message_text(
@@ -517,10 +517,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "menu_analysis":
         kb = [
-            [InlineKeyboardButton("GBPAUD (Top-Down)", callback_data="run_an|GBPAUD"),
-             InlineKeyboardButton("EURUSD (Top-Down)", callback_data="run_an|EURUSD")],
-            [InlineKeyboardButton("XAUUSD (GOLD Top-Down)", callback_data="run_an|XAUUSD"),
-             InlineKeyboardButton("BTCUSD (Top-Down)", callback_data="run_an|BTCUSD")],
+            [InlineKeyboardButton("GBPAUD", callback_data="run_an|GBPAUD"),
+             InlineKeyboardButton("EURUSD", callback_data="run_an|EURUSD")],
+            [InlineKeyboardButton("XAUUSD (GOLD)", callback_data="run_an|XAUUSD"),
+             InlineKeyboardButton("BTCUSD", callback_data="run_an|BTCUSD")],
+            [InlineKeyboardButton("AAPL (Apple Stock)", callback_data="run_an|AAPL"),
+             InlineKeyboardButton("TESLA", callback_data="run_an|TESLA")],
+            [InlineKeyboardButton("US30 (Dow Jones)", callback_data="run_an|US30"),
+             InlineKeyboardButton("NAS100 (Nasdaq)", callback_data="run_an|NAS100")],
             [InlineKeyboardButton("« Back to Home", callback_data="menu_home")]
         ]
         await query.edit_message_text(
@@ -531,10 +535,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "menu_signal":
         kb = [
-            [InlineKeyboardButton("GBPAUD (Top-Down)", callback_data="run_sig|GBPAUD"),
-             InlineKeyboardButton("EURUSD (Top-Down)", callback_data="run_sig|EURUSD")],
-            [InlineKeyboardButton("XAUUSD (GOLD Top-Down)", callback_data="run_sig|XAUUSD"),
-             InlineKeyboardButton("BTCUSD (Top-Down)", callback_data="run_sig|BTCUSD")],
+            [InlineKeyboardButton("GBPAUD", callback_data="run_sig|GBPAUD"),
+             InlineKeyboardButton("EURUSD", callback_data="run_sig|EURUSD")],
+            [InlineKeyboardButton("XAUUSD (GOLD)", callback_data="run_sig|XAUUSD"),
+             InlineKeyboardButton("BTCUSD", callback_data="run_sig|BTCUSD")],
+            [InlineKeyboardButton("AAPL (Apple Stock)", callback_data="run_sig|AAPL"),
+             InlineKeyboardButton("TESLA", callback_data="run_sig|TESLA")],
+            [InlineKeyboardButton("US30 (Dow Jones)", callback_data="run_sig|US30"),
+             InlineKeyboardButton("NAS100 (Nasdaq)", callback_data="run_sig|NAS100")],
             [InlineKeyboardButton("« Back to Home", callback_data="menu_home")]
         ]
         await query.edit_message_text(
@@ -554,7 +562,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             ai_commentary = fetch_ai_commentary(metrics_summary, lang)
             chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Top-Down Mapped 15M Execution Level", setup)
             
-            decimals = 3 if "JPY" in symbol else (2 if "XAU" in symbol or "GOLD" in symbol else 5)
+            decimals = 2 if symbol in ["AAPL", "TESLA", "XAUUSD", "GOLD", "US30", "NAS100"] else 5
             fmt = f"{{:.{decimals}f}}"
             
             price_box = (
@@ -581,7 +589,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             df_daily, df_4h, df_15m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_daily, df_4h, df_15m)
 
-            decimals = 3 if "JPY" in symbol else (2 if "XAU" in symbol or "GOLD" in symbol else 5)
+            decimals = 2 if symbol in ["AAPL", "TESLA", "XAUUSD", "GOLD", "US30", "NAS100"] else 5
             fmt = f"{{:.{decimals}f}}"
             
             raw_signal_text = (
@@ -608,8 +616,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "menu_help":
         help_text = (
             "ℹ️ *TERMINAL GUIDE*\n\n"
-            "• **Continuous A+ Scanner**: Toggles high-frequency automated monitoring for GBPAUD (evaluating triggers every 5 minutes).\n"
-            "• **Run Analysis**: Performs full Top-Down analysis (Daily -> 4H -> 15M) displaying current 15m price levels and institutional commentary.\n"
+            "• **Continuous A+ Scanner**: Toggles high-frequency automated monitoring for GBPAUD.\n"
+            "• **Run Analysis**: Performs full Top-Down analysis (Daily -> 4H -> 15M) across Forex, Stocks (AAPL, TESLA), Indices (US30, NAS100), and Commodities.\n"
             "• **Generate Signal**: Broadcasts exact entry, SL, and TP parameters.\n"
             "• **Language**: Switch instantly between English, Hausa, and Pidgin.\n\n"
             "Use `/start` anytime to pull up the primary dashboard menu."
@@ -626,7 +634,6 @@ def run_telegram_bot():
     app_bot.add_handler(CommandHandler("start", start_command))
     app_bot.add_handler(CallbackQueryHandler(button_callback_handler))
     
-    # Register continuous background scanner loop
     loop.create_task(background_continuous_scanner(app_bot))
 
     loop.run_until_complete(app_bot.initialize())
