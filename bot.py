@@ -327,7 +327,7 @@ def central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m):
     }
 
 # ==========================================
-# 6. 15M CHART RENDERER MATCHING REFERENCE LAYOUT
+# 6. HIGH-RESOLUTION 15M CHART RENDERER
 # ==========================================
 def generate_15m_execution_chart(df_15m, title_str, setup):
     img_buf = io.BytesIO()
@@ -341,30 +341,27 @@ def generate_15m_execution_chart(df_15m, title_str, setup):
     style = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', gridcolor='#2a2e39', y_on_right=True, facecolor='#131722', figcolor='#131722')
     
     addplots = [
-        mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.2),
-        mpf.make_addplot(chart_df['EMA50'], color='#2962ff', width=1.2),
-        mpf.make_addplot(upper_series, color='#00e676', width=2.0, linestyle='-'),
-        mpf.make_addplot(lower_series, color='#00e676', width=2.0, linestyle='-')
+        mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5),
+        mpf.make_addplot(chart_df['EMA50'], color='#2962ff', width=1.5),
+        mpf.make_addplot(upper_series, color='#00e676', width=2.2, linestyle='-'),
+        mpf.make_addplot(lower_series, color='#00e676', width=2.2, linestyle='-')
     ]
     
     fig, axlist = mpf.plot(
-        chart_df, type='callout' if False else 'candle', style=style, volume=False,
-        addplot=addplots, returnfig=True, figsize=(10, 6)
+        chart_df, type='candle', style=style, volume=False,
+        addplot=addplots, returnfig=True, figsize=(12, 7)
     )
     
     ax = axlist[0]
-    ax.axhline(setup['tp2'], color='#e53935', linestyle='--', linewidth=1.0)
-    ax.axhline(setup['tp1'], color='#2962ff', linestyle='--', linewidth=1.0)
-    ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.0)
+    ax.axhline(setup['tp2'], color='#e53935', linestyle='--', linewidth=1.2)
+    ax.axhline(setup['tp1'], color='#2962ff', linestyle='--', linewidth=1.2)
+    ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2)
     
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     
-    # Exactly matching the requested layout format with Timeframe shown at the top:
-    # Line 1: SYMBOL 15M Parallel Sloped Channel
-    # Line 2: Parallel Sloped Channel Geometry Active | TIMESTAMP
-    ax.set_title(f"{setup['symbol']} 15M Parallel Sloped Channel\n{channel_calc['status_msg']} | {current_time_str}", color='white', fontsize=10, pad=10)
+    ax.set_title(f"{setup['symbol']} 15M Parallel Sloped Channel\n{channel_calc['status_msg']} | {current_time_str}", color='white', fontsize=12, fontweight='bold', pad=12)
     
-    fig.savefig(img_buf, dpi=130, bbox_inches='tight', facecolor=fig.get_facecolor())
+    fig.savefig(img_buf, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
     plt.close(fig)
     return img_buf
