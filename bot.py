@@ -327,7 +327,7 @@ def central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m):
     }
 
 # ==========================================
-# 6. HIGH-RESOLUTION 15M CHART RENDERER
+# 6. HIGH-RESOLUTION 15M CHART RENDERER (FIXED ZOOM & SCALING)
 # ==========================================
 def generate_15m_execution_chart(df_15m, title_str, setup):
     img_buf = io.BytesIO()
@@ -347,9 +347,21 @@ def generate_15m_execution_chart(df_15m, title_str, setup):
         mpf.make_addplot(lower_series, color='#00e676', width=2.2, linestyle='-')
     ]
     
+    # Calculate tight Y-limits based strictly on visible candles + padding to prevent squeezing
+    all_visible_values = pd.concat([
+        chart_df['High'], chart_df['Low'], 
+        pd.Series([setup['tp1'], setup['tp2'], setup['entry']])
+    ])
+    ymin = all_visible_values.min()
+    ymax = all_visible_values.max()
+    padding = (ymax - ymin) * 0.08
+    if padding == 0:
+        padding = 0.001
+        
     fig, axlist = mpf.plot(
         chart_df, type='candle', style=style, volume=False,
-        addplot=addplots, returnfig=True, figsize=(12, 7)
+        addplot=addplots, returnfig=True, figsize=(12, 7),
+        ylim=(ymin - padding, ymax + padding)
     )
     
     ax = axlist[0]
