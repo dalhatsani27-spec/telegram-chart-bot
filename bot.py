@@ -213,6 +213,7 @@ def fetch_top_down_institutional_data(symbol):
     df_4h['EMA200'] = df_4h['Close'].ewm(span=200, adjust=False).mean() if len(df_4h) >= 200 else df_4h['Close'].ewm(span=len(df_4h)//2, adjust=False).mean()
     df_1h['EMA50'] = df_1h['Close'].ewm(span=50, adjust=False).mean()
     df_15m['EMA50'] = df_15m['Close'].ewm(span=50, adjust=False).mean()
+    df_15m['EMA200'] = df_15m['Close'].ewm(span=200, adjust=False).mean() if len(df_15m) >= 200 else df_15m['Close'].ewm(span=len(df_15m)//2, adjust=False).mean()
     df_5m['EMA20'] = df_5m['Close'].ewm(span=20, adjust=False).mean()
     
     return df_4h, df_1h, df_15m, df_5m
@@ -258,18 +259,16 @@ def calculate_parallel_sloped_channel(chart_df):
     break_above = current_close > projected_upper
     break_below = current_close < projected_lower
     
-    # Missed Breakout Pullback Detection: Identify if a breakout occurred earlier and price is pulling back to test the boundary as support/resistance
     has_broken_out_previously = any(h > projected_upper for h in chart_df['High'].tail(25).values) or any(l < projected_lower for l in chart_df['Low'].tail(25).values)
     
     if break_above or has_broken_out_previously:
-        # Bullish context: Missed breakout -> waiting for pullback to upper channel boundary test
         direction = "BUY"
         pullback_target = projected_upper
-        status_msg = "Missed Breakout: Awaiting Pullback to Upper Channel Support"
+        status_msg = "Parallel Sloped Channel Geometry Active"
     else:
         direction = "SELL"
         pullback_target = projected_lower
-        status_msg = "Missed Breakout: Awaiting Pullback to Lower Channel Resistance"
+        status_msg = "Parallel Sloped Channel Geometry Active"
 
     return {
         "x_vals": x_vals,
@@ -299,10 +298,8 @@ def central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m):
     confidence = 90
     current_price = df_15m['Close'].iloc[-1]
     
-    # Pullback Limit Entry: Set entry at the channel boundary retest level for missed breakout
     pullback_entry = channel_eval["pullback_target"]
     
-    # 5-Minute Sweet Spot Tight Stop-Loss calculation based on pullback swing structure
     df_5m_tail = df_5m.tail(15).copy()
     if direction == "BUY":
         sweet_spot_sl = df_5m_tail['Low'].min() - (df_5m_tail['ATR'].iloc[-1] * 0.4)
@@ -330,7 +327,7 @@ def central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m):
     }
 
 # ==========================================
-# 6. 15M CHART RENDERER WITH PULLBACK ZONES
+# 6. 15M CHART RENDERER MATCHING REFERENCE LAYOUT
 # ==========================================
 def generate_15m_execution_chart(df_15m, title_str, setup):
     img_buf = io.BytesIO()
@@ -344,23 +341,28 @@ def generate_15m_execution_chart(df_15m, title_str, setup):
     style = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', gridcolor='#2a2e39', y_on_right=True, facecolor='#131722', figcolor='#131722')
     
     addplots = [
+        mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.2),
         mpf.make_addplot(chart_df['EMA50'], color='#2962ff', width=1.2),
         mpf.make_addplot(upper_series, color='#00e676', width=2.0, linestyle='-'),
         mpf.make_addplot(lower_series, color='#00e676', width=2.0, linestyle='-')
     ]
     
     fig, axlist = mpf.plot(
-        chart_df, type='candle', style=style, volume=False,
+        chart_df, type='callout' if False else 'candle', style=style, volume=False,
         addplot=addplots, returnfig=True, figsize=(10, 6)
     )
     
     ax = axlist[0]
-    ax.axhline(setup['entry'], color='#ffd700', linestyle='-.', linewidth=1.5, label=f"Pullback Limit Entry")
-    ax.axhline(setup['sl'], color='#e53935', linestyle='--', linewidth=1.0, label=f"5m Sweet Spot SL")
-    ax.axhline(setup['tp1'], color='#43a047', linestyle='--', linewidth=1.0, label=f"TP1")
+    ax.axhline(setup['tp2'], color='#e53935', linestyle='--', linewidth=1.0)
+    ax.axhline(setup['tp1'], color='#2962ff', linestyle='--', linewidth=1.0)
+    ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.0)
     
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-    ax.set_title(f"{title_str}\nMissed Breakout Pullback Zone | {current_time_str}", color='white', fontsize=9)
+    
+    # Exactly matching the requested layout format with Timeframe shown at the top:
+    # Line 1: SYMBOL 15M Parallel Sloped Channel
+    # Line 2: Parallel Sloped Channel Geometry Active | TIMESTAMP
+    ax.set_title(f"{setup['symbol']} 15M Parallel Sloped Channel\n{channel_calc['status_msg']} | {current_time_str}", color='white', fontsize=10, pad=10)
     
     fig.savefig(img_buf, dpi=130, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -373,7 +375,6 @@ def generate_15m_execution_chart(df_15m, title_str, setup):
 user_languages = {}
 active_subscribers = set()
 
-# Complete asset container organized by categories
 ASSET_CONTAINER = {
     "Forex Majors": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD"],
     "Forex Crosses": ["EURGBP", "EURJPY", "GBPJPY", "GBPAUD", "AUDJPY", "EURAUD"],
