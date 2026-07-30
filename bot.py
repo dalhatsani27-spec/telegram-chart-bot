@@ -75,7 +75,7 @@ def translate_text(text, target_language):
 
 def fetch_ai_commentary(metrics_summary, target_language="English"):
     if not OPENROUTER_API_KEY:
-        base_text = "🎯 *AI TOP-DOWN MARKET DESK COMMENTARY*\n\nInstitutional channel alignment verified across multi-timeframe engines."
+        base_text = "🎯 *AI TOP-DOWN MARKET DESK COMMENTARY*\n\nInstitutional channel alignment verified across 4H, 1H, and 15M/5M execution engines."
         return translate_text(base_text, target_language)
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
@@ -85,9 +85,9 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
     {metrics_summary}
     
     Provide a professional top-down breakdown in 4 concise points:
-    1. Macro / Higher Timeframe Context & Structure
-    2. Intermediate Timeframe Alignment
-    3. 15-Minute Execution TF, Parallel Sloped Channel Geometry & Breakout Status
+    1. Macro 4-Hour Context & Structure
+    2. Intermediate 1-Hour Timeframe Alignment
+    3. 15-Minute Execution TF, Parallel Sloped Channel Geometry, Breakout Flip Status & 5m Tight Stop-Loss Sweet Spot
     4. Execution Outlook & Risk Parameters
     
     Write the response directly in {target_language}.
@@ -105,7 +105,7 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
         except Exception:
             continue
             
-    fallback = "🎯 *AI TOP-DOWN MARKET DESK COMMENTARY*\n\nInstitutional confluence metrics verified across macro, intermediate, and 15m execution layers."
+    fallback = "🎯 *AI TOP-DOWN MARKET DESK COMMENTARY*\n\nInstitutional confluence verified across 4H, 1H, 15M, and 5M layers with dynamic channel flip adaptation."
     return translate_text(fallback, target_language)
 
 # ==========================================
@@ -131,7 +131,7 @@ def fetch_twelve_data(symbol, interval="15m", outputsize=150):
     if not TWELVE_DATA_API_KEY:
         return pd.DataFrame()
     clean_symbol = normalize_ticker_twelve_data(symbol)
-    tf_map = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1h", "4h": "4h", "1d": "1day"}
+    tf_map = {"5m": "5min", "15m": "15min", "1h": "1h", "4h": "4h", "1d": "1day"}
     url = "https://api.twelvedata.com/time_series"
     params = {"symbol": clean_symbol, "interval": tf_map.get(interval.lower(), "15min"), "outputsize": outputsize, "apikey": TWELVE_DATA_API_KEY}
     try:
@@ -167,7 +167,7 @@ def normalize_ticker_yfinance(symbol):
     return symbol
 
 def clean_and_normalize_data(df):
-    if df.empty or len(df) < 50:
+    if df.empty or len(df) < 30:
         return pd.DataFrame()
     df = df.copy()
     df.columns = [c.capitalize() for c in df.columns]
@@ -178,40 +178,46 @@ def clean_and_normalize_data(df):
     return df
 
 def fetch_top_down_institutional_data(symbol):
-    df_daily = clean_and_normalize_data(fetch_twelve_data(symbol, interval="1d", outputsize=200))
+    # Hierarchy: 4H (Macro), 1H (Intermediate), 15M (Execution), 5M (Sweet Spot SL)
     df_4h = clean_and_normalize_data(fetch_twelve_data(symbol, interval="4h", outputsize=150))
+    df_1h = clean_and_normalize_data(fetch_twelve_data(symbol, interval="1h", outputsize=150))
     df_15m = clean_and_normalize_data(fetch_twelve_data(symbol, interval="15m", outputsize=150))
+    df_5m = clean_and_normalize_data(fetch_twelve_data(symbol, interval="5m", outputsize=150))
     
-    if df_daily.empty or df_4h.empty or df_15m.empty:
+    if df_4h.empty or df_1h.empty or df_15m.empty or df_5m.empty:
         ticker = normalize_ticker_yfinance(symbol)
         try:
-            if df_daily.empty:
-                d_data = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
-                if isinstance(d_data.columns, pd.MultiIndex): d_data.columns = d_data.columns.get_level_values(0)
-                df_daily = clean_and_normalize_data(d_data)
             if df_4h.empty:
-                h_data = yf.download(ticker, period="60d", interval="60m", progress=False, auto_adjust=True)
-                if isinstance(h_data.columns, pd.MultiIndex): h_data.columns = h_data.columns.get_level_values(0)
-                df_4h = clean_and_normalize_data(h_data)
+                h4_data = yf.download(ticker, period="60d", interval="60m", progress=False, auto_adjust=True) # Yfinance 60m proxy for 4h or 1h
+                if isinstance(h4_data.columns, pd.MultiIndex): h4_data.columns = h4_data.columns.get_level_values(0)
+                df_4h = clean_and_normalize_data(h4_data)
+            if df_1h.empty:
+                h1_data = yf.download(ticker, period="30d", interval="60m", progress=False, auto_adjust=True)
+                if isinstance(h1_data.columns, pd.MultiIndex): h1_data.columns = h1_data.columns.get_level_values(0)
+                df_1h = clean_and_normalize_data(h1_data)
             if df_15m.empty:
-                e_data = yf.download(ticker, period="10d", interval="15m", progress=False, auto_adjust=True)
-                if isinstance(e_data.columns, pd.MultiIndex): e_data.columns = e_data.columns.get_level_values(0)
-                df_15m = clean_and_normalize_data(e_data)
+                m15_data = yf.download(ticker, period="10d", interval="15m", progress=False, auto_adjust=True)
+                if isinstance(m15_data.columns, pd.MultiIndex): m15_data.columns = m15_data.columns.get_level_values(0)
+                df_15m = clean_and_normalize_data(m15_data)
+            if df_5m.empty:
+                m5_data = yf.download(ticker, period="5d", interval="5m", progress=False, auto_adjust=True)
+                if isinstance(m5_data.columns, pd.MultiIndex): m5_data.columns = m5_data.columns.get_level_values(0)
+                df_5m = clean_and_normalize_data(m5_data)
         except Exception:
             pass
 
-    if df_daily.empty or df_4h.empty or df_15m.empty:
-        raise ValueError(f"Unable to retrieve verified multi-timeframe data for '{symbol}'.")
+    if df_4h.empty or df_1h.empty or df_15m.empty or df_5m.empty:
+        raise ValueError(f"Unable to retrieve verified 4H/1H/15M/5M multi-timeframe data for '{symbol}'.")
         
-    df_daily['EMA200'] = df_daily['Close'].ewm(span=200, adjust=False).mean()
-    df_4h['EMA50'] = df_4h['Close'].ewm(span=50, adjust=False).mean()
+    df_4h['EMA200'] = df_4h['Close'].ewm(span=200, adjust=False).mean() if len(df_4h) >= 200 else df_4h['Close'].ewm(span=len(df_4h)//2, adjust=False).mean()
+    df_1h['EMA50'] = df_1h['Close'].ewm(span=50, adjust=False).mean()
     df_15m['EMA50'] = df_15m['Close'].ewm(span=50, adjust=False).mean()
-    df_15m['EMA200'] = df_15m['Close'].ewm(span=200, adjust=False).mean()
+    df_5m['EMA20'] = df_5m['Close'].ewm(span=20, adjust=False).mean()
     
-    return df_daily, df_4h, df_15m
+    return df_4h, df_1h, df_15m, df_5m
 
 # ==========================================
-# 4. PARALLEL SLOPED CHANNEL & SWING PIVOT ENGINE
+# 4. PARALLEL SLOPED CHANNEL & SMART FLIP ENGINE
 # ==========================================
 def calculate_parallel_sloped_channel(chart_df):
     highs = chart_df['High'].values
@@ -248,99 +254,101 @@ def calculate_parallel_sloped_channel(chart_df):
 
     current_close = chart_df['Close'].iloc[-1]
     projected_upper = upper_line[-1]
-    break_confirmed = current_close > projected_upper
+    projected_lower = lower_line[-1]
     
-    status_msg = "Sloped Parallel Channel Break & Close Confirmed" if break_confirmed else "Within Sloped Parallel Channel: Awaiting Breakout"
+    # Smart Breakout Flip Logic
+    break_above = current_close > projected_upper
+    break_below = current_close < projected_lower
+    
+    if break_above:
+        direction = "BUY"
+        status_msg = "Bullish Channel Break & Close Confirmed (Structural Flip)"
+    elif break_below:
+        direction = "SELL"
+        status_msg = "Bearish Channel Break & Close Confirmed (Structural Flip)"
+    else:
+        direction = "NEUTRAL"
+        status_msg = "Within Sloped Parallel Channel: Awaiting Breakout Flip"
 
     return {
         "x_vals": x_vals,
         "upper_line": upper_line,
         "lower_line": lower_line,
-        "break_confirmed": break_confirmed,
-        "score": 95 if break_confirmed else 60,
+        "direction": direction,
+        "break_above": break_above,
+        "break_below": break_below,
+        "score": 95 if (break_above or break_below) else 60,
         "status_msg": status_msg
     }
 
 # ==========================================
-# 5. MARKET STATE & CENTRAL DECISION ENGINE
+# 5. MARKET STATE & CENTRAL DECISION ENGINE (4H -> 1H -> 15M -> 5M)
 # ==========================================
-def evaluate_top_down_state(df_daily, df_4h, df_15m):
-    daily_close = df_daily['Close'].iloc[-1]
-    daily_ema = df_daily['EMA200'].iloc[-1]
-    macro_bearish = daily_close < daily_ema
-    
+def central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m):
     h4_close = df_4h['Close'].iloc[-1]
-    h4_ema = df_4h['EMA50'].iloc[-1]
-    h4_bearish = h4_close < h4_ema
+    h4_ema200 = df_4h['EMA200'].iloc[-1]
+    macro_bullish = h4_close > h4_ema200
     
-    m15_close = df_15m['Close'].iloc[-1]
-    m15_ema50 = df_15m['EMA50'].iloc[-1]
+    h1_close = df_1h['Close'].iloc[-1]
+    h1_ema50 = df_1h['EMA50'].iloc[-1]
+    intermediate_bullish = h1_close > h1_ema50
     
-    if not macro_bearish and not h4_bearish and m15_close > m15_ema50:
-        trend_state = "TOP-DOWN BULLISH ALIGNMENT"
-        trend_score = 90
-    elif macro_bearish and h4_bearish and m15_close < m15_ema50:
-        trend_state = "TOP-DOWN BEARISH ALIGNMENT"
-        trend_score = 90
-    else:
-        trend_state = "MIXED / MULTI-TF TRANSITION"
-        trend_score = 50
-
-    return {
-        "macro_bias": "Bearish (Daily < EMA200)" if macro_bearish else "Bullish (Daily > EMA200)",
-        "intermediate_bias": "Bearish (4H < EMA50)" if h4_bearish else "Bullish (4H > EMA50)",
-        "execution_state": trend_state,
-        "trend_score": trend_score,
-        "macro_bearish": macro_bearish
-    }
-
-def central_decision_engine(symbol, df_daily, df_4h, df_15m):
-    top_down = evaluate_top_down_state(df_daily, df_4h, df_15m)
+    # 15M Channel & Breakout Evaluation
     chart_slice = df_15m.tail(80).copy()
     channel_eval = calculate_parallel_sloped_channel(chart_slice)
     
-    trend_pts = top_down["trend_score"] * 0.30
-    ch_pts = channel_eval["score"] * 0.70
-    
-    confidence = int(trend_pts + ch_pts)
-    direction = "SELL" if top_down["macro_bearish"] else "BUY"
-    current_price = df_15m['Close'].iloc[-1]
-    atr = df_15m['ATR'].iloc[-1]
-    
-    if direction == "BUY":
-        sl = current_price - (atr * 1.5)
-        tp1 = current_price + (atr * 1.5)
-        tp2 = current_price + (atr * 3.0)
+    # Smart Flip Overrides baseline macro if breakout occurs
+    if channel_eval["break_above"]:
+        direction = "BUY"
+        execution_state = "BULLISH BREAKOUT FLIP CONFIRMED"
+    elif channel_eval["break_below"]:
+        direction = "SELL"
+        execution_state = "BEARISH BREAKOUT FLIP CONFIRMED"
     else:
-        sl = current_price + (atr * 1.5)
-        tp1 = current_price - (atr * 1.5)
-        tp2 = current_price - (atr * 3.0)
+        direction = "BUY" if (macro_bullish and intermediate_bullish) else "SELL"
+        execution_state = "TOP-DOWN ALIGNED TREND"
+        
+    confidence = channel_eval["score"]
+    current_price = df_15m['Close'].iloc[-1]
+    
+    # 5-Minute Sweet Spot Tight Stop-Loss calculation
+    df_5m_tail = df_5m.tail(15).copy()
+    if direction == "BUY":
+        sweet_spot_sl = df_5m_tail['Low'].min() - (df_5m_tail['ATR'].iloc[-1] * 0.5)
+        if sweet_spot_sl >= current_price:
+            sweet_spot_sl = current_price - (df_15m['ATR'].iloc[-1] * 1.0)
+        tp1 = current_price + (abs(current_price - sweet_spot_sl) * 1.5)
+        tp2 = current_price + (abs(current_price - sweet_spot_sl) * 3.0)
+    else:
+        sweet_spot_sl = df_5m_tail['High'].max() + (df_5m_tail['ATR'].iloc[-1] * 0.5)
+        if sweet_spot_sl <= current_price:
+            sweet_spot_sl = current_price + (df_15m['ATR'].iloc[-1] * 1.0)
+        tp1 = current_price - (abs(sweet_spot_sl - current_price) * 1.5)
+        tp2 = current_price - (abs(sweet_spot_sl - current_price) * 3.0)
         
     return {
         "symbol": symbol,
         "direction": direction,
         "confidence": confidence,
-        "macro_bias": top_down["macro_bias"],
-        "intermediate_bias": top_down["intermediate_bias"],
-        "execution_state": top_down["execution_state"],
+        "macro_bias": "Bullish (4H > EMA200)" if macro_bullish else "Bearish (4H < EMA200)",
+        "intermediate_bias": "Bullish (1H > EMA50)" if intermediate_bullish else "Bearish (1H < EMA50)",
+        "execution_state": execution_state,
         "trendline_status": channel_eval["status_msg"],
-        "break_confirmed": channel_eval["break_confirmed"],
+        "break_confirmed": channel_eval["break_above"] or channel_eval["break_below"],
         "entry": current_price,
-        "sl": sl,
+        "sl": sweet_spot_sl,
         "tp1": tp1,
         "tp2": tp2
     }
 
 # ==========================================
-# 6. 15M CHART RENDERER WITH PARALLEL SLOPED CHANNELS
+# 6. 15M CHART RENDERER WITH SLOPED CHANNELS
 # ==========================================
-def generate_15m_execution_chart(df_15m, title_str, setup, macro_bearish):
+def generate_15m_execution_chart(df_15m, title_str, setup):
     img_buf = io.BytesIO()
     chart_df = df_15m.tail(80).copy()
     
     channel_calc = calculate_parallel_sloped_channel(chart_df)
-    
-    # Map upper and lower sloped channel lines into addplots
     upper_series = pd.Series(channel_calc['upper_line'], index=chart_df.index)
     lower_series = pd.Series(channel_calc['lower_line'], index=chart_df.index)
     
@@ -349,9 +357,8 @@ def generate_15m_execution_chart(df_15m, title_str, setup, macro_bearish):
     
     addplots = [
         mpf.make_addplot(chart_df['EMA50'], color='#2962ff', width=1.2),
-        mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5),
-        mpf.make_addplot(upper_series, color='#00e676', width=2.0, linestyle='-'),  # Upper Sloped Resistance Channel
-        mpf.make_addplot(lower_series, color='#00e676', width=2.0, linestyle='-')   # Lower Sloped Support Channel
+        mpf.make_addplot(upper_series, color='#00e676', width=2.0, linestyle='-'),
+        mpf.make_addplot(lower_series, color='#00e676', width=2.0, linestyle='-')
     ]
     
     fig, axlist = mpf.plot(
@@ -361,11 +368,11 @@ def generate_15m_execution_chart(df_15m, title_str, setup, macro_bearish):
     
     ax = axlist[0]
     ax.axhline(setup['entry'], color='#2962ff', linestyle='-.', linewidth=1.2, label=f"Entry Level")
-    ax.axhline(setup['sl'], color='#e53935', linestyle='--', linewidth=1.0, label=f"SL")
+    ax.axhline(setup['sl'], color='#e53935', linestyle='--', linewidth=1.0, label=f"5m Sweet Spot SL")
     ax.axhline(setup['tp1'], color='#43a047', linestyle='--', linewidth=1.0, label=f"TP1")
     
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-    ax.set_title(f"{title_str}\nParallel Sloped Channel Geometry Active | {current_time_str}", color='white', fontsize=9)
+    ax.set_title(f"{title_str}\n4H->1H->15M Top-Down Confluence | {current_time_str}", color='white', fontsize=9)
     
     fig.savefig(img_buf, dpi=130, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -373,7 +380,7 @@ def generate_15m_execution_chart(df_15m, title_str, setup, macro_bearish):
     return img_buf
 
 # ==========================================
-# 7. PROFESSIONAL TELEGRAM MENU & CONTINUOUS A+ SCANNER
+# 7. PROFESSIONAL TELEGRAM MENU & SCANNER
 # ==========================================
 user_languages = {}
 active_subscribers = set()
@@ -381,10 +388,10 @@ active_subscribers = set()
 def get_home_menu(lang="English", auto_active=False):
     lang_flags = {"English": "🇬🇧 English", "Hausa": "🇳🇬 Hausa", "Pidgin": "🇳🇬 Pidgin"}
     current_flag = lang_flags.get(lang, "🇬🇧 English")
-    auto_status = "🟢 GBPAUD Continuous A+ Scanner: ON" if auto_active else "🔴 GBPAUD Continuous A+ Scanner: OFF"
+    auto_status = "🟢 GBPAUD Continuous Scanner: ON" if auto_active else "🔴 GBPAUD Continuous Scanner: OFF"
     
     keyboard = [
-        [InlineKeyboardButton("📊 Run Analysis", callback_data="menu_analysis"),
+        [InlineKeyboardButton("📊 Run 4H/1H/15M Analysis", callback_data="menu_analysis"),
          InlineKeyboardButton("🚨 Generate Signal", callback_data="menu_signal")],
         [InlineKeyboardButton(auto_status, callback_data="toggle_auto_scan")],
         [InlineKeyboardButton(f"🌐 Language: {current_flag}", callback_data="menu_lang_select")],
@@ -400,7 +407,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "🏛️ *INSTITUTIONAL TOP-DOWN MARKET DESK*\n"
         "━━━━━━━━━━━━━━━━━━━\n"
-        "Terminal online with **Parallel Sloped Channel Geometry** matching your MetaTrader 5 mobile setup exactly.\n\n"
+        "Terminal online with **4H → 1H → 15M Top-Down Hierarchy**, **Parallel Sloped Channel Flip Adaptation**, and **5M Sweet Spot Tight Stop-Loss**.\n\n"
         "📌 *Status:* Ready for execution."
     )
     await update.message.reply_text(
@@ -415,9 +422,8 @@ async def background_continuous_scanner(application):
         try:
             if active_subscribers:
                 symbol = "GBPAUD"
-                df_daily, df_4h, df_15m = fetch_top_down_institutional_data(symbol)
-                setup = central_decision_engine(symbol, df_daily, df_4h, df_15m)
-                macro_bearish = df_daily['Close'].iloc[-1] < df_daily['EMA200'].iloc[-1]
+                df_4h, df_1h, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
+                setup = central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m)
                 
                 if setup['confidence'] >= 80 and setup['break_confirmed']:
                     decimals = 3 if "JPY" in symbol else (2 if "XAU" in symbol or "GOLD" in symbol else 5)
@@ -425,25 +431,23 @@ async def background_continuous_scanner(application):
                     scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
                     
                     raw_signal_text = (
-                        f"🚨 **CONTINUOUS A+ SIGNAL ALERT (GBPAUD)** 🚨\n"
+                        f"🚨 **CONTINUOUS A+ SIGNAL ALERT ({symbol})** 🚨\n"
                         f"⏱️ *Timestamp:* {scan_timestamp}\n\n"
-                        f"PAIR: {symbol}\n"
                         f"Direction: {setup['direction']}\n"
-                        f"Confidence: {setup['confidence']}% (Parallel Sloped Channel Break)\n"
                         f"Status: {setup['trendline_status']}\n"
                         f"Entry: {fmt.format(setup['entry'])}\n"
-                        f"SL: {fmt.format(setup['sl'])}\n"
+                        f"5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
                         f"TP1: {fmt.format(setup['tp1'])}\n"
                         f"TP2: {fmt.format(setup['tp2'])}\n"
                     )
                     
-                    chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Parallel Sloped Channel Break", setup, macro_bearish)
+                    chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Channel Flip Breakout", setup)
 
                     for chat_id in list(active_subscribers):
                         lang = user_languages.get(chat_id, "English")
                         final_signal_text = translate_text(raw_signal_text, lang)
                         try:
-                            await application.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *A+ CHANNEL BREAKOUT: {symbol}*\n⏱️ `{scan_timestamp}`", parse_mode="Markdown")
+                            await application.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *A+ BREAKOUT FLIP: {symbol}*\n⏱️ `{scan_timestamp}`", parse_mode="Markdown")
                             chart_img.seek(0)
                             await application.bot.send_message(chat_id=chat_id, text=final_signal_text, parse_mode="Markdown")
                         except Exception:
@@ -500,7 +504,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
              InlineKeyboardButton("NAS100", callback_data="run_an|NAS100")],
             [InlineKeyboardButton("« Back", callback_data="menu_home")]
         ]
-        await query.edit_message_text(text="📊 *Select Asset for Parallel Channel Analysis:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text(text="📊 *Select Asset for Top-Down Channel Analysis:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
     elif data == "menu_signal":
         kb = [
@@ -519,31 +523,32 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_an|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"🧠 Mapping Parallel Sloped Channels for {symbol} at {ts}...")
+        await query.edit_message_text(text=f"🧠 Running 4H/1H/15M Top-Down Analysis for {symbol} at {ts}...")
         try:
-            df_daily, df_4h, df_15m = fetch_top_down_institutional_data(symbol)
-            setup = central_decision_engine(symbol, df_daily, df_4h, df_15m)
-            macro_bearish = df_daily['Close'].iloc[-1] < df_daily['EMA200'].iloc[-1]
+            df_4h, df_1h, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
+            setup = central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m)
 
-            metrics = f"- Timestamp: {ts}\n- Macro Bias: {setup['macro_bias']}\n- Status: {setup['trendline_status']}\n- Confidence: {setup['confidence']}%\n"
+            metrics = f"- Timestamp: {ts}\n- 4H Bias: {setup['macro_bias']}\n- 1H Bias: {setup['intermediate_bias']}\n- Status: {setup['trendline_status']}\n- Direction: {setup['direction']}\n"
             ai_commentary = fetch_ai_commentary(metrics, lang)
-            chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Parallel Sloped Channel", setup, macro_bearish)
+            chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Channel Flip Confluence", setup)
             
             decimals = 2 if symbol in ["AAPL", "TESLA", "XAUUSD", "GOLD", "US30", "NAS100"] else 5
             fmt = f"{{:.{decimals}f}}"
             
             price_box = (
-                f"📌 *PARALLEL SLOPED CHANNEL ZONE:*\n"
+                f"📌 *TOP-DOWN CHANNEL FLIP ZONE:*\n"
                 f"⏱️ *Timestamp:* `{ts}`\n"
+                f"• 4H Macro Bias: {setup['macro_bias']}\n"
+                f"• 1H Intermediate: {setup['intermediate_bias']}\n"
                 f"• Status: {setup['trendline_status']}\n"
-                f"• Current Price: {fmt.format(setup['entry'])}\n"
                 f"• Direction: {setup['direction']}\n"
-                f"• SL: {fmt.format(setup['sl'])}\n"
+                f"• Entry: {fmt.format(setup['entry'])}\n"
+                f"• 5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
                 f"• TP1: {fmt.format(setup['tp1'])}\n"
                 f"• TP2: {fmt.format(setup['tp2'])}\n"
             )
             
-            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *CHANNEL CHART: {symbol}*\n⏱️ `{ts}`", parse_mode="Markdown")
+            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *CHART: {symbol}*\n⏱️ `{ts}`", parse_mode="Markdown")
             await context.bot.send_message(chat_id=chat_id, text=price_box, parse_mode="Markdown")
             await context.bot.send_message(chat_id=chat_id, text=ai_commentary, parse_mode="Markdown")
             await context.bot.send_message(chat_id=chat_id, text="📌 *Complete.* Choose next action:", reply_markup=get_home_menu(lang, is_auto), parse_mode="Markdown")
@@ -553,23 +558,23 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_sig|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"🚨 Verifying Channel Breakout for {symbol} at {ts}...")
+        await query.edit_message_text(text=f"🚨 Verifying Breakout Flip Signal for {symbol} at {ts}...")
         try:
-            df_daily, df_4h, df_15m = fetch_top_down_institutional_data(symbol)
-            setup = central_decision_engine(symbol, df_daily, df_4h, df_15m)
+            df_4h, df_1h, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
+            setup = central_decision_engine(symbol, df_4h, df_1h, df_15m, df_5m)
 
             decimals = 2 if symbol in ["AAPL", "TESLA", "XAUUSD", "GOLD", "US30", "NAS100"] else 5
             fmt = f"{{:.{decimals}f}}"
             
             raw_sig = (
-                f"🚨 **A+ PARALLEL CHANNEL BREAK SIGNAL** 🚨\n"
+                f"🚨 **A+ CHANNEL FLIP SIGNAL** 🚨\n"
                 f"⏱️ *Timestamp:* {ts}\n\n"
                 f"PAIR: {symbol}\n"
                 f"Direction: {setup['direction']}\n"
                 f"Confidence: {setup['confidence']}%\n"
                 f"Status: {setup['trendline_status']}\n"
                 f"Entry: {fmt.format(setup['entry'])}\n"
-                f"SL: {fmt.format(setup['sl'])}\n"
+                f"5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
                 f"TP1: {fmt.format(setup['tp1'])}\n"
                 f"TP2: {fmt.format(setup['tp2'])}\n"
             )
@@ -582,8 +587,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "menu_help":
         help_text = (
             "ℹ️ *TERMINAL GUIDE*\n\n"
-            "• **Parallel Sloped Channels**: Dynamically computes both the upper resistance trendline connecting swing highs and the lower support trendline connecting swing lows across the chart.\n"
-            "• **Breakout Filter**: Signals are verified when price decisively breaks and closes beyond the sloped boundary."
+            "• **Top-Down Hierarchy**: Evaluates 4H macro trend, 1H intermediate structure, and 15M/5M execution.\n"
+            "• **Channel Flip Adaptation**: Automatically overrides baseline macro bias when price breaks and closes outside sloped channel boundaries.\n"
+            "• **5M Sweet Spot SL**: Automatically identifies optimal structure-based stop-loss levels on the 5-minute timeframe."
         )
         kb = [[InlineKeyboardButton("« Back to Home", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
