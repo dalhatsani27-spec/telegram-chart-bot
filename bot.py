@@ -369,54 +369,36 @@ def generate_institutional_chart(df, title_str, setup):
     return img_buf
 
 # ==========================================
-# 9. TELEGRAM BOT HANDLERS & LANGUAGE SELECTION
+# 9. PROFESSIONAL TELEGRAM MENU & INTERFACE
 # ==========================================
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 *Institutional Automated Bot Initialized!*\n\n"
-        "Use `/analyze [symbol] [tf]` to check current market status.\n"
-        "Use `/signal [symbol] [tf]` to generate an institutional trade setup with language selection (including Hausa).",
-        parse_mode="Markdown"
-    )
+user_languages = {}
 
-async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    args = context.args
-    raw_symbol = args[0].upper() if len(args) > 0 else "GBPAUD"
-    tf = args[1] if len(args) > 1 else "15m"
-    
-    status = await update.message.reply_text(f"🧠 Running Manual Institutional Engine for {raw_symbol}...")
-    
-    try:
-        df_daily, df_entry = fetch_institutional_data(raw_symbol, tf)
-        setup = central_decision_engine(raw_symbol, df_daily, df_entry)
-
-        metrics_summary = f"- Trend State: {setup['trend_state']}\n- Liquidity Status: {setup['liquidity']}\n- Momentum: {setup['momentum']}\n- POI Quality: {setup['poi_desc']}\n- Confidence Score: {setup['confidence']}%\n"
-        ai_commentary = fetch_ai_commentary(metrics_summary, "English")
-        chart_img = generate_institutional_chart(df_entry, f"{raw_symbol} Institutional Mapped POI ({tf.upper()})", setup)
-        
-        await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *INSTITUTIONAL MAPPED POI: {raw_symbol} ({tf.upper()})*", parse_mode="Markdown")
-        await status.delete()
-        await context.bot.send_message(chat_id=chat_id, text=ai_commentary, parse_mode="Markdown")
-
-    except Exception as e:
-        await status.edit_text(f"❌ Analysis failed: {str(e)}")
-
-async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    raw_symbol = args[0].upper() if len(args) > 0 else "GBPAUD"
-    tf = args[1] if len(args) > 1 else "15m"
+def get_home_menu(lang="English"):
+    lang_flags = {"English": "🇬🇧 English", "Hausa": "🇳🇬 Hausa", "Pidgin": "🇳🇬 Pidgin"}
+    current_flag = lang_flags.get(lang, "🇬🇧 English")
     
     keyboard = [
-        [InlineKeyboardButton("English", callback_data=f"sig|{raw_symbol}|{tf}|English")],
-        [InlineKeyboardButton("Hausa", callback_data=f"sig|{raw_symbol}|{tf}|Hausa")],
-        [InlineKeyboardButton("Pidgin", callback_data=f"sig|{raw_symbol}|{tf}|Pidgin")]
+        [InlineKeyboardButton("📊 Run Analysis", callback_data="menu_analysis"),
+         InlineKeyboardButton("🚨 Generate Signal", callback_data="menu_signal")],
+        [InlineKeyboardButton(f"🌐 Language: {current_flag}", callback_data="menu_lang_select")],
+        [InlineKeyboardButton("ℹ️ Help & Instructions", callback_data="menu_help")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(keyboard)
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_languages[chat_id] = "English"
     
+    welcome_text = (
+        "🏛️ *INSTITUTIONAL MARKET DESK*\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "Welcome to your professional algorithmic trading terminal. "
+        "Select your preferred language or choose an action below to begin.\n\n"
+        "📌 *Status:* Ready for execution."
+    )
     await update.message.reply_text(
-        f"🌍 *Select Language for {raw_symbol} Signal Alert:*",
-        reply_markup=reply_markup,
+        welcome_text,
+        reply_markup=get_home_menu("English"),
         parse_mode="Markdown"
     )
 
@@ -424,21 +406,99 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
     data = query.data
+    chat_id = query.message.chat_id
+    lang = user_languages.get(chat_id, "English")
     
-    if data.startswith("sig|"):
-        _, raw_symbol, tf, lang = data.split("|")
-        await query.edit_message_text(text=f"🚨 Generating Institutional Signal for {raw_symbol} in {lang}...")
-        
-        try:
-            df_daily, df_entry = fetch_institutional_data(raw_symbol, tf)
-            setup = central_decision_engine(raw_symbol, df_daily, df_entry)
+    if data == "menu_home":
+        home_text = (
+            "🏛️ *INSTITUTIONAL MARKET DESK*\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "Main Control Menu. Choose an option below:"
+        )
+        await query.edit_message_text(text=home_text, reply_markup=get_home_menu(lang), parse_mode="Markdown")
 
-            decimals = 3 if "JPY" in raw_symbol else (2 if "XAU" in raw_symbol or "GOLD" in raw_symbol else 5)
+    elif data == "menu_lang_select":
+        kb = [
+            [InlineKeyboardButton("🇬🇧 English", callback_data="set_lang|English"),
+             InlineKeyboardButton("🇳🇬 Hausa", callback_data="set_lang|Hausa")],
+            [InlineKeyboardButton("🇳🇬 Pidgin", callback_data="set_lang|Pidgin")],
+            [InlineKeyboardButton("« Back to Home", callback_data="menu_home")]
+        ]
+        await query.edit_message_text(
+            text="🌍 *Select Your Interface Language:*",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
+
+    elif data.startswith("set_lang|"):
+        new_lang = data.split("|")[1]
+        user_languages[chat_id] = new_lang
+        await query.edit_message_text(
+            text=f"✅ Language successfully updated to **{new_lang}**.",
+            reply_markup=get_home_menu(new_lang),
+            parse_mode="Markdown"
+        )
+
+    elif data == "menu_analysis":
+        kb = [
+            [InlineKeyboardButton("GBPAUD (15m)", callback_data="run_an|GBPAUD|15m"),
+             InlineKeyboardButton("EURUSD (15m)", callback_data="run_an|EURUSD|15m")],
+            [InlineKeyboardButton("XAUUSD (GOLD 15m)", callback_data="run_an|XAUUSD|15m"),
+             InlineKeyboardButton("BTCUSD (15m)", callback_data="run_an|BTCUSD|15m")],
+            [InlineKeyboardButton("« Back to Home", callback_data="menu_home")]
+        ]
+        await query.edit_message_text(
+            text="📊 *Select Asset for Market Analysis:*",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
+
+    elif data == "menu_signal":
+        kb = [
+            [InlineKeyboardButton("GBPAUD (15m)", callback_data="run_sig|GBPAUD|15m"),
+             InlineKeyboardButton("EURUSD (15m)", callback_data="run_sig|EURUSD|15m")],
+            [InlineKeyboardButton("XAUUSD (GOLD 15m)", callback_data="run_sig|XAUUSD|15m"),
+             InlineKeyboardButton("BTCUSD (15m)", callback_data="run_sig|BTCUSD|15m")],
+            [InlineKeyboardButton("« Back to Home", callback_data="menu_home")]
+        ]
+        await query.edit_message_text(
+            text="🚨 *Select Asset for Trade Signal:*",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
+
+    elif data.startswith("run_an|"):
+        _, symbol, tf = data.split("|")
+        await query.edit_message_text(text=f"🧠 Running Institutional Analysis for {symbol} ({tf})...")
+        try:
+            df_daily, df_entry = fetch_institutional_data(symbol, tf)
+            setup = central_decision_engine(symbol, df_daily, df_entry)
+
+            metrics_summary = f"- Trend State: {setup['trend_state']}\n- Liquidity Status: {setup['liquidity']}\n- Momentum: {setup['momentum']}\n- POI Quality: {setup['poi_desc']}\n- Confidence Score: {setup['confidence']}%\n"
+            ai_commentary = fetch_ai_commentary(metrics_summary, lang)
+            chart_img = generate_institutional_chart(df_entry, f"{symbol} Institutional Mapped POI ({tf.upper()})", setup)
+            
+            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *INSTITUTIONAL MAPPED POI: {symbol} ({tf.upper()})*", parse_mode="Markdown")
+            await context.bot.send_message(chat_id=chat_id, text=ai_commentary, parse_mode="Markdown")
+            
+            # Return home menu prompt
+            await context.bot.send_message(chat_id=chat_id, text="📌 *Session Action Complete.* Choose next action:", reply_markup=get_home_menu(lang), parse_mode="Markdown")
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"❌ Analysis failed: {str(e)}", reply_markup=get_home_menu(lang))
+
+    elif data.startswith("run_sig|"):
+        _, symbol, tf = data.split("|")
+        await query.edit_message_text(text=f"🚨 Generating Institutional Signal for {symbol} ({tf}) in {lang}...")
+        try:
+            df_daily, df_entry = fetch_institutional_data(symbol, tf)
+            setup = central_decision_engine(symbol, df_daily, df_entry)
+
+            decimals = 3 if "JPY" in symbol else (2 if "XAU" in symbol or "GOLD" in symbol else 5)
             fmt = f"{{:.{decimals}f}}"
             
             raw_signal_text = (
                 f"🚨 **INSTITUTIONAL SIGNAL ALERT** 🚨\n\n"
-                f"PAIR: {raw_symbol}\n"
+                f"PAIR: {symbol}\n"
                 f"Direction: {setup['direction']}\n"
                 f"Confidence: {setup['confidence']}%\n"
                 f"Trend: {setup['trend_state']}\n"
@@ -450,13 +510,24 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 f"TP2: {fmt.format(setup['tp2'])}\n"
                 f"Reason: {setup['poi_desc']} after liquidity sweep with strong displacement.\n"
             )
-            
             final_signal_text = translate_text(raw_signal_text, lang)
-            await query.message.delete()
-            await context.bot.send_message(chat_id=query.message.chat_id, text=final_signal_text, parse_mode="Markdown")
-
+            await context.bot.send_message(chat_id=chat_id, text=final_signal_text, parse_mode="Markdown")
+            
+            # Return home menu prompt
+            await context.bot.send_message(chat_id=chat_id, text="📌 *Session Action Complete.* Choose next action:", reply_markup=get_home_menu(lang), parse_mode="Markdown")
         except Exception as e:
-            await query.edit_message_text(text=f"❌ Signal generation failed: {str(e)}")
+            await context.bot.send_message(chat_id=chat_id, text=f"❌ Signal generation failed: {str(e)}", reply_markup=get_home_menu(lang))
+
+    elif data == "menu_help":
+        help_text = (
+            "ℹ️ *TERMINAL GUIDE*\n\n"
+            "• **Run Analysis**: Delivers full AI market desk commentary, structural metrics, and institutional chart plots.\n"
+            "• **Generate Signal**: Provides precision entry, stop loss, and take profit parameters.\n"
+            "• **Language**: Switch instantly between English, Hausa, and Pidgin for all outputs.\n\n"
+            "Use `/start` anytime to pull up the primary dashboard menu."
+        )
+        kb = [[InlineKeyboardButton("« Back to Home", callback_data="menu_home")]]
+        await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
 def run_telegram_bot():
     if not TELEGRAM_BOT_TOKEN:
@@ -465,8 +536,6 @@ def run_telegram_bot():
     asyncio.set_event_loop(loop)
     app_bot = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start_command))
-    app_bot.add_handler(CommandHandler("analyze", analyze_command))
-    app_bot.add_handler(CommandHandler("signal", signal_command))
     app_bot.add_handler(CallbackQueryHandler(button_callback_handler))
     
     loop.run_until_complete(app_bot.initialize())
