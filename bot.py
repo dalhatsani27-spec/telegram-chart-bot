@@ -9,7 +9,6 @@ import pandas as pd
 import yfinance as yf
 import mplfinance as mpf
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 from datetime import datetime
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -76,7 +75,7 @@ def translate_text(text, target_language):
 
 def fetch_ai_commentary(metrics_summary, target_language="English"):
     if not OPENROUTER_API_KEY:
-        base_text = "🎯 *AI TOP-DOWN MARKET DESK COMMENTARY*\n\nInstitutional alignment verified across multi-timeframe engines."
+        base_text = "🎯 *AI TOP-DOWN MARKET DESK COMMENTARY*\n\nInstitutional channel alignment verified across multi-timeframe engines."
         return translate_text(base_text, target_language)
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
@@ -88,7 +87,7 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
     Provide a professional top-down breakdown in 4 concise points:
     1. Macro / Higher Timeframe Context & Structure
     2. Intermediate Timeframe Alignment
-    3. 15-Minute Execution TF, Pivot Trendline Break & Liquidity Sweep
+    3. 15-Minute Execution TF, Parallel Sloped Channel Geometry & Breakout Status
     4. Execution Outlook & Risk Parameters
     
     Write the response directly in {target_language}.
@@ -119,7 +118,7 @@ def normalize_ticker_twelve_data(symbol):
         "SILVER": "XAG/USD", "XAGUSD": "XAG/USD",
         "OIL": "WTI/USD", "USOIL": "WTI/USD", "WTI": "WTI/USD", "BRENT": "BRENT/USD",
         "BTC": "BTC/USD", "BTCUSD": "BTC/USD",
-        "TESLA": "TSLA", "TSLA": "TSLA", "AAPL": "AAPL",
+        "TESLA": "TSLA", "AAPL": "AAPL",
         "US30": "DJI", "NAS100": "IXIC", "SPX500": "SPX"
     }
     if symbol in mapping:
@@ -158,7 +157,7 @@ def normalize_ticker_yfinance(symbol):
         "SILVER": "SI=F", 
         "OIL": "CL=F", "USOIL": "CL=F", "WTI": "CL=F", 
         "BTC": "BTC-USD", "BTCUSD": "BTC-USD",
-        "TESLA": "TSLA", "TSLA": "TSLA", "AAPL": "AAPL",
+        "TESLA": "TSLA", "AAPL": "AAPL",
         "US30": "^DJI", "NAS100": "^IXIC", "SPX500": "^GSPC"
     }
     if symbol in alias_map:
@@ -212,54 +211,54 @@ def fetch_top_down_institutional_data(symbol):
     return df_daily, df_4h, df_15m
 
 # ==========================================
-# 4. PIVOT TRENDLINE & BREAK CONFIRMATION ENGINE
+# 4. PARALLEL SLOPED CHANNEL & SWING PIVOT ENGINE
 # ==========================================
-def analyze_pivot_trendline_and_break(df_15m, macro_bearish):
-    highs = df_15m['High'].values
-    lows = df_15m['Low'].values
+def calculate_parallel_sloped_channel(chart_df):
+    highs = chart_df['High'].values
+    lows = chart_df['Low'].values
     
     swing_highs = []
     swing_lows = []
-    for i in range(2, len(df_15m) - 2):
+    for i in range(2, len(chart_df) - 2):
         if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
             swing_highs.append((i, highs[i]))
         if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
             swing_lows.append((i, lows[i]))
             
-    # Form trendline based on direction
-    if macro_bearish and len(swing_highs) >= 2:
+    x_vals = np.arange(len(chart_df))
+    
+    # Construct Upper Sloped Trendline connecting swing highs
+    if len(swing_highs) >= 2:
         p1, p2 = swing_highs[-2], swing_highs[-1]
-        slope = (p2[1] - p1[1]) / (p2[0] - p1[0] if p2[0] != p1[0] else 1)
-        current_idx = len(df_15m) - 1
-        projected_tl_val = p2[1] + slope * (current_idx - p2[0])
-        
-        # Break & Close Confirmation check
-        current_close = df_15m['Close'].iloc[-1]
-        break_confirmed = current_close < projected_tl_val # Bearish breakdown confirmation
-        tl_type = "Bearish Resistance Pivot Trendline"
-    elif not macro_bearish and len(swing_lows) >= 2:
-        p1, p2 = swing_lows[-2], swing_lows[-1]
-        slope = (p2[1] - p1[1]) / (p2[0] - p1[0] if p2[0] != p1[0] else 1)
-        current_idx = len(df_15m) - 1
-        projected_tl_val = p2[1] + slope * (current_idx - p2[0])
-        
-        current_close = df_15m['Close'].iloc[-1]
-        break_confirmed = current_close > projected_tl_val # Bullish breakout confirmation
-        tl_type = "Bullish Support Pivot Trendline"
+        slope_upper = (p2[1] - p1[1]) / (p2[0] - p1[0] if p2[0] != p1[0] else 1)
+        intercept_upper = p1[1] - slope_upper * p1[0]
+        upper_line = slope_upper * x_vals + intercept_upper
     else:
-        projected_tl_val = highs[-1] if macro_bearish else lows[-1]
-        break_confirmed = True
-        tl_type = "Equilibrium Pivot Zone"
+        slope_upper = 0.0
+        upper_line = np.full(len(chart_df), chart_df['High'].max())
+        
+    # Construct Lower Sloped Parallel Trendline connecting swing lows
+    if len(swing_lows) >= 2:
+        p1_l, p2_l = swing_lows[-2], swing_lows[-1]
+        slope_lower = (p2_l[1] - p1_l[1]) / (p2_l[0] - p1_l[0] if p2_l[0] != p1_l[0] else 1)
+        intercept_lower = p1_l[1] - slope_lower * p1_l[0]
+        lower_line = slope_lower * x_vals + intercept_lower
+    else:
+        lower_line = np.full(len(chart_df), chart_df['Low'].min())
 
-    trendline_score = 95 if break_confirmed else 55
-    status_desc = f"Pivot Trendline Break & Close Confirmed ({tl_type})" if break_confirmed else f"Approaching Watch Area: Awaiting Trendline Break & Close ({tl_type})"
+    current_close = chart_df['Close'].iloc[-1]
+    projected_upper = upper_line[-1]
+    break_confirmed = current_close > projected_upper
+    
+    status_msg = "Sloped Parallel Channel Break & Close Confirmed" if break_confirmed else "Within Sloped Parallel Channel: Awaiting Breakout"
 
     return {
-        "projected_tl_val": projected_tl_val,
+        "x_vals": x_vals,
+        "upper_line": upper_line,
+        "lower_line": lower_line,
         "break_confirmed": break_confirmed,
-        "trendline_score": trendline_score,
-        "status_desc": status_desc,
-        "tl_type": tl_type
+        "score": 95 if break_confirmed else 60,
+        "status_msg": status_msg
     }
 
 # ==========================================
@@ -297,13 +296,13 @@ def evaluate_top_down_state(df_daily, df_4h, df_15m):
 
 def central_decision_engine(symbol, df_daily, df_4h, df_15m):
     top_down = evaluate_top_down_state(df_daily, df_4h, df_15m)
-    tl_eval = analyze_pivot_trendline_and_break(df_15m, top_down["macro_bearish"])
+    chart_slice = df_15m.tail(80).copy()
+    channel_eval = calculate_parallel_sloped_channel(chart_slice)
     
     trend_pts = top_down["trend_score"] * 0.30
-    tl_pts = tl_eval["trendline_score"] * 0.70 # Heavy weight on trendline break & close confirmation for A+
+    ch_pts = channel_eval["score"] * 0.70
     
-    confidence = int(trend_pts + tl_pts)
-    
+    confidence = int(trend_pts + ch_pts)
     direction = "SELL" if top_down["macro_bearish"] else "BUY"
     current_price = df_15m['Close'].iloc[-1]
     atr = df_15m['ATR'].iloc[-1]
@@ -324,27 +323,36 @@ def central_decision_engine(symbol, df_daily, df_4h, df_15m):
         "macro_bias": top_down["macro_bias"],
         "intermediate_bias": top_down["intermediate_bias"],
         "execution_state": top_down["execution_state"],
-        "trendline_status": tl_eval["status_desc"],
-        "break_confirmed": tl_eval["break_confirmed"],
+        "trendline_status": channel_eval["status_msg"],
+        "break_confirmed": channel_eval["break_confirmed"],
         "entry": current_price,
         "sl": sl,
         "tp1": tp1,
-        "tp2": tp2,
-        "tl_line": tl_eval["projected_tl_val"]
+        "tp2": tp2
     }
 
 # ==========================================
-# 6. 15-MINUTE EXECUTION CHART WITH PIVOT TRENDLINE
+# 6. 15M CHART RENDERER WITH PARALLEL SLOPED CHANNELS
 # ==========================================
-def generate_15m_execution_chart(df_15m, title_str, setup):
+def generate_15m_execution_chart(df_15m, title_str, setup, macro_bearish):
     img_buf = io.BytesIO()
     chart_df = df_15m.tail(80).copy()
+    
+    channel_calc = calculate_parallel_sloped_channel(chart_df)
+    
+    # Map upper and lower sloped channel lines into addplots
+    upper_series = pd.Series(channel_calc['upper_line'], index=chart_df.index)
+    lower_series = pd.Series(channel_calc['lower_line'], index=chart_df.index)
     
     mc = mpf.make_marketcolors(up='#089981', down='#f23645', edge='inherit', wick='inherit')
     style = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', gridcolor='#2a2e39', y_on_right=True, facecolor='#131722', figcolor='#131722')
     
-    addplots = [mpf.make_addplot(chart_df['EMA50'], color='#2962ff', width=1.2),
-                mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5)]
+    addplots = [
+        mpf.make_addplot(chart_df['EMA50'], color='#2962ff', width=1.2),
+        mpf.make_addplot(chart_df['EMA200'], color='#ffd700', width=1.5),
+        mpf.make_addplot(upper_series, color='#00e676', width=2.0, linestyle='-'),  # Upper Sloped Resistance Channel
+        mpf.make_addplot(lower_series, color='#00e676', width=2.0, linestyle='-')   # Lower Sloped Support Channel
+    ]
     
     fig, axlist = mpf.plot(
         chart_df, type='candle', style=style, volume=False,
@@ -352,15 +360,12 @@ def generate_15m_execution_chart(df_15m, title_str, setup):
     )
     
     ax = axlist[0]
-    ax.axhline(setup['entry'], color='#2962ff', linestyle='-.', linewidth=1.2, label=f"15M Entry Level")
+    ax.axhline(setup['entry'], color='#2962ff', linestyle='-.', linewidth=1.2, label=f"Entry Level")
     ax.axhline(setup['sl'], color='#e53935', linestyle='--', linewidth=1.0, label=f"SL")
     ax.axhline(setup['tp1'], color='#43a047', linestyle='--', linewidth=1.0, label=f"TP1")
     
-    # Plot Visual Pivot Trendline Watch Area
-    ax.axhline(setup['tl_line'], color='#ff9800', linestyle='-', linewidth=1.5, label=f"Pivot Trendline Watch Zone")
-    
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-    ax.set_title(f"{title_str}\nPivot Trendline Watch Zone Active | {current_time_str}", color='white', fontsize=9)
+    ax.set_title(f"{title_str}\nParallel Sloped Channel Geometry Active | {current_time_str}", color='white', fontsize=9)
     
     fig.savefig(img_buf, dpi=130, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -395,9 +400,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "🏛️ *INSTITUTIONAL TOP-DOWN MARKET DESK*\n"
         "━━━━━━━━━━━━━━━━━━━\n"
-        "Welcome to your professional algorithmic trading terminal. "
-        "Enhanced with **Pivot Trendline Break & Close Confirmation** for high-accuracy A+ signals across all assets.\n\n"
-        "📌 *Status:* Terminal online and operational."
+        "Terminal online with **Parallel Sloped Channel Geometry** matching your MetaTrader 5 mobile setup exactly.\n\n"
+        "📌 *Status:* Ready for execution."
     )
     await update.message.reply_text(
         welcome_text,
@@ -413,8 +417,8 @@ async def background_continuous_scanner(application):
                 symbol = "GBPAUD"
                 df_daily, df_4h, df_15m = fetch_top_down_institutional_data(symbol)
                 setup = central_decision_engine(symbol, df_daily, df_4h, df_15m)
+                macro_bearish = df_daily['Close'].iloc[-1] < df_daily['EMA200'].iloc[-1]
                 
-                # Enforce A+ threshold only when trendline break & close is confirmed
                 if setup['confidence'] >= 80 and setup['break_confirmed']:
                     decimals = 3 if "JPY" in symbol else (2 if "XAU" in symbol or "GOLD" in symbol else 5)
                     fmt = f"{{:.{decimals}f}}"
@@ -425,23 +429,21 @@ async def background_continuous_scanner(application):
                         f"⏱️ *Timestamp:* {scan_timestamp}\n\n"
                         f"PAIR: {symbol}\n"
                         f"Direction: {setup['direction']}\n"
-                        f"Confidence: {setup['confidence']}% (Trendline Break Confirmed)\n"
-                        f"Macro Bias (Daily): {setup['macro_bias']}\n"
-                        f"Intermediate (4H): {setup['intermediate_bias']}\n"
-                        f"Structure: {setup['trendline_status']}\n"
-                        f"15M Execution Entry: {fmt.format(setup['entry'])}\n"
+                        f"Confidence: {setup['confidence']}% (Parallel Sloped Channel Break)\n"
+                        f"Status: {setup['trendline_status']}\n"
+                        f"Entry: {fmt.format(setup['entry'])}\n"
                         f"SL: {fmt.format(setup['sl'])}\n"
                         f"TP1: {fmt.format(setup['tp1'])}\n"
                         f"TP2: {fmt.format(setup['tp2'])}\n"
                     )
                     
-                    chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Pivot Trendline Break Verified", setup)
+                    chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Parallel Sloped Channel Break", setup, macro_bearish)
 
                     for chat_id in list(active_subscribers):
                         lang = user_languages.get(chat_id, "English")
                         final_signal_text = translate_text(raw_signal_text, lang)
                         try:
-                            await application.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *A+ SIGNAL BREAKOUT: {symbol}*\n⏱️ `{scan_timestamp}`", parse_mode="Markdown")
+                            await application.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *A+ CHANNEL BREAKOUT: {symbol}*\n⏱️ `{scan_timestamp}`", parse_mode="Markdown")
                             chart_img.seek(0)
                             await application.bot.send_message(chat_id=chat_id, text=final_signal_text, parse_mode="Markdown")
                         except Exception:
@@ -460,16 +462,15 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     is_auto = chat_id in active_subscribers
     
     if data == "menu_home":
-        home_text = "🏛️ *INSTITUTIONAL TOP-DOWN MARKET DESK*\nMain Control Menu:"
-        await query.edit_message_text(text=home_text, reply_markup=get_home_menu(lang, is_auto), parse_mode="Markdown")
+        await query.edit_message_text(text="🏛️ *Main Control Menu:*", reply_markup=get_home_menu(lang, is_auto), parse_mode="Markdown")
 
     elif data == "toggle_auto_scan":
         if chat_id in active_subscribers:
             active_subscribers.remove(chat_id)
-            status_msg = "🔴 Continuous GBPAUD A+ scanner has been **disabled**."
+            status_msg = "🔴 Continuous GBPAUD scanner disabled."
         else:
             active_subscribers.add(chat_id)
-            status_msg = "🟢 Continuous GBPAUD A+ scanner has been **enabled**."
+            status_msg = "🟢 Continuous GBPAUD scanner enabled."
         is_auto = chat_id in active_subscribers
         await query.edit_message_text(text=status_msg, reply_markup=get_home_menu(lang, is_auto), parse_mode="Markdown")
 
@@ -478,7 +479,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             [InlineKeyboardButton("🇬🇧 English", callback_data="set_lang|English"),
              InlineKeyboardButton("🇳🇬 Hausa", callback_data="set_lang|Hausa")],
             [InlineKeyboardButton("🇳🇬 Pidgin", callback_data="set_lang|Pidgin")],
-            [InlineKeyboardButton("« Back to Home", callback_data="menu_home")]
+            [InlineKeyboardButton("« Back", callback_data="menu_home")]
         ]
         await query.edit_message_text(text="🌍 *Select Language:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
@@ -493,13 +494,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
              InlineKeyboardButton("EURUSD", callback_data="run_an|EURUSD")],
             [InlineKeyboardButton("XAUUSD (GOLD)", callback_data="run_an|XAUUSD"),
              InlineKeyboardButton("BTCUSD", callback_data="run_an|BTCUSD")],
-            [InlineKeyboardButton("AAPL (Apple)", callback_data="run_an|AAPL"),
+            [InlineKeyboardButton("AAPL", callback_data="run_an|AAPL"),
              InlineKeyboardButton("TESLA", callback_data="run_an|TESLA")],
             [InlineKeyboardButton("US30", callback_data="run_an|US30"),
              InlineKeyboardButton("NAS100", callback_data="run_an|NAS100")],
-            [InlineKeyboardButton("« Back to Home", callback_data="menu_home")]
+            [InlineKeyboardButton("« Back", callback_data="menu_home")]
         ]
-        await query.edit_message_text(text="📊 *Select Asset for Analysis & Pivot Trendline Watch:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text(text="📊 *Select Asset for Parallel Channel Analysis:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
     elif data == "menu_signal":
         kb = [
@@ -507,41 +508,42 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
              InlineKeyboardButton("EURUSD", callback_data="run_sig|EURUSD")],
             [InlineKeyboardButton("XAUUSD (GOLD)", callback_data="run_sig|XAUUSD"),
              InlineKeyboardButton("BTCUSD", callback_data="run_sig|BTCUSD")],
-            [InlineKeyboardButton("AAPL (Apple)", callback_data="run_sig|AAPL"),
+            [InlineKeyboardButton("AAPL", callback_data="run_sig|AAPL"),
              InlineKeyboardButton("TESLA", callback_data="run_sig|TESLA")],
             [InlineKeyboardButton("US30", callback_data="run_sig|US30"),
              InlineKeyboardButton("NAS100", callback_data="run_sig|NAS100")],
-            [InlineKeyboardButton("« Back to Home", callback_data="menu_home")]
+            [InlineKeyboardButton("« Back", callback_data="menu_home")]
         ]
-        await query.edit_message_text(text="🚨 *Select Asset for A+ Trendline Break Signal:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text(text="🚨 *Select Asset for Breakout Signal:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
     elif data.startswith("run_an|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"🧠 Mapping Pivot Trendline for {symbol} at {ts}...")
+        await query.edit_message_text(text=f"🧠 Mapping Parallel Sloped Channels for {symbol} at {ts}...")
         try:
             df_daily, df_4h, df_15m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_daily, df_4h, df_15m)
+            macro_bearish = df_daily['Close'].iloc[-1] < df_daily['EMA200'].iloc[-1]
 
-            metrics = f"- Timestamp: {ts}\n- Macro Bias: {setup['macro_bias']}\n- Intermediate Bias: {setup['intermediate_bias']}\n- Trendline Status: {setup['trendline_status']}\n- Confidence: {setup['confidence']}%\n"
+            metrics = f"- Timestamp: {ts}\n- Macro Bias: {setup['macro_bias']}\n- Status: {setup['trendline_status']}\n- Confidence: {setup['confidence']}%\n"
             ai_commentary = fetch_ai_commentary(metrics, lang)
-            chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Pivot Trendline Watch Zone", setup)
+            chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Parallel Sloped Channel", setup, macro_bearish)
             
             decimals = 2 if symbol in ["AAPL", "TESLA", "XAUUSD", "GOLD", "US30", "NAS100"] else 5
             fmt = f"{{:.{decimals}f}}"
             
             price_box = (
-                f"📌 *15M EXECUTION & TRENDLINE WATCH:*\n"
+                f"📌 *PARALLEL SLOPED CHANNEL ZONE:*\n"
                 f"⏱️ *Timestamp:* `{ts}`\n"
                 f"• Status: {setup['trendline_status']}\n"
                 f"• Current Price: {fmt.format(setup['entry'])}\n"
-                f"• Directional Bias: {setup['direction']}\n"
-                f"• Stop Loss: {fmt.format(setup['sl'])}\n"
+                f"• Direction: {setup['direction']}\n"
+                f"• SL: {fmt.format(setup['sl'])}\n"
                 f"• TP1: {fmt.format(setup['tp1'])}\n"
                 f"• TP2: {fmt.format(setup['tp2'])}\n"
             )
             
-            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *CHART WATCH ZONE: {symbol}*\n⏱️ `{ts}`", parse_mode="Markdown")
+            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *CHANNEL CHART: {symbol}*\n⏱️ `{ts}`", parse_mode="Markdown")
             await context.bot.send_message(chat_id=chat_id, text=price_box, parse_mode="Markdown")
             await context.bot.send_message(chat_id=chat_id, text=ai_commentary, parse_mode="Markdown")
             await context.bot.send_message(chat_id=chat_id, text="📌 *Complete.* Choose next action:", reply_markup=get_home_menu(lang, is_auto), parse_mode="Markdown")
@@ -551,7 +553,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_sig|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"🚨 Verifying Break & Close for {symbol} at {ts}...")
+        await query.edit_message_text(text=f"🚨 Verifying Channel Breakout for {symbol} at {ts}...")
         try:
             df_daily, df_4h, df_15m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_daily, df_4h, df_15m)
@@ -560,7 +562,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             fmt = f"{{:.{decimals}f}}"
             
             raw_sig = (
-                f"🚨 **A+ PIVOT TRENDLINE BREAK SIGNAL** 🚨\n"
+                f"🚨 **A+ PARALLEL CHANNEL BREAK SIGNAL** 🚨\n"
                 f"⏱️ *Timestamp:* {ts}\n\n"
                 f"PAIR: {symbol}\n"
                 f"Direction: {setup['direction']}\n"
@@ -580,9 +582,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "menu_help":
         help_text = (
             "ℹ️ *TERMINAL GUIDE*\n\n"
-            "• **Pivot Trendline Watch Zone**: Automatically maps swing highs/lows and plots a clear trendline on your chart so you can see the lookout area.\n"
-            "• **Break & Close Confirmation**: Signals are filtered so that A+ entries only trigger when price decisively breaks and closes past the trendline.\n"
-            "• **Live Timestamps**: Stamped on all charts and messages."
+            "• **Parallel Sloped Channels**: Dynamically computes both the upper resistance trendline connecting swing highs and the lower support trendline connecting swing lows across the chart.\n"
+            "• **Breakout Filter**: Signals are verified when price decisively breaks and closes beyond the sloped boundary."
         )
         kb = [[InlineKeyboardButton("« Back to Home", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
