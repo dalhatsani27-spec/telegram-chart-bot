@@ -468,6 +468,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def background_continuous_scanner(application):
     await asyncio.sleep(10)
+    CHANNEL_ID = "@InstitutionalQuantDesk"
+    
     while True:
         try:
             if active_subscribers:
@@ -493,15 +495,14 @@ async def background_continuous_scanner(application):
                     
                     chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Pullback Zone", setup)
 
-                    for chat_id in list(active_subscribers):
-                        lang = user_languages.get(chat_id, "English")
-                        final_signal_text = translate_text(raw_signal_text, lang)
-                        try:
-                            await application.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *PULLBACK SIGNAL: {symbol}*\n⏱️ `{scan_timestamp}`", parse_mode="Markdown")
-                            chart_img.seek(0)
-                            await application.bot.send_message(chat_id=chat_id, text=final_signal_text, parse_mode="Markdown")
-                        except Exception:
-                            pass
+                    lang = "English"
+                    final_signal_text = translate_text(raw_signal_text, lang)
+                    try:
+                        await application.bot.send_photo(chat_id=CHANNEL_ID, photo=chart_img, caption=f"🎯 *PULLBACK SIGNAL: {symbol}*\n⏱️ `{scan_timestamp}`", parse_mode="Markdown")
+                        chart_img.seek(0)
+                        await application.bot.send_message(chat_id=CHANNEL_ID, text=final_signal_text, parse_mode="Markdown")
+                    except Exception:
+                        pass
         except Exception:
             pass
             
