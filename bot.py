@@ -10,6 +10,7 @@ import yfinance as yf
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+from datetime import datetime
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -178,7 +179,6 @@ def clean_and_normalize_data(df):
     return df
 
 def fetch_top_down_institutional_data(symbol):
-    """Fetches Daily (Macro), 4H (Intermediate), and 15m (Execution) data concurrently."""
     df_daily = clean_and_normalize_data(fetch_twelve_data(symbol, interval="1d", outputsize=200))
     df_4h = clean_and_normalize_data(fetch_twelve_data(symbol, interval="4h", outputsize=150))
     df_15m = clean_and_normalize_data(fetch_twelve_data(symbol, interval="15m", outputsize=150))
@@ -343,7 +343,7 @@ def central_decision_engine(symbol, df_daily, df_4h, df_15m):
     }
 
 # ==========================================
-# 8. 15-MINUTE EXECUTION CHART GENERATOR
+# 8. 15-MINUTE EXECUTION CHART GENERATOR WITH LIVE TIMESTAMP
 # ==========================================
 def generate_15m_execution_chart(df_15m, title_str, setup):
     img_buf = io.BytesIO()
@@ -373,7 +373,10 @@ def generate_15m_execution_chart(df_15m, title_str, setup):
         linewidth=1, edgecolor='#2962ff', facecolor='#2962ff', alpha=0.20, label="15M POI Confluence"
     )
     ax.add_patch(rect)
-    ax.set_title(title_str, color='white', fontsize=10)
+    
+    # Stamp live generation timestamp onto chart title
+    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
+    ax.set_title(f"{title_str}\nGenerated: {current_time_str}", color='white', fontsize=9)
     
     fig.savefig(img_buf, dpi=130, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -409,7 +412,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🏛️ *INSTITUTIONAL TOP-DOWN MARKET DESK*\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         "Welcome to your professional algorithmic trading terminal. "
-        "Top-down macro-to-15m analytical execution engine ready for Forex, Stocks, Indices, and Commodities.\n\n"
+        "Top-down macro-to-15m analytical execution engine ready with live timestamp verification.\n\n"
         "📌 *Status:* Terminal online and operational."
     )
     await update.message.reply_text(
@@ -430,9 +433,11 @@ async def background_continuous_scanner(application):
                 if setup['confidence'] >= 78:
                     decimals = 3 if "JPY" in symbol else (2 if "XAU" in symbol or "GOLD" in symbol else 5)
                     fmt = f"{{:.{decimals}f}}"
+                    scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
                     
                     raw_signal_text = (
-                        f"🚨 **CONTINUOUS A+ SIGNAL ALERT (GBPAUD)** 🚨\n\n"
+                        f"🚨 **CONTINUOUS A+ SIGNAL ALERT (GBPAUD)** 🚨\n"
+                        f"⏱️ *Timestamp:* {scan_timestamp}\n\n"
                         f"PAIR: {symbol}\n"
                         f"Direction: {setup['direction']}\n"
                         f"Confidence: {setup['confidence']}% (A+ Top-Down Setup)\n"
@@ -452,7 +457,7 @@ async def background_continuous_scanner(application):
                         lang = user_languages.get(chat_id, "English")
                         final_signal_text = translate_text(raw_signal_text, lang)
                         try:
-                            await application.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *CONTINUOUS A+ SIGNAL: {symbol} (15M)*", parse_mode="Markdown")
+                            await application.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *CONTINUOUS A+ SIGNAL: {symbol} (15M)*\n⏱️ `{scan_timestamp}`", parse_mode="Markdown")
                             chart_img.seek(0)
                             await application.bot.send_message(chat_id=chat_id, text=final_signal_text, parse_mode="Markdown")
                         except Exception:
@@ -484,7 +489,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             status_msg = "🔴 Continuous GBPAUD A+ scanner has been **disabled**."
         else:
             active_subscribers.add(chat_id)
-            status_msg = "🟢 Continuous GBPAUD A+ scanner has been **enabled**. The bot is now actively monitoring price action every 5 minutes."
+            status_msg = "🟢 Continuous GBPAUD A+ scanner has been **enabled**."
         
         is_auto = chat_id in active_subscribers
         await query.edit_message_text(
@@ -553,12 +558,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data.startswith("run_an|"):
         _, symbol = data.split("|")
-        await query.edit_message_text(text=f"🧠 Running Top-Down Multi-Timeframe Analysis for {symbol} (Daily -> 4H -> 15M)...")
+        analysis_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
+        await query.edit_message_text(text=f"🧠 Running Top-Down Analysis for {symbol} at {analysis_timestamp}...")
         try:
             df_daily, df_4h, df_15m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_daily, df_4h, df_15m)
 
-            metrics_summary = f"- Macro Bias (Daily): {setup['macro_bias']}\n- Intermediate Bias (4H): {setup['intermediate_bias']}\n- Execution Alignment: {setup['execution_state']}\n- 15M Liquidity: {setup['liquidity']}\n- 15M Momentum: {setup['momentum']}\n- POI Quality: {setup['poi_desc']}\n- Confidence Score: {setup['confidence']}%\n"
+            metrics_summary = f"- Analysis Timestamp: {analysis_timestamp}\n- Macro Bias (Daily): {setup['macro_bias']}\n- Intermediate Bias (4H): {setup['intermediate_bias']}\n- Execution Alignment: {setup['execution_state']}\n- 15M Liquidity: {setup['liquidity']}\n- 15M Momentum: {setup['momentum']}\n- POI Quality: {setup['poi_desc']}\n- Confidence Score: {setup['confidence']}%\n"
             ai_commentary = fetch_ai_commentary(metrics_summary, lang)
             chart_img = generate_15m_execution_chart(df_15m, f"{symbol} Top-Down Mapped 15M Execution Level", setup)
             
@@ -567,6 +573,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             
             price_box = (
                 f"📌 *15M CURRENT EXECUTION LEVEL:*\n"
+                f"⏱️ *Timestamp:* `{analysis_timestamp}`\n"
                 f"• Current Price: {fmt.format(setup['entry'])}\n"
                 f"• Directional Bias: {setup['direction']}\n"
                 f"• Stop Loss (SL): {fmt.format(setup['sl'])}\n"
@@ -574,7 +581,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 f"• Take Profit 2 (TP2): {fmt.format(setup['tp2'])}\n"
             )
             
-            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *15M EXECUTION CHART: {symbol}*", parse_mode="Markdown")
+            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *15M EXECUTION CHART: {symbol}*\n⏱️ `{analysis_timestamp}`", parse_mode="Markdown")
             await context.bot.send_message(chat_id=chat_id, text=price_box, parse_mode="Markdown")
             await context.bot.send_message(chat_id=chat_id, text=ai_commentary, parse_mode="Markdown")
             
@@ -584,7 +591,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data.startswith("run_sig|"):
         _, symbol = data.split("|")
-        await query.edit_message_text(text=f"🚨 Generating Top-Down Institutional Signal for {symbol} in {lang}...")
+        signal_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
+        await query.edit_message_text(text=f"🚨 Generating Signal for {symbol} at {signal_timestamp}...")
         try:
             df_daily, df_4h, df_15m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_daily, df_4h, df_15m)
@@ -593,7 +601,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             fmt = f"{{:.{decimals}f}}"
             
             raw_signal_text = (
-                f"🚨 **TOP-DOWN INSTITUTIONAL SIGNAL** 🚨\n\n"
+                f"🚨 **TOP-DOWN INSTITUTIONAL SIGNAL** 🚨\n"
+                f"⏱️ *Timestamp:* {signal_timestamp}\n\n"
                 f"PAIR: {symbol}\n"
                 f"Direction: {setup['direction']}\n"
                 f"Confidence: {setup['confidence']}%\n"
@@ -616,9 +625,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "menu_help":
         help_text = (
             "ℹ️ *TERMINAL GUIDE*\n\n"
+            "• **Live Timestamps**: Every generated chart image and analysis report includes an explicit live UTC/WAT timestamp to prove current market execution.\n"
             "• **Continuous A+ Scanner**: Toggles high-frequency automated monitoring for GBPAUD.\n"
-            "• **Run Analysis**: Performs full Top-Down analysis (Daily -> 4H -> 15M) across Forex, Stocks (AAPL, TESLA), Indices (US30, NAS100), and Commodities.\n"
-            "• **Generate Signal**: Broadcasts exact entry, SL, and TP parameters.\n"
+            "• **Run Analysis**: Full Top-Down analysis across Forex, Stocks, and Indices.\n"
             "• **Language**: Switch instantly between English, Hausa, and Pidgin.\n\n"
             "Use `/start` anytime to pull up the primary dashboard menu."
         )
