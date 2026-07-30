@@ -362,7 +362,7 @@ async def background_gbpaud_scan(context: ContextTypes.DEFAULT_TYPE):
         if not setup:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"📊 *Hourly Automated Scan: {raw_symbol} ({tf.upper())}*\n\n"
+                text=f"📊 *Hourly Automated Scan: {raw_symbol} ({tf.upper()})*\n\n"
                      f"⚠️ *Market Skipped:* {skip_reason}\n"
                      f"_Continuing to monitor every hour automatically._",
                 parse_mode="Markdown"
@@ -416,16 +416,14 @@ async def background_gbpaud_scan(context: ContextTypes.DEFAULT_TYPE):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     
-    # Clear any existing jobs to avoid duplicates if /start is pressed twice
     current_jobs = context.job_queue.get_jobs_by_name("gbpaud_hourly_job")
     for job in current_jobs:
         job.schedule_removal()
         
-    # Schedule the background scan to run every 1 hour (3600 seconds)
     context.job_queue.run_repeating(
         background_gbpaud_scan,
         interval=3600,
-        first=10, # Runs 10 seconds after clicking /start for the first time
+        first=10,
         chat_id=chat_id,
         name="gbpaud_hourly_job"
     )
@@ -438,7 +436,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Retained manual override command if you want to check other symbols instantly
     chat_id = update.effective_chat.id
     args = context.args
     raw_symbol = args[0].upper() if len(args) > 0 else "GBPAUD"
