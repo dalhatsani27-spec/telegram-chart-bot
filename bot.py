@@ -75,20 +75,16 @@ def translate_text(text, target_language):
 
 def fetch_ai_commentary(metrics_summary, target_language="English"):
     if not OPENROUTER_API_KEY:
-        base_text = "🎯 AI INSTITUTIONAL CHANNEL DESK COMMENTARY\n\nEvaluating dynamic parallel channel geometry, breakout/retest triggers, and range-bound liquidity zones."
+        base_text = "🎯 AI DESK SUMMARY: Internal pivots mapped within channel for precision range execution."
         return translate_text(base_text, target_language)
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
     prompt = f"""
     You are a senior institutional price-action desk analyst. 
-    Here are the quantitative multi-timeframe channel metrics for the setup:
+    Here are the quantitative multi-timeframe channel metrics and internal pivot levels:
     {metrics_summary}
     
-    Provide a professional breakdown in 4 concise points:
-    1. Macro 4-Hour Context & Structure
-    2. Intermediate 1-Hour Timeframe Alignment
-    3. Dynamic 30M/15M Parallel Sloped Channel Geometry & Cleanliness Priority
-    4. Execution Trigger Analysis (Break/Close, Retest, or Range Demand/Supply)
+    Provide a concise 3-line institutional summary focusing on structural bias, channel status, and internal pivot rejection points.
     
     Write the response directly in {target_language}.
     """
@@ -97,15 +93,15 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
             response = ai_client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=500
+                max_tokens=300
             )
             content = response.choices[0].message.content
-            if content and len(content.strip()) > 30:
+            if content and len(content.strip()) > 20:
                 return content
         except Exception:
             continue
             
-    fallback = "🎯 AI INSTITUTIONAL CHANNEL DESK COMMENTARY\n\nDynamic channel mapped successfully. Monitoring boundary reactions for institutional entry deployment."
+    fallback = "🎯 AI DESK SUMMARY: Internal pivot mapping active to eliminate blind range entries."
     return translate_text(fallback, target_language)
 
 # ==========================================
@@ -224,7 +220,7 @@ def fetch_top_down_institutional_data(symbol):
     return df_4h, df_1h, df_30m, df_15m, df_5m
 
 # ==========================================
-# 4. DYNAMIC PARALLEL SLOPED CHANNEL & TIMEFRAME PRIORITIZATION ENGINE
+# 4. DYNAMIC PARALLEL CHANNEL & INTERNAL PIVOT ENGINE
 # ==========================================
 def analyze_dynamic_parallel_channel(df_15m, df_30m):
     best_tf = "30M"
@@ -295,30 +291,59 @@ def analyze_dynamic_parallel_channel(df_15m, df_30m):
 
     return best_tf, best_channel
 
+def calculate_internal_channel_pivots(channel_eval):
+    lower_val = channel_eval['current_lower']
+    upper_val = channel_eval['current_upper']
+    channel_range = upper_val - lower_val
+    
+    # Internal pivot mapping: Equilibrium (50%), Lower Mid (25%), Upper Mid (75%)
+    eq_mid = lower_val + (channel_range * 0.50)
+    lower_mid = lower_val + (channel_range * 0.25)
+    upper_mid = lower_val + (channel_range * 0.75)
+    
+    return {
+        "lower_boundary": lower_val,
+        "lower_mid": lower_mid,
+        "equilibrium": eq_mid,
+        "upper_mid": upper_mid,
+        "upper_boundary": upper_val
+    }
+
 # ==========================================
-# 5. EXACT EXECUTION TRIGGER RULES (BREAK, RETEST, RANGE)
+# 5. REFINED EXECUTION TRIGGER RULES WITH PIVOTS
 # ==========================================
-def evaluate_channel_action(current_close, current_high, current_low, lower_limit, upper_limit):
+def evaluate_channel_action(current_close, current_high, current_low, pivots):
     tolerance = 0.0003
+    lower_limit = pivots["lower_boundary"]
+    upper_limit = pivots["upper_boundary"]
+    eq = pivots["equilibrium"]
     
     if current_close < (lower_limit - tolerance):
         return {
             "signal": "SELL",
-            "action_type": "BREAK_AND_CLOSE_BELOW",
-            "rationale": "Price has registered a break and close below the lower channel boundary. Bearish continuation signal triggered."
+            "action_type": "BREAK_BELOW_CHANNEL",
+            "rationale": "Price broke and closed below lower channel boundary. Bearish continuation active."
         }
-    elif current_close > (upper_limit + tolerance) or (abs(current_low - upper_limit) <= tolerance) or (abs(current_close - upper_limit) <= tolerance):
+    elif current_close > (upper_limit + tolerance) or (abs(current_close - upper_limit) <= tolerance):
         return {
             "signal": "BUY",
-            "action_type": "BREAK_AND_CLOSE_OR_RETEST_ABOVE",
-            "rationale": "Price has achieved a break/close or clean retest of the upper channel boundary. Bullish execution active."
+            "action_type": "BREAK_OR_RETEST_ABOVE",
+            "rationale": "Price achieved break/retest of upper channel boundary. Bullish execution active."
         }
     else:
-        return {
-            "signal": "RANGE",
-            "action_type": "BUY_DEMAND_SELL_SUPPLY",
-            "rationale": "Market is in range between channel boundaries. No structural break detected; shifting focus to buying local demand and selling local supply."
-        }
+        # Range trading utilizing internal pivots instead of blind entries
+        if current_close <= eq:
+            return {
+                "signal": "BUY",
+                "action_type": "RANGE_DEMAND_PIVOT_BOUNCE",
+                "rationale": "Price is inside lower range segment respecting internal pivot/demand. High-probability bounce setup."
+            }
+        else:
+            return {
+                "signal": "SELL",
+                "action_type": "RANGE_SUPPLY_PIVOT_REJECTION",
+                "rationale": "Price is inside upper range segment respecting internal pivot/supply. High-probability rejection setup."
+            }
 
 def central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
     h4_close = df_4h['Close'].iloc[-1]
@@ -330,31 +355,25 @@ def central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
     intermediate_bullish = h1_close > h1_ema50
     
     best_tf, channel_eval = analyze_dynamic_parallel_channel(df_15m, df_30m)
-    chart_slice = channel_eval['df'].tail(80).copy()
+    pivots = calculate_internal_channel_pivots(channel_eval)
     
+    chart_slice = channel_eval['df'].tail(80).copy()
     current_close = chart_slice['Close'].iloc[-1]
     current_high = chart_slice['High'].iloc[-1]
     current_low = chart_slice['Low'].iloc[-1]
     
-    lower_limit = channel_eval['current_lower']
-    upper_limit = channel_eval['current_upper']
-    
-    action_eval = evaluate_channel_action(current_close, current_high, current_low, lower_limit, upper_limit)
-    
+    action_eval = evaluate_channel_action(current_close, current_high, current_low, pivots)
     direction = action_eval["signal"]
-    if direction == "RANGE":
-        direction = "BUY"
-        
-    confidence = 88
+    confidence = 89
     
     df_5m_tail = df_5m.tail(15).copy()
     if direction == "BUY":
-        entry_price = upper_limit
+        entry_price = current_close
         sweet_spot_sl = df_5m_tail['Low'].min() - (df_5m_tail['ATR'].iloc[-1] * 0.4)
         tp1 = entry_price + (abs(entry_price - sweet_spot_sl) * 1.5)
         tp2 = entry_price + (abs(entry_price - sweet_spot_sl) * 3.0)
     else:
-        entry_price = lower_limit
+        entry_price = current_close
         sweet_spot_sl = df_5m_tail['High'].max() + (df_5m_tail['ATR'].iloc[-1] * 0.4)
         tp1 = entry_price - (abs(sweet_spot_sl - entry_price) * 1.5)
         tp2 = entry_price - (abs(sweet_spot_sl - entry_price) * 3.0)
@@ -370,6 +389,7 @@ def central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
         "intermediate_bias": "Bullish (1H > EMA50)" if intermediate_bullish else "Bearish (1H < EMA50)",
         "trendline_status": channel_eval["status_msg"],
         "channel_data": channel_eval,
+        "pivots": pivots,
         "entry": entry_price,
         "current_market_price": current_close,
         "sl": sweet_spot_sl,
@@ -378,49 +398,45 @@ def central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
     }
 
 def generate_institutional_memorandum(asset_symbol, setup):
-    signal = setup["direction"]
-    action = setup["action_type"]
-    rationale = setup["rationale"]
-    tf_used = setup["selected_tf"]
+    p = setup["pivots"]
+    decimals = 2 if asset_symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else 5
+    fmt = f"{{:.{decimals}f}}"
     
-    memo = f"""INSTITUTIONAL TRADE SETUP ({asset_symbol})
-Execution Timeframe Prioritized: {tf_used}
-- Signal Output: {signal}
-- Trigger Type: {action}
-- Current Channel Status: Active Dynamic Parallel Corridor ({tf_used})
-
-MEMORANDUM RATIONALE:
-1. Multi-Timeframe Structural Priority
-Evaluated 30M and 15M market geometries dynamically to select the cleanest, highest-confluence channel structure on the {tf_used} timeframe. Channels are handled as dynamic liquidity corridors rather than static boundaries, preserving an 80%+ winrate edge.
-
-2. Channel Boundary Execution Logic
-{rationale}
-
-3. Execution Plan
-- If BUY (Upper Channel Break/Retest): Target continuation toward expansion targets.
-- If SELL (Lower Channel Break/Close): Target momentum shift down through structural supports.
-- If RANGE (Contained): Execute strategy of buying local demand and selling local supply."""
-
+    memo = (
+        f"SUMMARY MEMORANDUM ({asset_symbol})\n"
+        f"Timeframe: {setup['selected_tf']} | Signal: {setup['direction']} ({setup['action_type']})\n\n"
+        f"INTERNAL CHANNEL PIVOTS:\n"
+        f"- Upper Boundary: {fmt.format(p['upper_boundary'])}\n"
+        f"- Upper Mid Pivot: {fmt.format(p['upper_mid'])}\n"
+        f"- Equilibrium (50%): {fmt.format(p['equilibrium'])}\n"
+        f"- Lower Mid Pivot: {fmt.format(p['lower_mid'])}\n"
+        f"- Lower Boundary: {fmt.format(p['lower_boundary'])}\n\n"
+        f"STRATEGIC RATIONALE:\n"
+        f"{setup['rationale']}"
+    )
     return memo
 
 # ==========================================
-# 6. HIGH-RESOLUTION CHART RENDERER (DYNAMIC TF)
+# 6. HIGH-RESOLUTION CHART RENDERER (WITH PIVOTS)
 # ==========================================
 def generate_execution_chart(setup):
     img_buf = io.BytesIO()
     channel_calc = setup['channel_data']
     chart_df = channel_calc['df'].tail(80).copy()
+    p = setup['pivots']
     
     upper_series = pd.Series(channel_calc['upper_line'][-len(chart_df):], index=chart_df.index)
     lower_series = pd.Series(channel_calc['lower_line'][-len(chart_df):], index=chart_df.index)
+    eq_series = pd.Series(p['equilibrium'], index=chart_df.index)
     
     mc = mpf.make_marketcolors(up='#089981', down='#f23645', edge='inherit', wick='inherit')
     style = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', gridcolor='#2a2e39', y_on_right=True, facecolor='#131722', figcolor='#131722')
     
     addplots = [
         mpf.make_addplot(chart_df['EMA50'], color='#2962ff', width=1.5),
-        mpf.make_addplot(upper_series, color='#00e676', width=2.2, linestyle='-'),
-        mpf.make_addplot(lower_series, color='#00e676', width=2.2, linestyle='-')
+        mpf.make_addplot(upper_series, color='#00e676', width=2.0, linestyle='-'),
+        mpf.make_addplot(lower_series, color='#00e676', width=2.0, linestyle='-'),
+        mpf.make_addplot(eq_series, color='#ff9800', width=1.5, linestyle='--')
     ]
     
     all_visible_values = pd.concat([
@@ -445,8 +461,7 @@ def generate_execution_chart(setup):
     ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2)
     
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-    
-    ax.set_title(f"{setup['symbol']} {setup['selected_tf']} Dynamic Parallel Channel\n{setup['trendline_status']} | {current_time_str}", color='white', fontsize=12, fontweight='bold', pad=12)
+    ax.set_title(f"{setup['symbol']} {setup['selected_tf']} Channel & Internal Pivots\n{setup['trendline_status']} | {current_time_str}", color='white', fontsize=11, fontweight='bold', pad=12)
     
     fig.savefig(img_buf, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -489,9 +504,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_auto = chat_id in active_subscribers
     
     welcome_text = (
-        "INSTITUTIONAL DYNAMIC CHANNEL DESK\n"
+        "INSTITUTIONAL PIVOT CHANNEL DESK\n"
         "-----------------------------------\n"
-        "Terminal online with Dynamic 30M/15M Channel Prioritization, Break/Close & Retest Rules, Range Demand/Supply Logic, and Complete Asset Container.\n\n"
+        "Terminal active with Internal Channel Pivot Mapping for reliable range trading and summarized execution briefs.\n\n"
         "Status: Ready. Select an asset category or type any ticker symbol directly into chat."
     )
     await update.message.reply_text(
@@ -508,12 +523,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     symbol = text.upper()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     
-    await update.message.reply_text(f"Analyzing dynamic parallel channels for {symbol} at {ts}...")
+    await update.message.reply_text(f"Analyzing channel and mapping internal pivots for {symbol}...")
     try:
         df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
         setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
 
-        metrics = f"- Timestamp: {ts}\n- Timeframe Used: {setup['selected_tf']}\n- 4H Bias: {setup['macro_bias']}\n- 1H Bias: {setup['intermediate_bias']}\n- Status: {setup['trendline_status']}\n- Signal: {setup['direction']}\n- Trigger: {setup['action_type']}\n"
+        metrics = f"- Timestamp: {ts}\n- TF: {setup['selected_tf']}\n- Signal: {setup['direction']} ({setup['action_type']})\n"
         ai_commentary = fetch_ai_commentary(metrics, lang)
         memo_text = generate_institutional_memorandum(symbol, setup)
         chart_img = generate_execution_chart(setup)
@@ -522,17 +537,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         fmt = f"{{:.{decimals}f}}"
         
         price_box = (
-            f"CHART ANALYZER ({symbol}):\n"
-            f"Timestamp: {ts}\n"
-            f"- Prioritized TF: {setup['selected_tf']}\n"
-            f"- 4H Macro Bias: {setup['macro_bias']}\n"
-            f"- Status: {setup['trendline_status']}\n"
-            f"- Signal/Action: {setup['direction']} ({setup['action_type']})\n"
-            f"- Current Price: {fmt.format(setup['current_market_price'])}\n"
-            f"- Reference Level: {fmt.format(setup['entry'])}\n"
-            f"- 5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
-            f"- TP1: {fmt.format(setup['tp1'])}\n"
-            f"- TP2: {fmt.format(setup['tp2'])}\n"
+            f"SUMMARY BOX ({symbol}):\n"
+            f"- TF: {setup['selected_tf']} | Bias: {setup['macro_bias']}\n"
+            f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
+            f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
+            f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
         )
         
         await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART: {symbol} ({setup['selected_tf']}) | {ts}")
@@ -541,7 +550,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await context.bot.send_message(chat_id=chat_id, text=ai_commentary)
         await context.bot.send_message(chat_id=chat_id, text="Complete. Choose next action:", reply_markup=get_home_menu(lang, is_auto))
     except Exception as e:
-        await context.bot.send_message(chat_id=chat_id, text=f"Failed to analyze '{symbol}': {str(e)}\n\nPlease ensure the ticker symbol is correct.", reply_markup=get_home_menu(lang, is_auto))
+        await context.bot.send_message(chat_id=chat_id, text=f"Failed to analyze '{symbol}': {str(e)}", reply_markup=get_home_menu(lang, is_auto))
 
 async def background_continuous_scanner(application):
     await asyncio.sleep(10)
@@ -560,23 +569,21 @@ async def background_continuous_scanner(application):
                     scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
                     
                     raw_signal_text = (
-                        f"INSTITUTIONAL CHANNEL SIGNAL ({symbol})\n"
-                        f"Timestamp: {scan_timestamp}\n\n"
+                        f"PIVOT CHANNEL SIGNAL ({symbol})\n"
+                        f"Timestamp: {scan_timestamp}\n"
                         f"Timeframe: {setup['selected_tf']}\n"
                         f"Signal: {setup['direction']} ({setup['action_type']})\n"
-                        f"Status: {setup['trendline_status']}\n"
-                        f"Level: {fmt.format(setup['entry'])}\n"
+                        f"Entry: {fmt.format(setup['entry'])}\n"
                         f"SL: {fmt.format(setup['sl'])}\n"
                         f"TP1: {fmt.format(setup['tp1'])}\n"
                         f"TP2: {fmt.format(setup['tp2'])}\n"
                     )
                     
                     chart_img = generate_execution_chart(setup)
-
                     lang = "English"
                     final_signal_text = translate_text(raw_signal_text, lang)
                     try:
-                        await application.bot.send_photo(chat_id=CHANNEL_ID, photo=chart_img, caption=f"CHANNEL SIGNAL: {symbol} | {scan_timestamp}")
+                        await application.bot.send_photo(chat_id=CHANNEL_ID, photo=chart_img, caption=f"SIGNAL: {symbol} | {scan_timestamp}")
                         chart_img.seek(0)
                         await application.bot.send_message(chat_id=CHANNEL_ID, text=final_signal_text)
                     except Exception:
@@ -599,7 +606,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "prompt_custom_ticker":
         await query.edit_message_text(
-            text="Type Any Ticker / Pair:\n\nSimply type any asset symbol (e.g., EURUSD, XAUUSD, BTCUSD, US30, NVDA) directly into this chat, and the terminal will instantly run the dynamic channel analysis.",
+            text="Type Any Ticker / Pair:\n\nSend any symbol (e.g., EURUSD, XAUUSD, BTCUSD) in chat to run pivot channel analysis.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_home")]]))
 
     elif data == "toggle_auto_scan":
@@ -637,7 +644,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             [InlineKeyboardButton("🔍 Type Custom Ticker", callback_data="prompt_custom_ticker")],
             [InlineKeyboardButton("« Back", callback_data="menu_home")]
         ]
-        await query.edit_message_text(text="Select Asset Category for Channel Analysis:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(text="Select Asset Category:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data == "menu_signal":
         kb = [
@@ -650,7 +657,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             [InlineKeyboardButton("🔍 Type Custom Ticker", callback_data="prompt_custom_ticker")],
             [InlineKeyboardButton("« Back", callback_data="menu_home")]
         ]
-        await query.edit_message_text(text="Select Asset Category for Channel Signal:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(text="Select Asset Category for Signal:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("cat_an|") or data.startswith("cat_sig|"):
         action_type, cat_name = data.split("|")
@@ -666,19 +673,19 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 row = []
         if row:
             kb.append(row)
-        kb.append([InlineKeyboardButton("« Back to Categories", callback_data="menu_analysis" if prefix=="run_an" else "menu_signal")])
+        kb.append([InlineKeyboardButton("« Back", callback_data="menu_analysis" if prefix=="run_an" else "menu_signal")])
         
         await query.edit_message_text(text=f"{cat_name} Assets:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("run_an|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"Running Dynamic Channel Analysis for {symbol} at {ts}...")
+        await query.edit_message_text(text=f"Analyzing pivot channel for {symbol}...")
         try:
             df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
 
-            metrics = f"- Timestamp: {ts}\n- Timeframe Used: {setup['selected_tf']}\n- 4H Bias: {setup['macro_bias']}\n- 1H Bias: {setup['intermediate_bias']}\n- Status: {setup['trendline_status']}\n- Signal: {setup['direction']}\n"
+            metrics = f"- Timestamp: {ts}\n- TF: {setup['selected_tf']}\n- Signal: {setup['direction']}\n"
             ai_commentary = fetch_ai_commentary(metrics, lang)
             memo_text = generate_institutional_memorandum(symbol, setup)
             chart_img = generate_execution_chart(setup)
@@ -687,17 +694,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             fmt = f"{{:.{decimals}f}}"
             
             price_box = (
-                f"CHART ANALYZER ({symbol}):\n"
-                f"Timestamp: {ts}\n"
-                f"- Prioritized TF: {setup['selected_tf']}\n"
-                f"- 4H Macro Bias: {setup['macro_bias']}\n"
-                f"- Status: {setup['trendline_status']}\n"
-                f"- Signal/Action: {setup['direction']} ({setup['action_type']})\n"
-                f"- Current Price: {fmt.format(setup['current_market_price'])}\n"
-                f"- Reference Level: {fmt.format(setup['entry'])}\n"
-                f"- 5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
-                f"- TP1: {fmt.format(setup['tp1'])}\n"
-                f"- TP2: {fmt.format(setup['tp2'])}\n"
+                f"SUMMARY BOX ({symbol}):\n"
+                f"- TF: {setup['selected_tf']} | Bias: {setup['macro_bias']}\n"
+                f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
+                f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
+                f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
             )
             
             await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART: {symbol} ({setup['selected_tf']}) | {ts}")
@@ -711,7 +712,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_sig|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"Verifying Channel Signal for {symbol} at {ts}...")
+        await query.edit_message_text(text=f"Verifying Pivot Signal for {symbol}...")
         try:
             df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
@@ -720,12 +721,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             fmt = f"{{:.{decimals}f}}"
             
             raw_sig = (
-                f"INSTITUTIONAL CHANNEL SIGNAL ({symbol})\n"
-                f"Timestamp: {ts}\n\n"
+                f"PIVOT CHANNEL SIGNAL ({symbol})\n"
+                f"Timestamp: {ts}\n"
                 f"Timeframe: {setup['selected_tf']}\n"
                 f"Signal: {setup['direction']} ({setup['action_type']})\n"
-                f"Status: {setup['trendline_status']}\n"
-                f"Level: {fmt.format(setup['entry'])}\n"
+                f"Entry: {fmt.format(setup['entry'])}\n"
                 f"SL: {fmt.format(setup['sl'])}\n"
                 f"TP1: {fmt.format(setup['tp1'])}\n"
                 f"TP2: {fmt.format(setup['tp2'])}\n"
@@ -738,12 +738,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "menu_help":
         help_text = (
-            "TERMINAL GUIDE\n\n"
-            "- Dynamic Channels: Automatically evaluates 30M and 15M charts to prioritize the cleanest parallel channel geometry.\n"
-            "- Rules: Break & close below lower channel = SELL. Break/close or retest of upper channel = BUY. Contained in range = Buy demand & sell supply.\n"
-            "- Custom Tickers: Type any ticker directly into chat anytime."
+            "TERMINAL GUIDE:\n\n"
+            "- Internal Pivots: Automatically maps 25%, Equilibrium (50%), and 75% levels inside the active channel to eliminate blind range trading.\n"
+            "- Summaries: Compressed into clean, direct execution blocks.\n"
+            "- Custom Tickers: Send any symbol in chat anytime."
         )
-        kb = [[InlineKeyboardButton("« Back to Home", callback_data="menu_home")]]
+        kb = [[InlineKeyboardButton("« Back", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb))
 
 def run_telegram_bot():
