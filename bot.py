@@ -226,8 +226,9 @@ def analyze_backend_line_geometry(df_30m):
     slope, intercept = np.polyfit(x_vals, close_prices, 1)
     middle_line = slope * x_vals + intercept
     
-    upper_intercept = high_prices.max() - slope * (np.argmax(high_prices))
-    lower_intercept = low_prices.min() - slope * (np.argmin(low_prices))
+    # Use localized high/low anchoring for accurate channel boundaries
+    upper_intercept = high_prices[-30:].max() - slope * x_vals[-30]
+    lower_intercept = low_prices[-30:].min() - slope * x_vals[-30]
     upper_line = slope * x_vals + upper_intercept
     lower_line = slope * x_vals + lower_intercept
 
@@ -287,42 +288,34 @@ def analyze_backend_line_geometry(df_30m):
         "status_msg": status_msg,
         "is_valid": is_valid,
         "invalidation_threshold": invalidation_threshold,
-        "calculated_bias": bias
+        "calculated_bias": bias,
+        "position_in_channel": position_in_channel
     }
 
 def evaluate_geometry_signals(geom_eval, macro_bullish):
-    bias = geom_eval['calculated_bias']
-    current_close = geom_eval['df']['Close'].iloc[-1]
-    lower_line_val = geom_eval['current_lower']
-    upper_line_val = geom_eval['current_upper']
-    channel_range = upper_line_val - lower_line_val
-    
-    if channel_range == 0:
-        channel_range = 0.001
-        
-    relative_position = (current_close - lower_line_val) / channel_range
+    relative_position = geom_eval.get('position_in_channel', 0.5)
     
     if not geom_eval['is_valid']:
         return {
-            "signal": "SELL" if bias == "BUY" else "BUY",
+            "signal": "BUY" if geom_eval['calculated_bias'] == "SELL" else "SELL",
             "action_type": "PATTERN_INVALIDATED_REVERSAL",
             "rationale": "Pattern is INVALID. Price breached structural invalidation threshold."
         }
     
-    # BOUNDARY REVERSAL OVERRIDES: Respect floor and ceiling extremes
-    if relative_position <= 0.20:
+    # STRICT BOUNDARY OVERRIDES: Force mean-reversion at structural floors/ceilings regardless of trend slope
+    if relative_position <= 0.25:
         return {
             "signal": "BUY",
             "action_type": "LOWER_CHANNEL_SUPPORT_BOUNCE",
-            "rationale": "Price is testing/sweeping the lower channel boundary floor. High probability mean-reversion or support reaction."
+            "rationale": f"Price is at structural channel floor (relative pos: {relative_position:.2f}). Triggering support reaction buy."
         }
-    elif relative_position >= 0.80:
+    elif relative_position >= 0.75:
         return {
             "signal": "SELL",
             "action_type": "UPPER_CHANNEL_RESISTANCE_REJECTION",
-            "rationale": "Price is testing the upper channel boundary ceiling. High probability resistance rejection."
+            "rationale": f"Price is at structural channel ceiling (relative pos: {relative_position:.2f}). Triggering resistance rejection sell."
         }
-    elif bias == "BUY":
+    elif geom_eval['calculated_bias'] == "BUY":
         return {
             "signal": "BUY",
             "action_type": "SUPPORT_BOUNCE_OR_CONTINUATION",
