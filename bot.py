@@ -226,7 +226,6 @@ def analyze_backend_line_geometry(df_30m):
     slope, intercept = np.polyfit(x_vals, close_prices, 1)
     middle_line = slope * x_vals + intercept
     
-    # Use localized high/low anchoring for accurate channel boundaries
     upper_intercept = high_prices[-30:].max() - slope * x_vals[-30]
     lower_intercept = low_prices[-30:].min() - slope * x_vals[-30]
     upper_line = slope * x_vals + upper_intercept
@@ -294,6 +293,8 @@ def analyze_backend_line_geometry(df_30m):
 
 def evaluate_geometry_signals(geom_eval, macro_bullish):
     relative_position = geom_eval.get('position_in_channel', 0.5)
+    current_close = geom_eval['df']['Close'].iloc[-1]
+    support_floor = geom_eval['support_level']
     
     if not geom_eval['is_valid']:
         return {
@@ -302,12 +303,12 @@ def evaluate_geometry_signals(geom_eval, macro_bullish):
             "rationale": "Pattern is INVALID. Price breached structural invalidation threshold."
         }
     
-    # STRICT BOUNDARY OVERRIDES: Force mean-reversion at structural floors/ceilings regardless of trend slope
-    if relative_position <= 0.25:
+    # SUPPORT FLOOR DEFENSE: Force support bounce buy if price tests lower horizontal floor without destructive breakdown closure
+    if relative_position <= 0.25 or current_close <= support_floor * 1.003:
         return {
             "signal": "BUY",
             "action_type": "LOWER_CHANNEL_SUPPORT_BOUNCE",
-            "rationale": f"Price is at structural channel floor (relative pos: {relative_position:.2f}). Triggering support reaction buy."
+            "rationale": f"Price tested structural support floor ({support_floor:.2f}) and held without breakdown closure. Triggering support bounce buy."
         }
     elif relative_position >= 0.75:
         return {
