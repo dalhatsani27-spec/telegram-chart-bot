@@ -76,13 +76,13 @@ def translate_text(text, target_language):
 
 def fetch_ai_commentary(metrics_summary, target_language="English"):
     if not OPENROUTER_API_KEY:
-        base_text = "🎯 INSTITUTIONAL DESK SUMMARY: Backend geometry and pattern validity evaluated."
+        base_text = "🎯 INSTITUTIONAL DESK SUMMARY: Dynamic price geometry and multi-factor confidence evaluated."
         return translate_text(base_text, target_language)
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
     prompt = f"""
     You are a professional price action desk analyst. 
-    Here are the live structural and geometric metrics:
+    Here are the live structural and geometric metrics derived from actual price data:
     {metrics_summary}
     
     Provide a concise 3-line institutional summary focusing on pattern recognition, validity status, and breakout validation.
@@ -103,7 +103,7 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
         except Exception:
             continue
             
-    fallback = "🎯 INSTITUTIONAL DESK SUMMARY: Backend geometry synchronized with structural validation rules."
+    fallback = "🎯 INSTITUTIONAL DESK SUMMARY: Dynamic market geometry verified through calculated price structures."
     return translate_text(fallback, target_language)
 
 # ==========================================
@@ -210,7 +210,7 @@ def fetch_institutional_multi_tf_data(symbol):
     return df_30m, macro_close > macro_ema, macro_ema
 
 # ==========================================
-# 4. BACKEND LINE-CHART GEOMETRY & PATTERN ENGINE
+# 4. TRUE DYNAMIC GEOMETRY & PATTERN ENGINE
 # ==========================================
 def analyze_backend_line_geometry(df_30m):
     close_prices = df_30m['Close'].values
@@ -220,29 +220,65 @@ def analyze_backend_line_geometry(df_30m):
 
     resistance_level = float(high_prices.max())
     support_level = float(low_prices.min())
+    current_close = float(close_prices[-1])
     
+    # Calculate true linear regression slope for trend direction
     span = len(df_30m)
-    slope = (close_prices[-1] - close_prices[0]) / span if span > 0 else 0
-    intercept_mid = close_prices[0] - slope * 0
-    middle_line = slope * x_vals + intercept_mid
+    slope, intercept = np.polyfit(x_vals, close_prices, 1)
+    middle_line = slope * x_vals + intercept
     
-    # Properly anchor upper and lower trendlines to swing highs and lows
+    # Dynamic trendline anchor points
     upper_intercept = high_prices.max() - slope * (np.argmax(high_prices))
     lower_intercept = low_prices.min() - slope * (np.argmin(low_prices))
-    
     upper_line = slope * x_vals + upper_intercept
     lower_line = slope * x_vals + lower_intercept
 
-    current_close = close_prices[-1]
-    invalidation_threshold = support_level * 0.995
+    # True Pattern Classification based on slope and price location
+    recent_momentum = close_prices[-1] - close_prices[-10] if span >= 10 else 0
     
-    # Validity check: Pattern remains VALID if current close holds above invalidation threshold
-    is_valid = current_close >= invalidation_threshold
-    status_msg = "VALID Confirmed Structure" if is_valid else "INVALID (Structure Broken / Threshold Breached)"
-    confidence_score = 85.0 if is_valid else 35.0
+    if slope > 0.0001 and current_close >= middle_line[-1]:
+        pattern_name = "Ascending Channel / Bullish Continuation Structure"
+        bias = "BUY"
+    elif slope < -0.0001 and current_close <= middle_line[-1]:
+        pattern_name = "Descending Channel / Bearish Impulsive Trend"
+        bias = "SELL"
+    else:
+        # Check for Head and Shoulders variants based on swing extremes
+        mid_idx = span // 2
+        left_shoulder = high_prices[:mid_idx].max()
+        head = high_prices.max()
+        right_shoulder = high_prices[mid_idx:].max()
+        
+        if head > left_shoulder and head > right_shoulder and current_close < middle_line[-1]:
+            pattern_name = "Normal Head and Shoulders (Resistance Rejection)"
+            bias = "SELL"
+        else:
+            pattern_name = "Inverted Head and Shoulders (Support Accumulation / Breaker Block)"
+            bias = "BUY"
 
-    # Correct naming convention: Bullish setups are Inverted Head and Shoulders
-    pattern_name = "Inverted Head and Shoulders (Right Shoulder Bounce / Breaker Block)"
+    # True Dynamic Confidence Calculation based on volatility, distance from bounds, and trend consistency
+    atr = df_30m['ATR'].iloc[-1] if 'ATR' in df_30m.columns else (resistance_level - support_level) * 0.05
+    if atr == 0: atr = 0.001
+    
+    channel_width = upper_line[-1] - lower_line[-1]
+    position_in_channel = (current_close - lower_line[-1]) / channel_width if channel_width != 0 else 0.5
+    position_in_channel = np.clip(position_in_channel, 0.0, 1.0)
+    
+    # Mathematical confidence score (ranges dynamically from 45.0% to 94.5%)
+    base_confidence = 60.0
+    trend_strength_bonus = min(20.0, abs(slope) * 10000)
+    position_bonus = (1.0 - abs(position_in_channel - 0.5)) * 14.5
+    confidence_score = float(np.clip(base_confidence + trend_strength_bonus + position_bonus, 45.0, 94.5))
+
+    # True Invalidation Threshold Calculation
+    if bias == "BUY":
+        invalidation_threshold = support_level - (atr * 0.5)
+        is_valid = current_close >= invalidation_threshold
+    else:
+        invalidation_threshold = resistance_level + (atr * 0.5)
+        is_valid = current_close <= invalidation_threshold
+
+    status_msg = "VALID Confirmed Structure" if is_valid else "INVALID (Structure Broken / Threshold Breached)"
     
     return {
         "df": df_30m,
@@ -259,30 +295,29 @@ def analyze_backend_line_geometry(df_30m):
         "confidence_score": confidence_score,
         "status_msg": status_msg,
         "is_valid": is_valid,
-        "invalidation_threshold": invalidation_threshold
+        "invalidation_threshold": invalidation_threshold,
+        "calculated_bias": bias
     }
 
 def evaluate_geometry_signals(geom_eval, macro_bullish):
-    df = geom_eval['df']
-    current_close = df['Close'].iloc[-1]
-    
+    bias = geom_eval['calculated_bias']
     if not geom_eval['is_valid']:
         return {
-            "signal": "SELL",
-            "action_type": "PATTERN_INVALIDATED_SELL",
-            "rationale": "Pattern is INVALID. Price breached invalidation threshold below structural support."
+            "signal": "SELL" if bias == "BUY" else "BUY",
+            "action_type": "PATTERN_INVALIDATED_REVERSAL",
+            "rationale": "Pattern is INVALID. Price breached structural invalidation threshold."
         }
-    elif current_close > geom_eval['current_middle']:
+    elif bias == "BUY":
         return {
             "signal": "BUY",
-            "action_type": "BREAK_AND_RETEST_BUY",
-            "rationale": "Pattern is VALID. Inverted Head and Shoulders continuation confirmed above structural zone."
+            "action_type": "SUPPORT_BOUNCE_OR_CONTINUATION",
+            "rationale": "Pattern is VALID. Bullish structural geometry and support reaction holding."
         }
     else:
         return {
-            "signal": "BUY",
-            "action_type": "RIGHT_SHOULDER_REACTION",
-            "rationale": "Pattern is VALID. Testing right shoulder and breaker block support zone."
+            "signal": "SELL",
+            "action_type": "RESISTANCE_REJECTION_OR_IMPULSE",
+            "rationale": "Pattern is VALID. Bearish structural geometry and resistance pressure active."
         }
 
 def central_decision_engine(symbol):
@@ -294,15 +329,16 @@ def central_decision_engine(symbol):
     confidence = geom_eval["confidence_score"]
     current_close = df_30m['Close'].iloc[-1]
     tail_df = df_30m.tail(15).copy()
+    atr_val = tail_df['ATR'].iloc[-1] if 'ATR' in tail_df.columns else 0.001
     
     if direction == "BUY":
         entry_price = current_close
-        sweet_spot_sl = geom_eval['support_level'] - (tail_df['ATR'].iloc[-1] * 0.3)
+        sweet_spot_sl = geom_eval['support_level'] - (atr_val * 0.5)
         tp1 = entry_price + (abs(entry_price - sweet_spot_sl) * 1.5)
         tp2 = entry_price + (abs(entry_price - sweet_spot_sl) * 3.0)
     else:
         entry_price = current_close
-        sweet_spot_sl = geom_eval['resistance_level'] + (tail_df['ATR'].iloc[-1] * 0.3)
+        sweet_spot_sl = geom_eval['resistance_level'] + (atr_val * 0.5)
         tp1 = entry_price - (abs(sweet_spot_sl - entry_price) * 1.5)
         tp2 = entry_price - (abs(sweet_spot_sl - entry_price) * 3.0)
         
@@ -327,7 +363,7 @@ def central_decision_engine(symbol):
 
 def generate_institutional_memorandum(asset_symbol, setup):
     g = setup["geometry_data"]
-    decimals = 2 if asset_symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else 5
+    decimals = 2 if asset_symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else (3 if "JPY" in asset_symbol else 5)
     fmt = f"{{:.{decimals}f}}"
     
     memo = (
@@ -336,8 +372,8 @@ def generate_institutional_memorandum(asset_symbol, setup):
         f"Confidence Score: {setup['confidence']:.1f}% | Validity: {setup['trendline_status']}\n"
         f"Timeframe: 30M | Signal: {setup['direction']} [{setup['action_type']}]\n\n"
         f"KEY GEOMETRIC LEVELS:\n"
-        f"- Upper Resistance / Neckline: {fmt.format(g['resistance_level'])}\n"
-        f"- Breaker Block / Support: {fmt.format(g['support_level'])}\n"
+        f"- Upper Resistance / Ceiling: {fmt.format(g['resistance_level'])}\n"
+        f"- Support / Floor: {fmt.format(g['support_level'])}\n"
         f"- Invalidation Threshold: {fmt.format(g['invalidation_threshold'])}\n\n"
         f"LIVE MARKET RATIONALE:\n"
         f"{setup['rationale']}"
@@ -369,8 +405,7 @@ def generate_execution_chart(setup):
     price_min = chart_df['Low'].min()
     price_max = chart_df['High'].max()
     padding = (price_max - price_min) * 0.15
-    if padding == 0:
-        padding = 0.001
+    if padding == 0: padding = 0.001
         
     ymin = price_min - padding
     ymax = price_max + padding
@@ -382,15 +417,15 @@ def generate_execution_chart(setup):
     )
     
     ax = axlist[0]
-    ax.axhline(geom_calc['resistance_level'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Structural Resistance / Neckline')
-    ax.axhline(geom_calc['support_level'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Breaker Block / Support')
+    ax.axhline(geom_calc['resistance_level'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Structural Resistance')
+    ax.axhline(geom_calc['support_level'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Structural Support')
     ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2, label='Entry')
     
     validity_tag = "VALID" if setup['is_valid'] else "INVALID"
     status_color = "#00e676" if setup['is_valid'] else "#f23645"
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     
-    ax.set_title(f"{setup['symbol']} Institutional Geometry Map [{validity_tag}]\nPattern: {setup['pattern_name']} | Confidence: {setup['confidence']:.1f}% | {current_time_str}", color=status_color, fontsize=10, fontweight='bold', pad=12)
+    ax.set_title(f"{setup['symbol']} Institutional Geometry Map [{validity_tag}]\nPattern: {setup['pattern_name']} | Confidence: {setup['confidence']:.1f}% | {current_time_str}", color=status_color, fontsize=9, fontweight='bold', pad=12)
     
     fig.savefig(img_buf, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -436,7 +471,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "INSTITUTIONAL TRADING CO-PILOT TERMINAL\n"
         "---------------------------------------\n"
-        "Frontend: Candlesticks & Imbalances | Backend: Line-Chart Geometry\n\n"
+        "Frontend: Candlesticks | Backend: Dynamic Independent Geometry\n\n"
         "Status: Ready. Select an asset category, use the Pattern Scanner to check specific pairs, or type any ticker."
     )
     await update.message.reply_text(
@@ -453,7 +488,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     symbol = text.upper()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     
-    status_msg = await update.message.reply_text(f"Running multi-timeframe geometric analysis for {symbol}...")
+    status_msg = await update.message.reply_text(f"Running dynamic multi-timeframe geometric analysis for {symbol}...")
     try:
         setup = central_decision_engine(symbol)
 
@@ -462,7 +497,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         memo_text = generate_institutional_memorandum(symbol, setup)
         chart_img = generate_execution_chart(setup)
         
-        decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else 5
+        decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else (3 if "JPY" in symbol else 5)
         fmt = f"{{:.{decimals}f}}"
         
         summary_box = (
@@ -552,7 +587,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
              InlineKeyboardButton("📈 Stocks", callback_data="scan_cat|Stocks")],
             [InlineKeyboardButton("« Back", callback_data="menu_home")]
         ]
-        await query.edit_message_text(text="🔍 Pattern Scanner:\nSelect an asset category to choose a specific pair and run targeted validation:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(text="🔍 Pattern Scanner:\nSelect an asset category to choose a specific pair and run independent validation:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("scan_cat|"):
         _, cat_name = data.split("|")
@@ -569,17 +604,17 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             kb.append(row)
         kb.append([InlineKeyboardButton("« Back", callback_data="menu_pattern_scanner")])
         
-        await query.edit_message_text(text=f"Select specific pair in {cat_name} to scan pattern validity:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(text=f"Select specific pair in {cat_name} to scan independent pattern geometry:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("scan_run|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"Scanning pattern for {symbol}...")
+        await query.edit_message_text(text=f"Scanning dynamic pattern for {symbol}...")
         try:
             setup = central_decision_engine(symbol)
             chart_img = generate_execution_chart(setup)
             
-            decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else 5
+            decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else (3 if "JPY" in symbol else 5)
             fmt = f"{{:.{decimals}f}}"
             
             validity_str = "VALID 🟢" if setup['is_valid'] else "INVALID 🔴"
@@ -601,7 +636,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "prompt_custom_ticker":
         await query.edit_message_text(
-            text="Type Any Ticker / Pair:\n\nSend any symbol (e.g., AUDUSD, XAUUSD, BTCUSD) in chat to run institutional geometry and pattern validation.",
+            text="Type Any Ticker / Pair:\n\nSend any symbol (e.g., AUDUSD, XAUUSD, BTCUSD) in chat to run calculated geometry and pattern validation.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_home")]]))
 
     elif data == "toggle_auto_scan":
@@ -684,7 +719,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             memo_text = generate_institutional_memorandum(symbol, setup)
             chart_img = generate_execution_chart(setup)
             
-            decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else 5
+            decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else (3 if "JPY" in symbol else 5)
             fmt = f"{{:.{decimals}f}}"
             
             summary_box = (
@@ -695,7 +730,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 f"- Macro Bias: {setup['macro_bias']}\n"
                 f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
                 f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
-                f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}‰\n"
+                f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
             )
             
             await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART MAPPING: {symbol} (30M) | {ts}")
@@ -713,7 +748,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         try:
             setup = central_decision_engine(symbol)
 
-            decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else 5
+            decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else (3 if "JPY" in symbol else 5)
             fmt = f"{{:.{decimals}f}}"
             
             raw_sig = (
@@ -737,13 +772,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "menu_help":
         help_text = (
-            "HOW TO KNOW IF A PATTERN IS VALID OR INVALID:\n\n"
-            "1. Invalidation Threshold:\n"
-            "   - For Bullish Setups (Inverted Head and Shoulders / Support Bounce): The pattern is **VALID** as long as price holds above the invalidation threshold (support level * 0.995). If price breaks below this threshold, the structure fails and becomes **INVALID**.\n"
-            "   - For Bearish Setups (Normal Head and Shoulders / Resistance Rejection): The pattern is **VALID** as long as price holds below the resistance invalidation ceiling.\n\n"
-            "2. Pattern Naming Convention:\n"
-            "   - Bullish = **Inverted Head and Shoulders**\n"
-            "   - Bearish = **Normal Head and Shoulders**"
+            "HOW DYNAMIC PATTERN RECOGNITION WORKS:\n\n"
+            "1. Independent Slope & Structural Classification:\n"
+            "   - The bot calculates linear regression slopes and swing structures unique to each selected asset.\n"
+            "   - Patterns dynamically shift between Ascending Channels, Descending Channels, Normal Head & Shoulders, and Inverted Head & Shoulders based on actual market data.\n\n"
+            "2. Mathematical Confidence Scoring:\n"
+            "   - Confidence is computed dynamically from trend momentum and price position within channels rather than defaulting to static numbers."
         )
         kb = [[InlineKeyboardButton("« Back", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb))
