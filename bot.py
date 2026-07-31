@@ -22,7 +22,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "Horizontal & Dynamic Channel Institutional Engine Active 24/7!", 200
+    return "MT5 Multi-Timeframe Structural Engine Active 24/7!", 200
 
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -75,16 +75,16 @@ def translate_text(text, target_language):
 
 def fetch_ai_commentary(metrics_summary, target_language="English"):
     if not OPENROUTER_API_KEY:
-        base_text = "🎯 HORIZONTAL DESK SUMMARY: Hybrid horizontal and parallel structure evaluated."
+        base_text = "🎯 MT5 DESK SUMMARY: Multi-timeframe structural magnet levels evaluated."
         return translate_text(base_text, target_language)
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
     prompt = f"""
     You are a professional price action desk analyst. 
-    Here are the live hybrid structural metrics:
+    Here are the live MT5 structural metrics including higher timeframe targets:
     {metrics_summary}
     
-    Provide a concise 3-line institutional summary focusing on how price respects horizontal levels and channel boundaries.
+    Provide a concise 3-line institutional summary focusing on how price respects 4H structural magnet levels and channel boundaries.
     
     Write the response directly in {target_language}.
     """
@@ -101,7 +101,7 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
         except Exception:
             continue
             
-    fallback = "🎯 HORIZONTAL DESK SUMMARY: Hybrid horizontal mapping synchronized with live price action."
+    fallback = "🎯 MT5 DESK SUMMARY: Higher-timeframe structural magnet synchronization active."
     return translate_text(fallback, target_language)
 
 # ==========================================
@@ -176,7 +176,7 @@ def clean_and_normalize_data(df):
 
 def fetch_institutional_multi_tf_data(symbol):
     df_30m = clean_and_normalize_data(fetch_twelve_data(symbol, interval="30min", outputsize=150))
-    df_4h = clean_and_normalize_data(fetch_twelve_data(symbol, interval="4h", outputsize=150))
+    df_4h = clean_and_normalize_data(fetch_twelve_data(symbol, interval="4h", outputsize=100))
     
     if df_30m.empty or df_4h.empty:
         ticker = normalize_ticker_yfinance(symbol)
@@ -195,36 +195,38 @@ def fetch_institutional_multi_tf_data(symbol):
     if df_30m.empty:
         raise ValueError(f"Unable to retrieve verified market data for '{symbol}'.")
         
-    if not df_4h.empty and len(df_4h) >= 50:
+    if not df_4h.empty and len(df_4h) >= 20:
+        # Isolate 4H structural magnet level (analogous to manual MT5 intermediate lines)
+        h4_highs = df_4h['High'].values
+        h4_lows = df_4h['Low'].values
+        h4_intermediate_magnet = float(np.median(np.concatenate([h4_highs[-10:], h4_lows[-10:]])))
         df_4h['EMA200'] = df_4h['Close'].ewm(span=min(200, len(df_4h)), adjust=False).mean()
         macro_ema = df_4h['EMA200'].iloc[-1]
         macro_close = df_4h['Close'].iloc[-1]
     else:
+        h4_intermediate_magnet = float(np.median(df_30m['Close'].tail(30)))
         df_30m['EMA200'] = df_30m['Close'].ewm(span=min(200, len(df_30m)), adjust=False).mean()
         macro_ema = df_30m['EMA200'].iloc[-1]
         macro_close = df_30m['Close'].iloc[-1]
 
     df_30m['EMA50'] = df_30m['Close'].ewm(span=50, adjust=False).mean()
-    return df_30m, macro_close > macro_ema, macro_ema
+    return df_30m, macro_close > macro_ema, macro_ema, h4_intermediate_magnet
 
 # ==========================================
-# 4. MT5 SYNCHRONIZED HORIZONTAL & CHANNEL ENGINE
+# 4. MT5 4H MAGNET & HORIZONTAL CHANNEL ENGINE
 # ==========================================
-def analyze_m30_dealing_range_pattern(df_30m):
+def analyze_m30_dealing_range_pattern(df_30m, h4_magnet):
     lows = df_30m['Low'].values
     highs = df_30m['High'].values
     x_vals = np.arange(len(df_30m))
 
-    # Anchor to the exact horizontal structural extremes (Matching your MT5 yellow levels)
     horizontal_resistance = float(highs.max())
     horizontal_support = float(lows.min())
     
-    # Calculate parallel trend slope based on structural momentum
     span = len(df_30m)
     slope = (df_30m['Close'].iloc[-1] - df_30m['Close'].iloc[0]) / span if span > 0 else 0
     intercept_mid = df_30m['Close'].iloc[0] - slope * 0
     
-    # Construct parallel channel lines nested within the horizontal boundaries
     channel_width = (horizontal_resistance - horizontal_support) * 0.45
     middle_line = slope * x_vals + intercept_mid
     
@@ -244,63 +246,56 @@ def analyze_m30_dealing_range_pattern(df_30m):
         "upper_line": upper_line,
         "horizontal_resistance": horizontal_resistance,
         "horizontal_support": horizontal_support,
-        "intermediate_level": float(np.median(df_30m['Close'])),
+        "intermediate_magnet": h4_magnet,
         "current_lower": lower_line[-1],
         "current_middle": middle_line[-1],
         "current_upper": upper_line[-1],
-        "pattern_name": "MT5 Synchronized Horizontal & Channel Map",
-        "status_msg": "Structure: Synchronized with Horizontal Caps"
+        "pattern_name": "MT5 4H Magnet Synchronized Map",
+        "status_msg": "Structure: Synchronized with 4H Intermediate Magnet"
     }
 
 def evaluate_dealing_range_signals(channel_eval, macro_bullish):
     df = channel_eval['df']
     current_close = df['Close'].iloc[-1]
-    middle_limit = channel_eval['current_middle']
-    lower_limit = channel_eval['current_lower']
+    magnet = channel_eval['intermediate_magnet']
     
-    if current_close < lower_limit:
+    if current_close < magnet:
         return {
             "signal": "SELL",
-            "action_type": "HORIZONTAL_BREAK_SELL",
-            "rationale": "Live price breached key horizontal/parallel support level. Downside expansion active."
-        }
-    elif current_close > middle_limit:
-        return {
-            "signal": "BUY",
-            "action_type": "HORIZONTAL_REACTION_BUY",
-            "rationale": "Price operating above middle structural threshold, respecting horizontal boundaries."
+            "action_type": "4H_MAGNET_TARGET_SELL",
+            "rationale": f"Price gravitating downward toward 4H structural intermediate magnet level at {magnet:.2f}."
         }
     else:
         return {
-            "signal": "SELL",
-            "action_type": "RANGE_COMPRESSION_SELL",
-            "rationale": "Price testing lower sub-channel horizontal pivot zone."
+            "signal": "BUY",
+            "action_type": "4H_MAGNET_BOUNCE_BUY",
+            "rationale": f"Price holding above 4H structural intermediate magnet level at {magnet:.2f}."
         }
 
 def central_decision_engine(symbol):
-    df_30m, macro_bullish, macro_ema = fetch_institutional_multi_tf_data(symbol)
-    channel_eval = analyze_m30_dealing_range_pattern(df_30m)
+    df_30m, macro_bullish, macro_ema, h4_magnet = fetch_institutional_multi_tf_data(symbol)
+    channel_eval = analyze_m30_dealing_range_pattern(df_30m, h4_magnet)
     action_eval = evaluate_dealing_range_signals(channel_eval, macro_bullish)
     
     direction = action_eval["signal"]
-    confidence = 90
+    confidence = 92
     current_close = df_30m['Close'].iloc[-1]
     tail_df = df_30m.tail(15).copy()
     
     if direction == "BUY":
         entry_price = current_close
         sweet_spot_sl = channel_eval['horizontal_support'] - (tail_df['ATR'].iloc[-1] * 0.3)
-        tp1 = entry_price + (abs(entry_price - sweet_spot_sl) * 1.5)
-        tp2 = entry_price + (abs(entry_price - sweet_spot_sl) * 3.0)
+        tp1 = h4_magnet
+        tp2 = channel_eval['horizontal_resistance']
     else:
         entry_price = current_close
         sweet_spot_sl = channel_eval['horizontal_resistance'] + (tail_df['ATR'].iloc[-1] * 0.3)
-        tp1 = entry_price - (abs(sweet_spot_sl - entry_price) * 1.5)
-        tp2 = entry_price - (abs(sweet_spot_sl - entry_price) * 3.0)
+        tp1 = h4_magnet
+        tp2 = channel_eval['horizontal_support']
         
     return {
         "symbol": symbol,
-        "selected_tf": "30M",
+        "selected_tf": "30M/4H",
         "direction": action_eval["signal"],
         "action_type": action_eval["action_type"],
         "rationale": action_eval["rationale"],
@@ -322,12 +317,12 @@ def generate_institutional_memorandum(asset_symbol, setup):
     fmt = f"{{:.{decimals}f}}"
     
     memo = (
-        f"HORIZONTAL MAPPING MEMORANDUM ({asset_symbol})\n"
+        f"4H STRUCTURAL MAGNET MEMORANDUM ({asset_symbol})\n"
         f"Structure Identified: {setup['pattern_name']}\n"
-        f"Timeframe: 30M | Signal: {setup['direction']} [{setup['action_type']}]\n\n"
+        f"Timeframe: 30M / 4H | Signal: {setup['direction']} [{setup['action_type']}]\n\n"
         f"KEY STRUCTURAL LEVELS:\n"
         f"- Upper Horizontal Resistance: {fmt.format(c['horizontal_resistance'])}\n"
-        f"- Intermediate Range Pivot: {fmt.format(c['intermediate_level'])}\n"
+        f"- 4H Intermediate Magnet Level: {fmt.format(c['intermediate_magnet'])}\n"
         f"- Lower Horizontal Support: {fmt.format(c['horizontal_support'])}\n\n"
         f"LIVE MARKET STORY & RATIONALE:\n"
         f"{setup['rationale']}"
@@ -358,7 +353,7 @@ def generate_execution_chart(setup):
     
     all_visible_values = pd.concat([
         chart_df['High'], chart_df['Low'], 
-        pd.Series([setup['tp1'], setup['tp2'], setup['entry'], channel_calc['horizontal_resistance'], channel_calc['horizontal_support']])
+        pd.Series([setup['tp1'], setup['tp2'], setup['entry'], channel_calc['horizontal_resistance'], channel_calc['horizontal_support'], channel_calc['intermediate_magnet']])
     ])
     ymin = all_visible_values.min()
     ymax = all_visible_values.max()
@@ -374,14 +369,15 @@ def generate_execution_chart(setup):
     
     ax = axlist[0]
     ax.axhline(channel_calc['horizontal_resistance'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Horizontal Resistance')
+    ax.axhline(channel_calc['intermediate_magnet'], color='#ab47bc', linestyle='-', linewidth=1.5, label='4H Magnet Level')
     ax.axhline(channel_calc['horizontal_support'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Horizontal Support')
     
     ax.axhline(setup['tp2'], color='#e53935', linestyle='--', linewidth=1.2)
-    ax.axhline(setup['tp1'], color='#2962ff', linestyle='--', linewidth=1.2)
+    ax.axhline(setup['tp1'], color='#ab47bc', linestyle='--', linewidth=1.2)
     ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2)
     
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-    ax.set_title(f"{setup['symbol']} 30M MT5 Synchronized Mapping\n{setup['trendline_status']} | {current_time_str}", color='white', fontsize=11, fontweight='bold', pad=12)
+    ax.set_title(f"{setup['symbol']} 4H/30M Structural Magnet Mapping\n{setup['trendline_status']} | {current_time_str}", color='white', fontsize=11, fontweight='bold', pad=12)
     
     fig.savefig(img_buf, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -409,7 +405,7 @@ def get_home_menu(lang="English", auto_active=False):
     auto_status = "🟢 GBPAUD Continuous Scanner: ON" if auto_active else "🔴 GBPAUD Continuous Scanner: OFF"
     
     keyboard = [
-        [InlineKeyboardButton("📊 Run Hybrid Mapping", callback_data="menu_analysis"),
+        [InlineKeyboardButton("📊 Run Magnet Mapping", callback_data="menu_analysis"),
          InlineKeyboardButton("🚨 Generate Live Signal", callback_data="menu_signal")],
         [InlineKeyboardButton("🔍 Type Custom Ticker / Pair", callback_data="prompt_custom_ticker")],
         [InlineKeyboardButton(auto_status, callback_data="toggle_auto_scan")],
@@ -424,9 +420,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_auto = chat_id in active_subscribers
     
     welcome_text = (
-        "HORIZONTAL & PARALLEL MAPPING TERMINAL\n"
-        "-------------------------------------\n"
-        "Terminal active with MT5 synchronized horizontal support/resistance caps and dynamic channels.\n\n"
+        "4H STRUCTURAL MAGNET MAPPING TERMINAL\n"
+        "---------------------------------------\n"
+        "Terminal active with 4H intermediate structural magnets and horizontal caps.\n\n"
         "Status: Ready. Select an asset category or type any ticker symbol directly into chat."
     )
     await update.message.reply_text(
@@ -443,11 +439,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     symbol = text.upper()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     
-    await update.message.reply_text(f"Running MT5 synchronized analysis for {symbol}")
+    await update.message.reply_text(f"Running 4H structural magnet analysis for {symbol}")
     try:
         setup = central_decision_engine(symbol)
 
-        metrics = f"- Timestamp: {ts}\n- TF: 30M\n- Structure: {setup['pattern_name']}\n- Signal: {setup['direction']} ({setup['action_type']})\n"
+        metrics = f"- Timestamp: {ts}\n- TF: 4H/30M\n- Structure: {setup['pattern_name']}\n- Signal: {setup['direction']} ({setup['action_type']})\n"
         ai_commentary = fetch_ai_commentary(metrics, lang)
         memo_text = generate_institutional_memorandum(symbol, setup)
         chart_img = generate_execution_chart(setup)
@@ -456,15 +452,15 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         fmt = f"{{:.{decimals}f}}"
         
         summary_box = (
-            f"HORIZONTAL SUMMARY BOX ({symbol}):\n"
-            f"- TF: 30M | Structure: {setup['pattern_name']}\n"
+            f"4H MAGNET SUMMARY BOX ({symbol}):\n"
+            f"- TF: 4H/30M | Structure: {setup['pattern_name']}\n"
             f"- Macro Bias: {setup['macro_bias']}\n"
             f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
             f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
-            f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
+            f"- SL: {fmt.format(setup['sl'])} | TP1 (4H Magnet): {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
         )
         
-        await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART MAPPING: {symbol} (30M) | {ts}")
+        await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART MAPPING: {symbol} (4H/30M) | {ts}")
         await context.bot.send_message(chat_id=chat_id, text=summary_box)
         await context.bot.send_message(chat_id=chat_id, text=memo_text)
         await context.bot.send_message(chat_id=chat_id, text=ai_commentary)
@@ -488,14 +484,14 @@ async def background_continuous_scanner(application):
                     scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
                     
                     raw_signal_text = (
-                        f"HORIZONTAL MAPPING SIGNAL ({symbol})\n"
+                        f"4H MAGNET MAPPING SIGNAL ({symbol})\n"
                         f"Structure: {setup['pattern_name']}\n"
                         f"Timestamp: {scan_timestamp}\n"
-                        f"Timeframe: 30M\n"
+                        f"Timeframe: 4H/30M\n"
                         f"Signal: {setup['direction']} ({setup['action_type']})\n"
                         f"Entry: {fmt.format(setup['entry'])}\n"
                         f"SL: {fmt.format(setup['sl'])}\n"
-                        f"TP1: {fmt.format(setup['tp1'])}\n"
+                        f"TP1 (4H Magnet): {fmt.format(setup['tp1'])}\n"
                         f"TP2: {fmt.format(setup['tp2'])}\n"
                     )
                     
@@ -526,7 +522,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "prompt_custom_ticker":
         await query.edit_message_text(
-            text="Type Any Ticker / Pair:\n\nSend any symbol (e.g., EURUSD, XAUUSD, BTCUSD) in chat to run hybrid mapping.",
+            text="Type Any Ticker / Pair:\n\nSend any symbol (e.g., EURUSD, XAUUSD, BTCUSD) in chat to run magnet mapping.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_home")]]))
 
     elif data == "toggle_auto_scan":
@@ -600,11 +596,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_an|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"Running hybrid analysis for {symbol}")
+        await query.edit_message_text(text=f"Running magnet analysis for {symbol}")
         try:
             setup = central_decision_engine(symbol)
 
-            metrics = f"- Timestamp: {ts}\n- TF: 30M\n- Structure: {setup['pattern_name']}\n- Signal: {setup['direction']}\n"
+            metrics = f"- Timestamp: {ts}\n- TF: 4H/30M\n- Structure: {setup['pattern_name']}\n- Signal: {setup['direction']}\n"
             ai_commentary = fetch_ai_commentary(metrics, lang)
             memo_text = generate_institutional_memorandum(symbol, setup)
             chart_img = generate_execution_chart(setup)
@@ -613,15 +609,15 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             fmt = f"{{:.{decimals}f}}"
             
             summary_box = (
-                f"HORIZONTAL SUMMARY BOX ({symbol}):\n"
-                f"- TF: 30M | Structure: {setup['pattern_name']}\n"
+                f"4H MAGNET SUMMARY BOX ({symbol}):\n"
+                f"- TF: 4H/30M | Structure: {setup['pattern_name']}\n"
                 f"- Macro Bias: {setup['macro_bias']}\n"
                 f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
                 f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
-                f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
+                f"- SL: {fmt.format(setup['sl'])} | TP1 (4H Magnet): {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
             )
             
-            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART MAPPING: {symbol} (30M) | {ts}")
+            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART MAPPING: {symbol} (4H/30M) | {ts}")
             await context.bot.send_message(chat_id=chat_id, text=summary_box)
             await context.bot.send_message(chat_id=chat_id, text=memo_text)
             await context.bot.send_message(chat_id=chat_id, text=ai_commentary)
@@ -640,14 +636,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             fmt = f"{{:.{decimals}f}}"
             
             raw_sig = (
-                f"HORIZONTAL MAPPING SIGNAL ({symbol})\n"
+                f"4H MAGNET MAPPING SIGNAL ({symbol})\n"
                 f"Structure: {setup['pattern_name']}\n"
                 f"Timestamp: {ts}\n"
-                f"Timeframe: 30M\n"
+                f"Timeframe: 4H/30M\n"
                 f"Signal: {setup['direction']} ({setup['action_type']})\n"
                 f"Entry: {fmt.format(setup['entry'])}\n"
                 f"SL: {fmt.format(setup['sl'])}\n"
-                f"TP1: {fmt.format(setup['tp1'])}\n"
+                f"TP1 (4H Magnet): {fmt.format(setup['tp1'])}\n"
                 f"TP2: {fmt.format(setup['tp2'])}\n"
             )
             final_sig = translate_text(raw_sig, lang)
@@ -658,9 +654,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "menu_help":
         help_text = (
-            "HORIZONTAL & PARALLEL MAPPING GUIDE:\n\n"
-            "- MT5 Synchronized Mapping: Combines strict horizontal support/resistance caps with dynamic parallel channels.\n"
-            "- Realistic Visual Output: Mirrors your manual MT5 charting setup perfectly."
+            "4H STRUCTURAL MAGNET GUIDE:\n\n"
+            "- Multi-Timeframe Magnet Mapping: Automatically incorporates higher-timeframe intermediate level lines (like 4H targets) alongside horizontal caps."
         )
         kb = [[InlineKeyboardButton("« Back", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb))
