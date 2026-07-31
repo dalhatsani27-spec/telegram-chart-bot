@@ -22,7 +22,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "Institutional Market Reasoning Engine Bot is Active 24/7!", 200
+    return "Institutional Dealing Range Engine Bot is Active 24/7!", 200
 
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -54,7 +54,7 @@ def translate_text(text, target_language):
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
     prompt = f"""
-    Translate the following financial market commentary or signal text accurately into {target_language}. Maintain all formatting, numbers, abbreviations, and professional financial tone:
+    Translate the following market analysis or signal text accurately into {target_language}. Maintain all formatting, numbers, abbreviations, and professional tone:
     
     {text}
     """
@@ -75,16 +75,16 @@ def translate_text(text, target_language):
 
 def fetch_ai_commentary(metrics_summary, target_language="English"):
     if not OPENROUTER_API_KEY:
-        base_text = "🎯 AI DESK SUMMARY: Rejection exhaustion and internal pivot rotation validated."
+        base_text = "🎯 DESK SUMMARY: Dealing range active; middle trendline and boundary reactions evaluated."
         return translate_text(base_text, target_language)
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
     prompt = f"""
-    You are a senior institutional price-action desk analyst. 
-    Here are the quantitative channel metrics and rejection exhaustion status:
+    You are a professional price action desk analyst. 
+    Here are the quantitative 30M dealing range metrics and middle trendline status:
     {metrics_summary}
     
-    Provide a concise 3-line institutional summary focusing on structural rejection, failed higher high/lower low extensions, and internal rotation.
+    Provide a concise 3-line institutional summary focusing on dealing range boundaries, middle trendline status, and pullback/realignment positioning.
     
     Write the response directly in {target_language}.
     """
@@ -101,7 +101,7 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
         except Exception:
             continue
             
-    fallback = "🎯 AI DESK SUMMARY: Rejection exhaustion confirmed; rotation toward equilibrium active."
+    fallback = "🎯 DESK SUMMARY: Dealing range active; middle trendline tracking confirmed."
     return translate_text(fallback, target_language)
 
 # ==========================================
@@ -124,13 +124,12 @@ def normalize_ticker_twelve_data(symbol):
         return f"{symbol[:3]}/{symbol[3:]}"
     return symbol
 
-def fetch_twelve_data(symbol, interval="15m", outputsize=150):
+def fetch_twelve_data(symbol, interval="30min", outputsize=150):
     if not TWELVE_DATA_API_KEY:
         return pd.DataFrame()
     clean_symbol = normalize_ticker_twelve_data(symbol)
-    tf_map = {"5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1day"}
     url = "https://api.twelvedata.com/time_series"
-    params = {"symbol": clean_symbol, "interval": tf_map.get(interval.lower(), "15min"), "outputsize": outputsize, "apikey": TWELVE_DATA_API_KEY}
+    params = {"symbol": clean_symbol, "interval": interval, "outputsize": outputsize, "apikey": TWELVE_DATA_API_KEY}
     try:
         res = requests.get(url, params=params, timeout=10)
         data = res.json()
@@ -175,233 +174,142 @@ def clean_and_normalize_data(df):
     df.dropna(inplace=True)
     return df
 
-def fetch_top_down_institutional_data(symbol):
-    df_4h = clean_and_normalize_data(fetch_twelve_data(symbol, interval="4h", outputsize=150))
-    df_1h = clean_and_normalize_data(fetch_twelve_data(symbol, interval="1h", outputsize=150))
-    df_30m = clean_and_normalize_data(fetch_twelve_data(symbol, interval="30m", outputsize=150))
-    df_15m = clean_and_normalize_data(fetch_twelve_data(symbol, interval="15m", outputsize=150))
-    df_5m = clean_and_normalize_data(fetch_twelve_data(symbol, interval="5m", outputsize=150))
-    
-    if df_4h.empty or df_1h.empty or df_30m.empty or df_15m.empty or df_5m.empty:
+def fetch_m30_institutional_data(symbol):
+    df_30m = clean_and_normalize_data(fetch_twelve_data(symbol, interval="30min", outputsize=150))
+    if df_30m.empty:
         ticker = normalize_ticker_yfinance(symbol)
         try:
-            if df_4h.empty:
-                h4_data = yf.download(ticker, period="60d", interval="60m", progress=False, auto_adjust=True)
-                if isinstance(h4_data.columns, pd.MultiIndex): h4_data.columns = h4_data.columns.get_level_values(0)
-                df_4h = clean_and_normalize_data(h4_data)
-            if df_1h.empty:
-                h1_data = yf.download(ticker, period="30d", interval="60m", progress=False, auto_adjust=True)
-                if isinstance(h1_data.columns, pd.MultiIndex): h1_data.columns = h1_data.columns.get_level_values(0)
-                df_1h = clean_and_normalize_data(h1_data)
-            if df_30m.empty:
-                m30_data = yf.download(ticker, period="15d", interval="30m", progress=False, auto_adjust=True)
-                if isinstance(m30_data.columns, pd.MultiIndex): m30_data.columns = m30_data.columns.get_level_values(0)
-                df_30m = clean_and_normalize_data(m30_data)
-            if df_15m.empty:
-                m15_data = yf.download(ticker, period="10d", interval="15m", progress=False, auto_adjust=True)
-                if isinstance(m15_data.columns, pd.MultiIndex): m15_data.columns = m15_data.columns.get_level_values(0)
-                df_15m = clean_and_normalize_data(m15_data)
-            if df_5m.empty:
-                m5_data = yf.download(ticker, period="5d", interval="5m", progress=False, auto_adjust=True)
-                if isinstance(m5_data.columns, pd.MultiIndex): m5_data.columns = m5_data.columns.get_level_values(0)
-                df_5m = clean_and_normalize_data(m5_data)
+            m30_data = yf.download(ticker, period="30d", interval="30m", progress=False, auto_adjust=True)
+            if isinstance(m30_data.columns, pd.MultiIndex): m30_data.columns = m30_data.columns.get_level_values(0)
+            df_30m = clean_and_normalize_data(m30_data)
         except Exception:
             pass
 
-    if df_4h.empty or df_1h.empty or df_30m.empty or df_15m.empty or df_5m.empty:
-        raise ValueError(f"Unable to retrieve verified multi-timeframe data for '{symbol}'.")
+    if df_30m.empty:
+        raise ValueError(f"Unable to retrieve verified 30M market data for '{symbol}'.")
         
-    df_4h['EMA200'] = df_4h['Close'].ewm(span=200, adjust=False).mean() if len(df_4h) >= 200 else df_4h['Close'].ewm(span=len(df_4h)//2, adjust=False).mean()
-    df_1h['EMA50'] = df_1h['Close'].ewm(span=50, adjust=False).mean()
     df_30m['EMA50'] = df_30m['Close'].ewm(span=50, adjust=False).mean()
-    df_15m['EMA50'] = df_15m['Close'].ewm(span=50, adjust=False).mean()
-    df_5m['EMA20'] = df_5m['Close'].ewm(span=20, adjust=False).mean()
-    
-    return df_4h, df_1h, df_30m, df_15m, df_5m
+    return df_30m
 
 # ==========================================
-# 4. DYNAMIC CHANNEL & REJECTION EXHAUSTION ENGINE
+# 4. 30M DEALING RANGE & MIDDLE TRENDLINE ENGINE
 # ==========================================
-def analyze_dynamic_parallel_channel(df_15m, df_30m):
-    best_tf = "30M"
-    best_channel = None
-    max_score = -1
+def analyze_m30_dealing_range(df_30m):
+    lows = df_30m['Low'].values
+    highs = df_30m['High'].values
+    x_vals = np.arange(len(df_30m))
 
-    for tf_name, df in [("30M", df_30m), ("15M", df_15m)]:
-        if df is None or len(df) < 30:
-            continue
-            
-        lows = df['Low'].values
-        highs = df['High'].values
-        x_vals = np.arange(len(df))
+    swing_lows = []
+    for i in range(2, len(df_30m) - 2):
+        if lows[i] <= lows[i-1] and lows[i] <= lows[i-2] and lows[i] <= lows[i+1] and lows[i] <= lows[i+2]:
+            swing_lows.append((i, lows[i]))
 
-        swing_lows = []
-        for i in range(2, len(df) - 2):
-            if lows[i] <= lows[i-1] and lows[i] <= lows[i-2] and lows[i] <= lows[i+1] and lows[i] <= lows[i+2]:
-                swing_lows.append((i, lows[i]))
+    swing_highs = []
+    for i in range(2, len(df_30m) - 2):
+        if highs[i] >= highs[i-1] and highs[i] >= highs[i-2] and highs[i] >= highs[i+1] and highs[i] >= highs[i+2]:
+            swing_highs.append((i, highs[i]))
 
-        swing_highs = []
-        for i in range(2, len(df) - 2):
-            if highs[i] >= highs[i-1] and highs[i] >= highs[i-2] and highs[i] >= highs[i+1] and highs[i] >= highs[i+2]:
-                swing_highs.append((i, highs[i]))
+    if len(swing_lows) >= 2:
+        p1_l, p2_l = swing_lows[0], swing_lows[-1]
+        slope_lower = (p2_l[1] - p1_l[1]) / (p2_l[0] - p1_l[0] if p2_l[0] != p1_l[0] else 1)
+        intercept_lower = p1_l[1] - slope_lower * p1_l[0]
+        lower_line = slope_lower * x_vals + intercept_lower
 
-        if len(swing_lows) >= 2 and len(swing_highs) >= 1:
-            p1_l, p2_l = swing_lows[0], swing_lows[-1]
-            slope_lower = (p2_l[1] - p1_l[1]) / (p2_l[0] - p1_l[0] if p2_l[0] != p1_l[0] else 1)
-            intercept_lower = p1_l[1] - slope_lower * p1_l[0]
-            lower_line = slope_lower * x_vals + intercept_lower
-
+        if len(swing_highs) >= 1:
             p_h = max(swing_highs, key=lambda x: x[1])
             intercept_upper = p_h[1] - slope_lower * p_h[0]
             upper_line = slope_lower * x_vals + intercept_upper
+        else:
+            upper_line = lower_line + (df_30m['High'].max() - df_30m['Low'].min())
+    else:
+        min_l, max_h = df_30m['Low'].min(), df_30m['High'].max()
+        slope_lower = 0.0
+        lower_line = np.full(len(df_30m), min_l)
+        upper_line = np.full(len(df_30m), max_h)
 
-            score = len(swing_lows) + len(swing_highs)
-            
-            if score > max_score:
-                max_score = score
-                best_tf = tf_name
-                best_channel = {
-                    "tf": tf_name,
-                    "df": df,
-                    "x_vals": x_vals,
-                    "lower_line": lower_line,
-                    "upper_line": upper_line,
-                    "slope": slope_lower,
-                    "current_lower": lower_line[-1],
-                    "current_upper": upper_line[-1],
-                    "status_msg": f"Dynamic Parallel Sloped Channel Active ({tf_name} Priority)"
-                }
+    # Middle trendline splitting the dealing range exactly in half
+    middle_line = (lower_line + upper_line) / 2.0
 
-    if not best_channel:
-        df = df_30m if df_30m is not None and not df_30m.empty else df_15m
-        x_vals = np.arange(len(df))
-        lower_line = np.full(len(df), df['Low'].min())
-        upper_line = np.full(len(df), df['High'].max())
-        best_channel = {
-            "tf": "30M",
-            "df": df,
-            "x_vals": x_vals,
-            "lower_line": lower_line,
-            "upper_line": upper_line,
-            "slope": 0.0,
-            "current_lower": lower_line[-1],
-            "current_upper": upper_line[-1],
-            "status_msg": "Fallback Static Range Channel Active"
-        }
-
-    return best_tf, best_channel
-
-def calculate_internal_channel_pivots(channel_eval):
-    lower_val = channel_eval['current_lower']
-    upper_val = channel_eval['current_upper']
-    channel_range = upper_val - lower_val
-    
-    eq_mid = lower_val + (channel_range * 0.50)
-    lower_mid = lower_val + (channel_range * 0.25)
-    upper_mid = lower_val + (channel_range * 0.75)
-    
     return {
-        "lower_boundary": lower_val,
-        "lower_mid": lower_mid,
-        "equilibrium": eq_mid,
-        "upper_mid": upper_mid,
-        "upper_boundary": upper_val
+        "df": df_30m,
+        "x_vals": x_vals,
+        "lower_line": lower_line,
+        "upper_line": upper_line,
+        "middle_line": middle_line,
+        "current_lower": lower_line[-1],
+        "current_middle": middle_line[-1],
+        "current_upper": upper_line[-1],
+        "status_msg": "30M Dealing Range & Middle Trendline Active"
     }
 
-# ==========================================
-# 5. REJECTION EXHAUSTION & REALIGNMENT ENGINE
-# ==========================================
-def evaluate_channel_action(chart_df, pivots):
+def evaluate_dealing_range_signals(channel_eval):
+    df = channel_eval['df']
+    current_close = df['Close'].iloc[-1]
+    prev_close = df['Close'].iloc[-2]
+    current_low = df['Low'].iloc[-1]
+    
+    lower_limit = channel_eval['current_lower']
+    middle_limit = channel_eval['current_middle']
+    upper_limit = channel_eval['current_upper']
+    
     tolerance = 0.0003
-    upper_limit = pivots["upper_boundary"]
-    lower_limit = pivots["lower_boundary"]
-    eq = pivots["equilibrium"]
     
-    current_close = chart_df['Close'].iloc[-1]
-    current_high = chart_df['High'].iloc[-1]
-    prev_high = chart_df['High'].iloc[-2]
-    
-    # Rejection exhaustion logic: checking if price tested/pierced upper boundary or failed to make a higher high, closing back inside
-    near_upper = (current_high >= (upper_limit - tolerance)) or (abs(current_close - upper_limit) <= tolerance)
-    failed_higher_high = current_high < prev_high and current_close < prev_high
-    
-    if near_upper and (failed_higher_high or current_close < upper_limit):
+    # Sell condition: price breaks below major down channel / lower boundary
+    if current_close < (lower_limit - tolerance):
         return {
             "signal": "SELL",
-            "action_type": "REJECTION_EXHAUSTION_SELL",
-            "rationale": "Price probed upper boundary or failed higher-high continuation, closing back inside. Exhaustion rejection confirmed; rotating toward equilibrium."
+            "action_type": "MAJOR_CHANNEL_BREAK_SELL",
+            "rationale": "Price broke and closed below major down channel boundary. Bearish continuation active."
         }
-    elif current_close < (lower_limit - tolerance):
-        return {
-            "signal": "SELL",
-            "action_type": "BREAK_BELOW_CHANNEL",
-            "rationale": "Price broke and closed below lower channel boundary. Bearish continuation active."
-        }
-    elif current_close > (upper_limit + tolerance):
+    # Buy condition: healthy candle close above middle trendline
+    elif prev_close <= middle_limit and current_close > middle_limit:
         return {
             "signal": "BUY",
-            "action_type": "BREAK_ABOVE_CHANNEL",
-            "rationale": "Price achieved clean break above upper channel boundary."
+            "action_type": "MIDDLE_TRENDLINE_CROSS_BUY",
+            "rationale": "Healthy candle close above middle trendline. Bullish entry triggered."
+        }
+    elif current_close > middle_limit:
+        return {
+            "signal": "BUY",
+            "action_type": "PULLBACK_OR_CONTINUATION_BUY",
+            "rationale": "Price is operating above the middle trendline dealing range pivot. Pullback entry or continuation active."
         }
     else:
-        # Internal pivot range realignment
-        if current_close <= eq:
-            return {
-                "signal": "BUY",
-                "action_type": "RANGE_DEMAND_REALIGNMENT",
-                "rationale": "Price respected lower internal range structure, signaling bullish realignment toward equilibrium."
-            }
-        else:
-            return {
-                "signal": "SELL",
-                "action_type": "RANGE_SUPPLY_REALIGNMENT",
-                "rationale": "Price respected upper internal range structure, signaling bearish realignment toward equilibrium."
-            }
+        return {
+            "signal": "SELL",
+            "action_type": "DEALING_RANGE_LOWER_BIAS",
+            "rationale": "Price is operating below the middle trendline within the lower dealing channel zone."
+        }
 
-def central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
-    h4_close = df_4h['Close'].iloc[-1]
-    h4_ema200 = df_4h['EMA200'].iloc[-1]
-    macro_bullish = h4_close > h4_ema200
-    
-    h1_close = df_1h['Close'].iloc[-1]
-    h1_ema50 = df_1h['EMA50'].iloc[-1]
-    intermediate_bullish = h1_close > h1_ema50
-    
-    best_tf, channel_eval = analyze_dynamic_parallel_channel(df_15m, df_30m)
-    pivots = calculate_internal_channel_pivots(channel_eval)
-    
-    chart_slice = channel_eval['df'].tail(80).copy()
-    action_eval = evaluate_channel_action(chart_slice, pivots)
+def central_decision_engine(symbol, df_30m):
+    channel_eval = analyze_m30_dealing_range(df_30m)
+    action_eval = evaluate_dealing_range_signals(channel_eval)
     
     direction = action_eval["signal"]
     confidence = 90
-    
-    current_close = chart_slice['Close'].iloc[-1]
-    df_5m_tail = df_5m.tail(15).copy()
+    current_close = df_30m['Close'].iloc[-1]
+    tail_df = df_30m.tail(15).copy()
     
     if direction == "BUY":
         entry_price = current_close
-        sweet_spot_sl = df_5m_tail['Low'].min() - (df_5m_tail['ATR'].iloc[-1] * 0.4)
+        sweet_spot_sl = tail_df['Low'].min() - (tail_df['ATR'].iloc[-1] * 0.4)
         tp1 = entry_price + (abs(entry_price - sweet_spot_sl) * 1.5)
         tp2 = entry_price + (abs(entry_price - sweet_spot_sl) * 3.0)
     else:
         entry_price = current_close
-        sweet_spot_sl = df_5m_tail['High'].max() + (df_5m_tail['ATR'].iloc[-1] * 0.4)
+        sweet_spot_sl = tail_df['High'].max() + (tail_df['ATR'].iloc[-1] * 0.4)
         tp1 = entry_price - (abs(sweet_spot_sl - entry_price) * 1.5)
         tp2 = entry_price - (abs(sweet_spot_sl - entry_price) * 3.0)
         
     return {
         "symbol": symbol,
-        "selected_tf": best_tf,
+        "selected_tf": "30M",
         "direction": action_eval["signal"],
         "action_type": action_eval["action_type"],
         "rationale": action_eval["rationale"],
         "confidence": confidence,
-        "macro_bias": "Bullish (4H > EMA200)" if macro_bullish else "Bearish (4H < EMA200)",
-        "intermediate_bias": "Bullish (1H > EMA50)" if intermediate_bullish else "Bearish (1H < EMA50)",
         "trendline_status": channel_eval["status_msg"],
         "channel_data": channel_eval,
-        "pivots": pivots,
         "entry": entry_price,
         "current_market_price": current_close,
         "sl": sweet_spot_sl,
@@ -410,36 +318,33 @@ def central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
     }
 
 def generate_institutional_memorandum(asset_symbol, setup):
-    p = setup["pivots"]
+    c = setup["channel_data"]
     decimals = 2 if asset_symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else 5
     fmt = f"{{:.{decimals}f}}"
     
     memo = (
         f"SUMMARY MEMORANDUM ({asset_symbol})\n"
-        f"Timeframe: {setup['selected_tf']} | Signal: {setup['direction']} [{setup['action_type']}]\n\n"
-        f"INTERNAL CHANNEL PIVOTS:\n"
-        f"- Upper Boundary: {fmt.format(p['upper_boundary'])}\n"
-        f"- Upper Mid Pivot: {fmt.format(p['upper_mid'])}\n"
-        f"- Equilibrium (50%): {fmt.format(p['equilibrium'])}\n"
-        f"- Lower Mid Pivot: {fmt.format(p['lower_mid'])}\n"
-        f"- Lower Boundary: {fmt.format(p['lower_boundary'])}\n\n"
-        f"REJECTION & RATIONALE:\n"
+        f"Timeframe: 30M | Signal: {setup['direction']} [{setup['action_type']}]\n\n"
+        f"DEALING RANGE & MIDDLE TRENDLINE:\n"
+        f"- Up Channel (Upper Boundary): {fmt.format(c['current_upper'])}\n"
+        f"- Middle Trendline (Entry Pivot): {fmt.format(c['current_middle'])}\n"
+        f"- Down Channel (Lower Boundary): {fmt.format(c['current_lower'])}\n\n"
+        f"ANALYSIS RATIONALE:\n"
         f"{setup['rationale']}"
     )
     return memo
 
 # ==========================================
-# 6. HIGH-RESOLUTION CHART RENDERER (WITH PIVOTS)
+# 5. HIGH-RESOLUTION CHART RENDERER (30M)
 # ==========================================
 def generate_execution_chart(setup):
     img_buf = io.BytesIO()
     channel_calc = setup['channel_data']
     chart_df = channel_calc['df'].tail(80).copy()
-    p = setup['pivots']
     
     upper_series = pd.Series(channel_calc['upper_line'][-len(chart_df):], index=chart_df.index)
+    middle_series = pd.Series(channel_calc['middle_line'][-len(chart_df):], index=chart_df.index)
     lower_series = pd.Series(channel_calc['lower_line'][-len(chart_df):], index=chart_df.index)
-    eq_series = pd.Series(p['equilibrium'], index=chart_df.index)
     
     mc = mpf.make_marketcolors(up='#089981', down='#f23645', edge='inherit', wick='inherit')
     style = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', gridcolor='#2a2e39', y_on_right=True, facecolor='#131722', figcolor='#131722')
@@ -447,8 +352,8 @@ def generate_execution_chart(setup):
     addplots = [
         mpf.make_addplot(chart_df['EMA50'], color='#2962ff', width=1.5),
         mpf.make_addplot(upper_series, color='#00e676', width=2.0, linestyle='-'),
-        mpf.make_addplot(lower_series, color='#00e676', width=2.0, linestyle='-'),
-        mpf.make_addplot(eq_series, color='#ff9800', width=1.5, linestyle='--')
+        mpf.make_addplot(middle_series, color='#ff9800', width=2.0, linestyle='--'),
+        mpf.make_addplot(lower_series, color='#00e676', width=2.0, linestyle='-')
     ]
     
     all_visible_values = pd.concat([
@@ -473,7 +378,7 @@ def generate_execution_chart(setup):
     ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2)
     
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-    ax.set_title(f"{setup['symbol']} {setup['selected_tf']} Rejection & Pivot Analysis\n{setup['trendline_status']} | {current_time_str}", color='white', fontsize=11, fontweight='bold', pad=12)
+    ax.set_title(f"{setup['symbol']} 30M Dealing Range Analysis\n{setup['trendline_status']} | {current_time_str}", color='white', fontsize=11, fontweight='bold', pad=12)
     
     fig.savefig(img_buf, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -481,7 +386,7 @@ def generate_execution_chart(setup):
     return img_buf
 
 # ==========================================
-# 7. PROFESSIONAL TELEGRAM MENU & ASSET CONTAINER
+# 6. PROFESSIONAL TELEGRAM MENU & ASSET CONTAINER
 # ==========================================
 user_languages = {}
 active_subscribers = set()
@@ -516,9 +421,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_auto = chat_id in active_subscribers
     
     welcome_text = (
-        "INSTITUTIONAL REJECTION DESK\n"
+        "INSTITUTIONAL DEALING RANGE TERMINAL (30M)\n"
         "-----------------------------------\n"
-        "Terminal active with Rejection Exhaustion Validation and Internal Pivot Mapping.\n\n"
+        "Terminal active with Up/Down Dealing Range Channels and Middle Trendline Entry Pivot.\n\n"
         "Status: Ready. Select an asset category or type any ticker symbol directly into chat."
     )
     await update.message.reply_text(
@@ -535,12 +440,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     symbol = text.upper()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     
-    await update.message.reply_text(f"Evaluating rejection and pivots for {symbol}...")
+    await update.message.reply_text(f"Running analysis for {symbol}")
     try:
-        df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
-        setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
+        df_30m = fetch_m30_institutional_data(symbol)
+        setup = central_decision_engine(symbol, df_30m)
 
-        metrics = f"- Timestamp: {ts}\n- TF: {setup['selected_tf']}\n- Signal: {setup['direction']} ({setup['action_type']})\n"
+        metrics = f"- Timestamp: {ts}\n- TF: 30M\n- Signal: {setup['direction']} ({setup['action_type']})\n"
         ai_commentary = fetch_ai_commentary(metrics, lang)
         memo_text = generate_institutional_memorandum(symbol, setup)
         chart_img = generate_execution_chart(setup)
@@ -550,13 +455,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         price_box = (
             f"SUMMARY BOX ({symbol}):\n"
-            f"- TF: {setup['selected_tf']} | Bias: {setup['macro_bias']}\n"
+            f"- TF: 30M | Dealing Range Active\n"
             f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
             f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
             f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
         )
         
-        await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART: {symbol} ({setup['selected_tf']}) | {ts}")
+        await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART: {symbol} (30M) | {ts}")
         await context.bot.send_message(chat_id=chat_id, text=price_box)
         await context.bot.send_message(chat_id=chat_id, text=memo_text)
         await context.bot.send_message(chat_id=chat_id, text=ai_commentary)
@@ -572,8 +477,8 @@ async def background_continuous_scanner(application):
         try:
             if active_subscribers:
                 symbol = "GBPAUD"
-                df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
-                setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
+                df_30m = fetch_m30_institutional_data(symbol)
+                setup = central_decision_engine(symbol, df_30m)
                 
                 if setup['confidence'] >= 80:
                     decimals = 3 if "JPY" in symbol else (2 if "XAU" in symbol or "GOLD" in symbol else 5)
@@ -581,9 +486,9 @@ async def background_continuous_scanner(application):
                     scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
                     
                     raw_signal_text = (
-                        f"REJECTION SIGNAL ({symbol})\n"
+                        f"DEALING RANGE SIGNAL ({symbol})\n"
                         f"Timestamp: {scan_timestamp}\n"
-                        f"Timeframe: {setup['selected_tf']}\n"
+                        f"Timeframe: 30M\n"
                         f"Signal: {setup['direction']} ({setup['action_type']})\n"
                         f"Entry: {fmt.format(setup['entry'])}\n"
                         f"SL: {fmt.format(setup['sl'])}\n"
@@ -692,12 +597,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_an|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"Running rejection analysis for {symbol}...")
+        await query.edit_message_text(text=f"Running analysis for {symbol}")
         try:
-            df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
-            setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
+            df_30m = fetch_m30_institutional_data(symbol)
+            setup = central_decision_engine(symbol, df_30m)
 
-            metrics = f"- Timestamp: {ts}\n- TF: {setup['selected_tf']}\n- Signal: {setup['direction']}\n"
+            metrics = f"- Timestamp: {ts}\n- TF: 30M\n- Signal: {setup['direction']}\n"
             ai_commentary = fetch_ai_commentary(metrics, lang)
             memo_text = generate_institutional_memorandum(symbol, setup)
             chart_img = generate_execution_chart(setup)
@@ -707,13 +612,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             
             price_box = (
                 f"SUMMARY BOX ({symbol}):\n"
-                f"- TF: {setup['selected_tf']} | Bias: {setup['macro_bias']}\n"
+                f"- TF: 30M | Dealing Range Active\n"
                 f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
                 f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
                 f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
             )
             
-            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART: {symbol} ({setup['selected_tf']}) | {ts}")
+            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART: {symbol} (30M) | {ts}")
             await context.bot.send_message(chat_id=chat_id, text=price_box)
             await context.bot.send_message(chat_id=chat_id, text=memo_text)
             await context.bot.send_message(chat_id=chat_id, text=ai_commentary)
@@ -724,18 +629,18 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_sig|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"Verifying Rejection Signal for {symbol}...")
+        await query.edit_message_text(text=f"Running analysis for {symbol}")
         try:
-            df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
-            setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
+            df_30m = fetch_m30_institutional_data(symbol)
+            setup = central_decision_engine(symbol, df_30m)
 
             decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else 5
             fmt = f"{{:.{decimals}f}}"
             
             raw_sig = (
-                f"REJECTION SIGNAL ({symbol})\n"
+                f"DEALING RANGE SIGNAL ({symbol})\n"
                 f"Timestamp: {ts}\n"
-                f"Timeframe: {setup['selected_tf']}\n"
+                f"Timeframe: 30M\n"
                 f"Signal: {setup['direction']} ({setup['action_type']})\n"
                 f"Entry: {fmt.format(setup['entry'])}\n"
                 f"SL: {fmt.format(setup['sl'])}\n"
@@ -751,9 +656,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "menu_help":
         help_text = (
             "TERMINAL GUIDE:\n\n"
-            "- Rejection Exhaustion: Automatically detects when price probes an outer boundary or fails a higher high/lower low continuation, closing back inside to prevent getting trapped in false breakouts.\n"
-            "- Internal Pivots: Maps 25%, Equilibrium (50%), and 75% levels for precise range rotation.\n"
-            "- Custom Tickers: Send any symbol in chat anytime."
+            "- Dealing Range: Up and down channels act as the trading/dealing range.\n"
+            "- Middle Trendline: Dedicated entry pivot where healthy candle closes trigger buy setups.\n"
+            "- Channel Breaks: Breaks below the major down channel trigger sell signals.\n"
+            "- Clean Output: Says 'Running analysis for [Symbol]' before displaying results."
         )
         kb = [[InlineKeyboardButton("« Back", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb))
