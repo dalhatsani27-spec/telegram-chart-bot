@@ -22,7 +22,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "Dynamic Institutional Trend Filter & Dealing Range Engine Active 24/7!", 200
+    return "Horizontal & Dynamic Channel Institutional Engine Active 24/7!", 200
 
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -75,16 +75,16 @@ def translate_text(text, target_language):
 
 def fetch_ai_commentary(metrics_summary, target_language="English"):
     if not OPENROUTER_API_KEY:
-        base_text = "🎯 DYNAMIC DESK SUMMARY: Live market narrative and dynamic structure evaluated."
+        base_text = "🎯 HORIZONTAL DESK SUMMARY: Hybrid horizontal and parallel structure evaluated."
         return translate_text(base_text, target_language)
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
     prompt = f"""
     You are a professional price action desk analyst. 
-    Here are the live dynamic market metrics:
+    Here are the live hybrid structural metrics:
     {metrics_summary}
     
-    Provide a concise 3-line institutional summary focusing on the live structural narrative and dynamic shift.
+    Provide a concise 3-line institutional summary focusing on how price respects horizontal levels and channel boundaries.
     
     Write the response directly in {target_language}.
     """
@@ -101,7 +101,7 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
         except Exception:
             continue
             
-    fallback = "🎯 DYNAMIC DESK SUMMARY: Live structural mapping updated based on recent price action."
+    fallback = "🎯 HORIZONTAL DESK SUMMARY: Hybrid horizontal mapping synchronized with live price action."
     return translate_text(fallback, target_language)
 
 # ==========================================
@@ -208,12 +208,17 @@ def fetch_institutional_multi_tf_data(symbol):
     return df_30m, macro_close > macro_ema, macro_ema
 
 # ==========================================
-# 4. DYNAMIC DEALING RANGE & MULTI-LINE PATTERN ENGINE
+# 4. HYBRID HORIZONTAL & PARGIRAL CHANNEL ENGINE
 # ==========================================
 def analyze_m30_dealing_range_pattern(df_30m):
     lows = df_30m['Low'].values
     highs = df_30m['High'].values
     x_vals = np.arange(len(df_30m))
+
+    # Detect Key Horizontal Structural Levels (Support & Resistance)
+    horizontal_resistance = float(np.percentile(highs, 92))
+    horizontal_support = float(np.percentile(lows, 8))
+    intermediate_level = float(np.median(df_30m['Close'].tail(50)))
 
     swing_lows = []
     for i in range(2, len(df_30m) - 2):
@@ -236,27 +241,16 @@ def analyze_m30_dealing_range_pattern(df_30m):
             slope_upper = (p2_h[1] - p1_h[1]) / (p2_h[0] - p1_h[0] if p2_h[0] != p1_h[0] else 1)
             intercept_upper = p1_h[1] - slope_upper * p1_h[0]
             upper_line = slope_upper * x_vals + intercept_upper
-            
-            # Dynamic Pattern Classification
-            channel_width = np.mean(upper_line - lower_line)
-            if abs(slope_upper - slope_lower) < 0.0001:
-                pattern_name = "Parallel Dealing Range Channel"
-            elif slope_upper <= 0.00005 and slope_lower > 0:
-                pattern_name = "Ascending Triangle Compression"
-            elif channel_width > (df_30m['ATR'].iloc[-1] * 6):
-                pattern_name = "Multi-Line Parallel Pitchfork Channel"
-            else:
-                pattern_name = "Dynamic Channel Structure"
+            pattern_name = "Hybrid Horizontal & Parallel Channel Structure"
         else:
             upper_line = lower_line + (df_30m['High'].max() - df_30m['Low'].min())
-            pattern_name = "Dynamic Ascending Channel"
+            pattern_name = "Hybrid Ascending Channel"
     else:
         min_l, max_h = df_30m['Low'].min(), df_30m['High'].max()
         lower_line = np.full(len(df_30m), min_l)
         upper_line = np.full(len(df_30m), max_h)
-        pattern_name = "Dynamic Consolidation Range"
+        pattern_name = "Horizontal Range Map"
 
-    # Multi-line sub-channel subdivisions for live structural storytelling
     middle_line = (lower_line + upper_line) / 2.0
     sub_upper = lower_line + (upper_line - lower_line) * 0.75
     sub_lower = lower_line + (upper_line - lower_line) * 0.25
@@ -269,11 +263,14 @@ def analyze_m30_dealing_range_pattern(df_30m):
         "middle_line": middle_line,
         "sub_upper": sub_upper,
         "upper_line": upper_line,
+        "horizontal_resistance": horizontal_resistance,
+        "horizontal_support": horizontal_support,
+        "intermediate_level": intermediate_level,
         "current_lower": lower_line[-1],
         "current_middle": middle_line[-1],
         "current_upper": upper_line[-1],
         "pattern_name": pattern_name,
-        "status_msg": f"Dynamic Structure: {pattern_name}"
+        "status_msg": f"Hybrid Structure: {pattern_name}"
     }
 
 def evaluate_dealing_range_signals(channel_eval, macro_bullish):
@@ -282,38 +279,24 @@ def evaluate_dealing_range_signals(channel_eval, macro_bullish):
     prev_close = df['Close'].iloc[-2]
     middle_limit = channel_eval['current_middle']
     lower_limit = channel_eval['current_lower']
-    tolerance = 0.0003
     
-    if current_close < (lower_limit - tolerance):
+    if current_close < lower_limit:
         return {
             "signal": "SELL",
-            "action_type": "DYNAMIC_CHANNEL_BREAK_SELL",
-            "rationale": "Live price broke and closed below dynamic channel lower boundary. Bearish momentum active."
+            "action_type": "HORIZONTAL_BREAK_SELL",
+            "rationale": "Live price breached key horizontal/parallel support level. Downside expansion active."
         }
-    elif prev_close <= middle_limit and current_close > middle_limit:
-        if macro_bullish:
-            return {
-                "signal": "BUY",
-                "action_type": "MIDDLE_PIVOT_CROSS_BUY",
-                "rationale": "Healthy candle close crossing middle pivot in alignment with macro 200 EMA trend filter."
-            }
-        else:
-            return {
-                "signal": "BUY",
-                "action_type": "SHORT_TERM_CORRECTION_BUY",
-                "rationale": "Healthy candle close crossing middle pivot capturing short-term dynamic correction entry."
-            }
     elif current_close > middle_limit:
         return {
             "signal": "BUY",
-            "action_type": "DYNAMIC_CONTINUATION_BUY",
-            "rationale": "Price operating dynamically above middle range pivot. Continuation active."
+            "action_type": "HORIZONTAL_REACTION_BUY",
+            "rationale": "Price operating above middle structural threshold, respecting horizontal boundaries."
         }
     else:
         return {
             "signal": "SELL",
-            "action_type": "LOWER_RANGE_REACTION_SELL",
-            "rationale": "Price operating below middle range pivot within lower sub-channel zone."
+            "action_type": "RANGE_COMPRESSION_SELL",
+            "rationale": "Price testing lower sub-channel horizontal pivot zone."
         }
 
 def central_decision_engine(symbol):
@@ -328,12 +311,12 @@ def central_decision_engine(symbol):
     
     if direction == "BUY":
         entry_price = current_close
-        sweet_spot_sl = tail_df['Low'].min() - (tail_df['ATR'].iloc[-1] * 0.4)
+        sweet_spot_sl = channel_eval['horizontal_support'] - (tail_df['ATR'].iloc[-1] * 0.3)
         tp1 = entry_price + (abs(entry_price - sweet_spot_sl) * 1.5)
         tp2 = entry_price + (abs(entry_price - sweet_spot_sl) * 3.0)
     else:
         entry_price = current_close
-        sweet_spot_sl = tail_df['High'].max() + (tail_df['ATR'].iloc[-1] * 0.4)
+        sweet_spot_sl = channel_eval['horizontal_resistance'] + (tail_df['ATR'].iloc[-1] * 0.3)
         tp1 = entry_price - (abs(sweet_spot_sl - entry_price) * 1.5)
         tp2 = entry_price - (abs(sweet_spot_sl - entry_price) * 3.0)
         
@@ -344,7 +327,7 @@ def central_decision_engine(symbol):
         "action_type": action_eval["action_type"],
         "rationale": action_eval["rationale"],
         "confidence": confidence,
-        "macro_bias": f"Bullish (Macro 200 EMA Filter Active at {macro_ema:.5f})" if macro_bullish else f"Bearish / Correction Mode (Macro 200 EMA at {macro_ema:.5f})",
+        "macro_bias": f"Bullish (Macro Filter Active at {macro_ema:.2f})" if macro_bullish else f"Bearish / Correction Mode (Macro Filter at {macro_ema:.2f})",
         "trendline_status": channel_eval["status_msg"],
         "pattern_name": channel_eval["pattern_name"],
         "channel_data": channel_eval,
@@ -361,20 +344,20 @@ def generate_institutional_memorandum(asset_symbol, setup):
     fmt = f"{{:.{decimals}f}}"
     
     memo = (
-        f"DYNAMIC MAPPING MEMORANDUM ({asset_symbol})\n"
+        f"HORIZONTAL MAPPING MEMORANDUM ({asset_symbol})\n"
         f"Structure Identified: {setup['pattern_name']}\n"
         f"Timeframe: 30M | Signal: {setup['direction']} [{setup['action_type']}]\n\n"
-        f"LIVE STRUCTURAL BOUNDARIES:\n"
-        f"- Upper Channel Boundary: {fmt.format(c['current_upper'])}\n"
-        f"- Middle Pivot Line: {fmt.format(c['current_middle'])}\n"
-        f"- Lower Channel Boundary: {fmt.format(c['current_lower'])}\n\n"
+        f"KEY STRUCTURAL LEVELS:\n"
+        f"- Upper Horizontal Resistance: {fmt.format(c['horizontal_resistance'])}\n"
+        f"- Intermediate Range Pivot: {fmt.format(c['intermediate_level'])}\n"
+        f"- Lower Horizontal Support: {fmt.format(c['horizontal_support'])}\n\n"
         f"LIVE MARKET STORY & RATIONALE:\n"
         f"{setup['rationale']}"
     )
     return memo
 
 # ==========================================
-# 5. HIGH-RESOLUTION DYNAMIC CHART RENDERER
+# 5. HIGH-RESOLUTION HYBRID CHART RENDERER
 # ==========================================
 def generate_execution_chart(setup):
     img_buf = io.BytesIO()
@@ -382,9 +365,7 @@ def generate_execution_chart(setup):
     chart_df = channel_calc['df'].tail(80).copy()
     
     upper_series = pd.Series(channel_calc['upper_line'][-len(chart_df):], index=chart_df.index)
-    sub_upper_series = pd.Series(channel_calc['sub_upper'][-len(chart_df):], index=chart_df.index)
     middle_series = pd.Series(channel_calc['middle_line'][-len(chart_df):], index=chart_df.index)
-    sub_lower_series = pd.Series(channel_calc['sub_lower'][-len(chart_df):], index=chart_df.index)
     lower_series = pd.Series(channel_calc['lower_line'][-len(chart_df):], index=chart_df.index)
     
     mc = mpf.make_marketcolors(up='#089981', down='#f23645', edge='inherit', wick='inherit')
@@ -393,15 +374,13 @@ def generate_execution_chart(setup):
     addplots = [
         mpf.make_addplot(chart_df['EMA50'], color='#2962ff', width=1.5),
         mpf.make_addplot(upper_series, color='#00e676', width=2.0, linestyle='-'),
-        mpf.make_addplot(sub_upper_series, color='#00e676', width=1.0, linestyle='--'),
-        mpf.make_addplot(middle_series, color='#ff9800', width=2.0, linestyle='--'),
-        mpf.make_addplot(sub_lower_series, color='#00e676', width=1.0, linestyle='--'),
+        mpf.make_addplot(middle_series, color='#ff9800', width=1.5, linestyle='--'),
         mpf.make_addplot(lower_series, color='#00e676', width=2.0, linestyle='-')
     ]
     
     all_visible_values = pd.concat([
         chart_df['High'], chart_df['Low'], 
-        pd.Series([setup['tp1'], setup['tp2'], setup['entry']])
+        pd.Series([setup['tp1'], setup['tp2'], setup['entry'], channel_calc['horizontal_resistance'], channel_calc['horizontal_support']])
     ])
     ymin = all_visible_values.min()
     ymax = all_visible_values.max()
@@ -416,12 +395,16 @@ def generate_execution_chart(setup):
     )
     
     ax = axlist[0]
+    # Overlay Horizontal Trend Map Levels (Yellow / Green style)
+    ax.axhline(channel_calc['horizontal_resistance'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Horizontal Resistance')
+    ax.axhline(channel_calc['horizontal_support'], color='#00e676', linestyle='-', linewidth=1.5, label='Horizontal Support')
+    
     ax.axhline(setup['tp2'], color='#e53935', linestyle='--', linewidth=1.2)
     ax.axhline(setup['tp1'], color='#2962ff', linestyle='--', linewidth=1.2)
     ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2)
     
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-    ax.set_title(f"{setup['symbol']} 30M Dynamic {setup['pattern_name']}\n{setup['trendline_status']} | {current_time_str}", color='white', fontsize=11, fontweight='bold', pad=12)
+    ax.set_title(f"{setup['symbol']} 30M Hybrid Horizontal Mapping\n{setup['trendline_status']} | {current_time_str}", color='white', fontsize=11, fontweight='bold', pad=12)
     
     fig.savefig(img_buf, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -449,7 +432,7 @@ def get_home_menu(lang="English", auto_active=False):
     auto_status = "🟢 GBPAUD Continuous Scanner: ON" if auto_active else "🔴 GBPAUD Continuous Scanner: OFF"
     
     keyboard = [
-        [InlineKeyboardButton("📊 Run Dynamic Mapping", callback_data="menu_analysis"),
+        [InlineKeyboardButton("📊 Run Hybrid Mapping", callback_data="menu_analysis"),
          InlineKeyboardButton("🚨 Generate Live Signal", callback_data="menu_signal")],
         [InlineKeyboardButton("🔍 Type Custom Ticker / Pair", callback_data="prompt_custom_ticker")],
         [InlineKeyboardButton(auto_status, callback_data="toggle_auto_scan")],
@@ -464,9 +447,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_auto = chat_id in active_subscribers
     
     welcome_text = (
-        "DYNAMIC INSTITUTIONAL MAPPING TERMINAL\n"
-        "-----------------------------------\n"
-        "Terminal active with live dynamic channel recognition, multi-line sub-channels, and adaptive market storytelling.\n\n"
+        "HORIZONTAL & PARALLEL MAPPING TERMINAL\n"
+        "-------------------------------------\n"
+        "Terminal active with hybrid horizontal support/resistance levels combined with dynamic channels.\n\n"
         "Status: Ready. Select an asset category or type any ticker symbol directly into chat."
     )
     await update.message.reply_text(
@@ -483,7 +466,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     symbol = text.upper()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     
-    await update.message.reply_text(f"Running analysis for {symbol}")
+    await update.message.reply_text(f"Running hybrid horizontal analysis for {symbol}")
     try:
         setup = central_decision_engine(symbol)
 
@@ -496,7 +479,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         fmt = f"{{:.{decimals}f}}"
         
         summary_box = (
-            f"DYNAMIC SUMMARY BOX ({symbol}):\n"
+            f"HORIZONTAL SUMMARY BOX ({symbol}):\n"
             f"- TF: 30M | Structure: {setup['pattern_name']}\n"
             f"- Macro Bias: {setup['macro_bias']}\n"
             f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
@@ -528,7 +511,7 @@ async def background_continuous_scanner(application):
                     scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
                     
                     raw_signal_text = (
-                        f"DYNAMIC MAPPING SIGNAL ({symbol})\n"
+                        f"HORIZONTAL MAPPING SIGNAL ({symbol})\n"
                         f"Structure: {setup['pattern_name']}\n"
                         f"Timestamp: {scan_timestamp}\n"
                         f"Timeframe: 30M\n"
@@ -566,7 +549,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "prompt_custom_ticker":
         await query.edit_message_text(
-            text="Type Any Ticker / Pair:\n\nSend any symbol (e.g., EURUSD, XAUUSD, BTCUSD) in chat to run live mapping.",
+            text="Type Any Ticker / Pair:\n\nSend any symbol (e.g., EURUSD, XAUUSD, BTCUSD) in chat to run hybrid mapping.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_home")]]))
 
     elif data == "toggle_auto_scan":
@@ -640,7 +623,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_an|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"Running analysis for {symbol}")
+        await query.edit_message_text(text=f"Running hybrid analysis for {symbol}")
         try:
             setup = central_decision_engine(symbol)
 
@@ -653,7 +636,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             fmt = f"{{:.{decimals}f}}"
             
             summary_box = (
-                f"DYNAMIC SUMMARY BOX ({symbol}):\n"
+                f"HORIZONTAL SUMMARY BOX ({symbol}):\n"
                 f"- TF: 30M | Structure: {setup['pattern_name']}\n"
                 f"- Macro Bias: {setup['macro_bias']}\n"
                 f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
@@ -680,7 +663,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             fmt = f"{{:.{decimals}f}}"
             
             raw_sig = (
-                f"DYNAMIC MAPPING SIGNAL ({symbol})\n"
+                f"HORIZONTAL MAPPING SIGNAL ({symbol})\n"
                 f"Structure: {setup['pattern_name']}\n"
                 f"Timestamp: {ts}\n"
                 f"Timeframe: 30M\n"
@@ -698,11 +681,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "menu_help":
         help_text = (
-            "DYNAMIC MAPPING TERMINAL GUIDE:\n\n"
-            "- Dynamic Structural Mapping: Automatically adapts channels and multi-line sub-divisions based on live swing behavior.\n"
-            "- Non-Static Storytelling: Live narratives update dynamically with every scan.\n"
-            "- 1. Mapped Chart Image: High-resolution visual output with all sub-channels.\n"
-            "- 2. Detailed Institutional Analysis: Quantitative narrative outlining active boundaries and pivots."
+            "HORIZONTAL & PARALLEL MAPPING GUIDE:\n\n"
+            "- Hybrid Structural Mapping: Combines horizontal support/resistance lines with channel boundaries for clean, readable analysis.\n"
+            "- Realistic Visual Output: Identifies critical reaction zones just like manual charting."
         )
         kb = [[InlineKeyboardButton("« Back", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb))
