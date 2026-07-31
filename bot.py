@@ -86,7 +86,6 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
     {metrics_summary}
     
     Provide a concise 3-line institutional summary focusing on pattern recognition, validity status, and breakout validation.
-    If the pattern is marked as unclear/no-signal, say so plainly instead of inventing a directional bias.
     
     Write the response directly in {target_language}.
     """
@@ -213,130 +212,65 @@ def fetch_institutional_multi_tf_data(symbol):
 # ==========================================
 # 4. TRUE DYNAMIC GEOMETRY & PATTERN ENGINE
 # ==========================================
-# Minimum normalized drift (as a fraction of average price, over the analysis window)
-# required before we're willing to call something a "clear" ascending/descending channel.
-TREND_CLARITY_THRESHOLD = 0.015
-# Minimum swing separation (as a fraction of the resistance-support range) required
-# before we call a shoulder pattern "clear" rather than noise.
-HS_CLARITY_FRACTION = 0.03
-
 def analyze_backend_line_geometry(df_30m):
     close_prices = df_30m['Close'].values
     high_prices = df_30m['High'].values
     low_prices = df_30m['Low'].values
     x_vals = np.arange(len(df_30m))
-    span = len(df_30m)
 
     resistance_level = float(high_prices.max())
     support_level = float(low_prices.min())
     current_close = float(close_prices[-1])
-
+    
+    span = len(df_30m)
     slope, intercept = np.polyfit(x_vals, close_prices, 1)
     middle_line = slope * x_vals + intercept
-
-    # --- FIX: parallel channel anchoring bug ---
-    # The old code anchored the upper/lower channel lines at a fixed x-offset
-    # (x_vals[-30]) but took the price extreme over the *whole* last-30-bar window.
-    # Since the extreme rarely occurs exactly 30 bars back, the line was anchored
-    # at the wrong point and, combined with the trend slope, drifted away from
-    # where price actually was -- which silently corrupted "position in channel"
-    # and made support bounces get misread as mid-channel or resistance zones.
-    # Fix: anchor each line at the actual index where that extreme occurred.
-    recent_window = min(30, span)
-    window_start = span - recent_window
-    window_x = x_vals[window_start:]
-    window_high = high_prices[window_start:]
-    window_low = low_prices[window_start:]
-
-    upper_idx = int(np.argmax(window_high))
-    lower_idx = int(np.argmin(window_low))
-    upper_intercept = window_high[upper_idx] - slope * window_x[upper_idx]
-    lower_intercept = window_low[lower_idx] - slope * window_x[lower_idx]
+    
+    upper_intercept = high_prices[-30:].max() - slope * x_vals[-30]
+    lower_intercept = low_prices[-30:].min() - slope * x_vals[-30]
     upper_line = slope * x_vals + upper_intercept
     lower_line = slope * x_vals + lower_intercept
 
-    # --- FIX: slope wasn't normalized by price scale, so trend "clarity" and the
-    # confidence bonus derived from it were wildly inconsistent across assets
-    # (e.g. BTC's slope in raw price units dwarfs EURUSD's). Normalize as % drift.
-    avg_price = float(np.mean(close_prices)) or 1.0
-    normalized_slope = (slope * span) / avg_price
-
-    if normalized_slope > TREND_CLARITY_THRESHOLD and current_close >= middle_line[-1]:
+    if slope > 0.0001 and current_close >= middle_line[-1]:
         pattern_name = "Ascending Channel / Bullish Continuation Structure"
         bias = "BUY"
-    elif normalized_slope < -TREND_CLARITY_THRESHOLD and current_close <= middle_line[-1]:
+    elif slope < -0.0001 and current_close <= middle_line[-1]:
         pattern_name = "Descending Channel / Bearish Impulsive Trend"
         bias = "SELL"
     else:
         mid_idx = span // 2
-        left_shoulder = float(high_prices[:mid_idx].max())
-        head_high = float(high_prices.max())
-        right_shoulder = float(high_prices[mid_idx:].max())
-
-        left_trough = float(low_prices[:mid_idx].min())
-        head_low = float(low_prices.min())
-        right_trough = float(low_prices[mid_idx:].min())
-
-        swing_margin = (resistance_level - support_level) * HS_CLARITY_FRACTION
-
-        if head_high > left_shoulder + swing_margin and head_high > right_shoulder + swing_margin and current_close < middle_line[-1]:
+        left_shoulder = high_prices[:mid_idx].max()
+        head = high_prices.max()
+        right_shoulder = high_prices[mid_idx:].max()
+        
+        if head > left_shoulder and head > right_shoulder and current_close < middle_line[-1]:
             pattern_name = "Normal Head and Shoulders (Resistance Rejection)"
             bias = "SELL"
-        elif head_low < left_trough - swing_margin and head_low < right_trough - swing_margin and current_close > middle_line[-1]:
-            # FIX: the old fallback labeled ANYTHING that wasn't a normal H&S as an
-            # "Inverted Head and Shoulders" bullish setup, using the *highs* array,
-            # without ever checking the lows for an actual inverted structure.
-            # That's a fabricated pattern claim. Now it's checked against the lows.
-            pattern_name = "Inverted Head and Shoulders (Support Accumulation)"
-            bias = "BUY"
         else:
-            # FIX (per user requirement): if none of the above genuinely apply,
-            # say so instead of forcing a directional label.
-            pattern_name = "No Clear Pattern (Range-Bound / Insufficient Structure)"
-            bias = "NONE"
+            pattern_name = "Inverted Head and Shoulders (Support Accumulation / Breaker Block)"
+            bias = "BUY"
 
     atr = df_30m['ATR'].iloc[-1] if 'ATR' in df_30m.columns else (resistance_level - support_level) * 0.05
     if atr == 0: atr = 0.001
-
+    
     channel_width = upper_line[-1] - lower_line[-1]
     position_in_channel = (current_close - lower_line[-1]) / channel_width if channel_width != 0 else 0.5
-    position_in_channel = float(np.clip(position_in_channel, 0.0, 1.0))
+    position_in_channel = np.clip(position_in_channel, 0.0, 1.0)
+    
+    base_confidence = 60.0
+    trend_strength_bonus = min(20.0, abs(slope) * 10000)
+    position_bonus = (1.0 - abs(position_in_channel - 0.5)) * 14.5
+    confidence_score = float(np.clip(base_confidence + trend_strength_bonus + position_bonus, 45.0, 94.5))
 
-    # --- FIX: momentum confirmation. The user wants confidence to reflect
-    # buyer/seller dominance building as the move continues, not just static slope.
-    recent_closes = close_prices[-6:]
-    diffs = np.diff(recent_closes)
     if bias == "BUY":
-        momentum_bonus = float(min(8.0, np.sum(diffs > 0) * 1.6))
-    elif bias == "SELL":
-        momentum_bonus = float(min(8.0, np.sum(diffs < 0) * 1.6))
+        invalidation_threshold = support_level - (atr * 0.5)
+        is_valid = current_close >= invalidation_threshold
     else:
-        momentum_bonus = 0.0
+        invalidation_threshold = resistance_level + (atr * 0.5)
+        is_valid = current_close <= invalidation_threshold
 
-    if bias == "NONE":
-        # Deliberately capped low -- an unclear pattern should never score
-        # in "high confidence" territory, regardless of how flat/noisy price is.
-        confidence_score = float(np.clip(35.0 + (1.0 - abs(position_in_channel - 0.5)) * 10.0, 25.0, 50.0))
-        invalidation_threshold = None
-        is_valid = False
-        status_msg = "NO CLEAR STRUCTURE (Range-Bound / Ambiguous)"
-    else:
-        base_confidence = 55.0
-        trend_strength_bonus = min(20.0, abs(normalized_slope) * 500.0)
-        position_bonus = (1.0 - abs(position_in_channel - 0.5)) * 12.0
-        confidence_score = float(np.clip(
-            base_confidence + trend_strength_bonus + position_bonus + momentum_bonus, 45.0, 96.0
-        ))
-
-        if bias == "BUY":
-            invalidation_threshold = support_level - (atr * 0.5)
-            is_valid = current_close >= invalidation_threshold
-        else:
-            invalidation_threshold = resistance_level + (atr * 0.5)
-            is_valid = current_close <= invalidation_threshold
-
-        status_msg = "VALID Confirmed Structure" if is_valid else "INVALID (Structure Broken / Threshold Breached)"
-
+    status_msg = "VALID Confirmed Structure" if is_valid else "INVALID (Structure Broken / Threshold Breached)"
+    
     return {
         "df": df_30m,
         "x_vals": x_vals,
@@ -361,48 +295,38 @@ def evaluate_geometry_signals(geom_eval, macro_bullish):
     relative_position = geom_eval.get('position_in_channel', 0.5)
     current_close = geom_eval['df']['Close'].iloc[-1]
     support_floor = geom_eval['support_level']
-
-    # FIX: no clear pattern -> say so, don't force a side.
-    if geom_eval['calculated_bias'] == "NONE":
-        return {
-            "signal": "NO_SIGNAL",
-            "action_type": "NO_CLEAR_PATTERN",
-            "rationale": "No clear structural pattern detected -- trend is too weak/noisy and no defined channel or head-and-shoulders structure is present. Waiting for clearer price action before issuing a signal."
-        }
-
-    # FIX: an invalidated pattern used to auto-flip to the opposite direction,
-    # which fabricates directional confidence out of a broken setup. Now it
-    # correctly reports "no reliable signal" instead.
+    
     if not geom_eval['is_valid']:
         return {
-            "signal": "NO_SIGNAL",
-            "action_type": "PATTERN_INVALIDATED_NO_SIGNAL",
-            "rationale": "Pattern is INVALID: price breached the structural invalidation threshold. No reliable directional signal until the structure reforms."
+            "signal": "BUY" if geom_eval['calculated_bias'] == "SELL" else "SELL",
+            "action_type": "PATTERN_INVALIDATED_REVERSAL",
+            "rationale": "Pattern is INVALID. Price breached structural invalidation threshold."
         }
-
+    
+    # SUPPORT FLOOR DEFENSE: Force support bounce buy if price tests lower horizontal floor without destructive breakdown closure
     if relative_position <= 0.25 or current_close <= support_floor * 1.003:
         return {
             "signal": "BUY",
             "action_type": "LOWER_CHANNEL_SUPPORT_BOUNCE",
-            "rationale": f"Price tested structural support floor ({support_floor:.2f}) and held without a breakdown close. Support bounce buy setup."
+            "rationale": f"Price tested structural support floor ({support_floor:.2f}) and held without breakdown closure. Triggering support bounce buy."
         }
     elif relative_position >= 0.75:
         return {
             "signal": "SELL",
             "action_type": "UPPER_CHANNEL_RESISTANCE_REJECTION",
-            "rationale": f"Price is at the structural channel ceiling (relative position: {relative_position:.2f}). Resistance rejection sell setup."
+            "rationale": f"Price is at structural channel ceiling (relative pos: {relative_position:.2f}). Triggering resistance rejection sell."
         }
     elif geom_eval['calculated_bias'] == "BUY":
         return {
             "signal": "BUY",
-            "action_type": "TREND_CONTINUATION",
-            "rationale": "Pattern is VALID. Bullish structural geometry holding mid-channel."
+            "action_type": "SUPPORT_BOUNCE_OR_CONTINUATION",
+            "rationale": "Pattern is VALID. Bullish structural geometry and support reaction holding."
         }
     else:
         return {
             "signal": "SELL",
-            "action_type": "TREND_CONTINUATION",
-            "rationale": "Pattern is VALID. Bearish structural geometry holding mid-channel."
+            "action_type": "RESISTANCE_REJECTION_OR_IMPULSE",
+            "rationale": "Pattern is VALID. Bearish structural geometry and resistance pressure active."
         }
 
 def central_decision_engine(symbol):
@@ -421,17 +345,11 @@ def central_decision_engine(symbol):
         sweet_spot_sl = geom_eval['support_level'] - (atr_val * 0.5)
         tp1 = entry_price + (abs(entry_price - sweet_spot_sl) * 1.5)
         tp2 = entry_price + (abs(entry_price - sweet_spot_sl) * 3.0)
-    elif direction == "SELL":
+    else:
         entry_price = current_close
         sweet_spot_sl = geom_eval['resistance_level'] + (atr_val * 0.5)
         tp1 = entry_price - (abs(sweet_spot_sl - entry_price) * 1.5)
         tp2 = entry_price - (abs(sweet_spot_sl - entry_price) * 3.0)
-    else:
-        # NO_SIGNAL: don't fabricate trade levels for a setup we're not calling
-        entry_price = current_close
-        sweet_spot_sl = None
-        tp1 = None
-        tp2 = None
         
     return {
         "symbol": symbol,
@@ -452,22 +370,11 @@ def central_decision_engine(symbol):
         "tp2": tp2
     }
 
-def format_trade_block(setup, fmt):
-    """Central place that renders the SL/TP block, or an honest 'no trade' line
-    instead of numbers when direction is NO_SIGNAL."""
-    if setup["direction"] == "NO_SIGNAL" or setup["sl"] is None:
-        return f"- No trade: {setup['rationale']}\n"
-    return (
-        f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
-        f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
-    )
-
 def generate_institutional_memorandum(asset_symbol, setup):
     g = setup["geometry_data"]
     decimals = 2 if asset_symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else (3 if "JPY" in asset_symbol else 5)
     fmt = f"{{:.{decimals}f}}"
-    invalidation_str = fmt.format(g['invalidation_threshold']) if g['invalidation_threshold'] is not None else "N/A"
-
+    
     memo = (
         f"INSTITUTIONAL STRUCTURAL MEMORANDUM ({asset_symbol})\n"
         f"Pattern Type: {setup['pattern_name']}\n"
@@ -476,7 +383,7 @@ def generate_institutional_memorandum(asset_symbol, setup):
         f"KEY GEOMETRIC LEVELS:\n"
         f"- Upper Resistance / Ceiling: {fmt.format(g['resistance_level'])}\n"
         f"- Support / Floor: {fmt.format(g['support_level'])}\n"
-        f"- Invalidation Threshold: {invalidation_str}\n\n"
+        f"- Invalidation Threshold: {fmt.format(g['invalidation_threshold'])}\n\n"
         f"LIVE MARKET RATIONALE:\n"
         f"{setup['rationale']}"
     )
@@ -523,13 +430,8 @@ def generate_execution_chart(setup):
     ax.axhline(geom_calc['support_level'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Structural Support')
     ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2, label='Entry')
     
-    if setup['direction'] == "NO_SIGNAL":
-        validity_tag = "NO SIGNAL"
-        status_color = "#ffb300"
-    else:
-        validity_tag = "VALID" if setup['is_valid'] else "INVALID"
-        status_color = "#00e676" if setup['is_valid'] else "#f23645"
-
+    validity_tag = "VALID" if setup['is_valid'] else "INVALID"
+    status_color = "#00e676" if setup['is_valid'] else "#f23645"
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     
     ax.set_title(f"{setup['symbol']} Institutional Geometry Map [{validity_tag}]\nPattern: {setup['pattern_name']} | Confidence: {setup['confidence']:.1f}% | {current_time_str}", color=status_color, fontsize=9, fontweight='bold', pad=12)
@@ -611,10 +513,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"SUMMARY BOX ({symbol}):\n"
             f"- Pattern: {setup['pattern_name']}\n"
             f"- Confidence Score: {setup['confidence']:.1f}%\n"
-            f"- Validity Status: {'VALID 🟢' if setup['is_valid'] else ('NO SIGNAL 🟡' if setup['direction']=='NO_SIGNAL' else 'INVALID 🔴')}\n"
+            f"- Validity Status: {'VALID 🟢' if setup['is_valid'] else 'INVALID 🔴'}\n"
             f"- Macro Bias: {setup['macro_bias']}\n"
             f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
-            + format_trade_block(setup, fmt)
+            f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
+            f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
         )
         
         await status_msg.delete()
@@ -640,7 +543,7 @@ async def background_continuous_scanner(application):
                 symbol = "GBPAUD"
                 setup = central_decision_engine(symbol)
                 
-                if setup['direction'] != "NO_SIGNAL" and setup['confidence'] >= 75 and setup['is_valid']:
+                if setup['confidence'] >= 75 and setup['is_valid']:
                     decimals = 3 if "JPY" in symbol else (2 if "XAU" in symbol or "GOLD" in symbol else 5)
                     fmt = f"{{:.{decimals}f}}"
                     scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
@@ -723,17 +626,15 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else (3 if "JPY" in symbol else 5)
             fmt = f"{{:.{decimals}f}}"
             
-            validity_str = 'VALID 🟢' if setup['is_valid'] else ('NO SIGNAL 🟡' if setup['direction']=='NO_SIGNAL' else 'INVALID 🔴')
-            g = setup['geometry_data']
-            invalidation_str = fmt.format(g['invalidation_threshold']) if g['invalidation_threshold'] is not None else "N/A"
+            validity_str = "VALID 🟢" if setup['is_valid'] else "INVALID 🔴"
             scanner_result_box = (
                 f"PATTERN SCANNER RESULT ({symbol}):\n"
                 f"- Pattern: {setup['pattern_name']}\n"
                 f"- Status: {validity_str}\n"
                 f"- Confidence Score: {setup['confidence']:.1f}%\n"
                 f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
-                + format_trade_block(setup, fmt)
-                + f"- Invalidation: {invalidation_str}\n"
+                f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
+                f"- SL: {fmt.format(setup['sl'])} | Invalidation: {fmt.format(setup['geometry_data']['invalidation_threshold'])}\n"
             )
             
             await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"SCANNER MAPPING: {symbol} | {ts}")
@@ -834,10 +735,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 f"SUMMARY BOX ({symbol}):\n"
                 f"- Pattern: {setup['pattern_name']}\n"
                 f"- Confidence Score: {setup['confidence']:.1f}%\n"
-                f"- Validity Status: {'VALID 🟢' if setup['is_valid'] else ('NO SIGNAL 🟡' if setup['direction']=='NO_SIGNAL' else 'INVALID 🔴')}\n"
+                f"- Validity Status: {'VALID 🟢' if setup['is_valid'] else 'INVALID 🔴'}\n"
                 f"- Macro Bias: {setup['macro_bias']}\n"
                 f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
-                + format_trade_block(setup, fmt)
+                f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
+                f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
             )
             
             await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART MAPPING: {symbol} (30M) | {ts}")
@@ -857,31 +759,20 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
             decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else (3 if "JPY" in symbol else 5)
             fmt = f"{{:.{decimals}f}}"
-
-            if setup['direction'] == "NO_SIGNAL":
-                raw_sig = (
-                    f"INSTITUTIONAL GEOMETRY SIGNAL ({symbol})\n"
-                    f"Pattern: {setup['pattern_name']}\n"
-                    f"Status: NO SIGNAL 🟡\n"
-                    f"Confidence: {setup['confidence']:.1f}%\n"
-                    f"Timestamp: {ts}\n"
-                    f"Timeframe: 30M\n\n"
-                    f"No trade: {setup['rationale']}"
-                )
-            else:
-                raw_sig = (
-                    f"INSTITUTIONAL GEOMETRY SIGNAL ({symbol})\n"
-                    f"Pattern: {setup['pattern_name']}\n"
-                    f"Status: {'VALID 🟢' if setup['is_valid'] else 'INVALID 🔴'}\n"
-                    f"Confidence: {setup['confidence']:.1f}%\n"
-                    f"Timestamp: {ts}\n"
-                    f"Timeframe: 30M\n"
-                    f"Signal: {setup['direction']} ({setup['action_type']})\n"
-                    f"Entry: {fmt.format(setup['entry'])}\n"
-                    f"SL: {fmt.format(setup['sl'])}\n"
-                    f"TP1: {fmt.format(setup['tp1'])}\n"
-                    f"TP2: {fmt.format(setup['tp2'])}\n"
-                )
+            
+            raw_sig = (
+                f"INSTITUTIONAL GEOMETRY SIGNAL ({symbol})\n"
+                f"Pattern: {setup['pattern_name']}\n"
+                f"Status: {'VALID 🟢' if setup['is_valid'] else 'INVALID 🔴'}\n"
+                f"Confidence: {setup['confidence']:.1f}%\n"
+                f"Timestamp: {ts}\n"
+                f"Timeframe: 30M\n"
+                f"Signal: {setup['direction']} ({setup['action_type']})\n"
+                f"Entry: {fmt.format(setup['entry'])}\n"
+                f"SL: {fmt.format(setup['sl'])}\n"
+                f"TP1: {fmt.format(setup['tp1'])}\n"
+                f"TP2: {fmt.format(setup['tp2'])}\n"
+            )
             final_sig = translate_text(raw_sig, lang)
             await context.bot.send_message(chat_id=chat_id, text=final_sig)
             await context.bot.send_message(chat_id=chat_id, text="Complete. Choose next action:", reply_markup=get_home_menu(lang, is_auto))
@@ -892,13 +783,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         help_text = (
             "HOW DYNAMIC PATTERN RECOGNITION WORKS:\n\n"
             "1. Independent Slope & Structural Classification:\n"
-            "   - The bot calculates linear regression slopes (normalized against price scale) and swing structures unique to each selected asset.\n"
-            "   - Patterns dynamically shift between Ascending Channels, Descending Channels, Normal Head & Shoulders, and Inverted Head & Shoulders based on actual market data.\n"
-            "   - If none of these are clearly present, the bot reports 'No Clear Pattern' instead of forcing a label.\n\n"
+            "   - The bot calculates linear regression slopes and swing structures unique to each selected asset.\n"
+            "   - Patterns dynamically shift between Ascending Channels, Descending Channels, Normal Head & Shoulders, and Inverted Head & Shoulders based on actual market data.\n\n"
             "2. Mathematical Confidence Scoring & Boundary Filters:\n"
-            "   - Confidence is computed dynamically from trend momentum, price position within the channel, and short-term directional momentum.\n"
-            "   - Boundary override filters correct the label when price is testing the support floor or resistance ceiling, so a support bounce is never reported as a resistance rejection.\n"
-            "   - If a pattern's invalidation threshold is breached, the bot reports 'no reliable signal' rather than auto-flipping to the opposite trade."
+            "   - Confidence is computed dynamically from trend momentum and price position within channels.\n"
+            "   - Boundary override filters prevent incorrect continuation signals when price interacts directly with structural support floors or resistance ceilings."
         )
         kb = [[InlineKeyboardButton("« Back", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb))
