@@ -75,7 +75,7 @@ def translate_text(text, target_language):
 
 def fetch_ai_commentary(metrics_summary, target_language="English"):
     if not OPENROUTER_API_KEY:
-        base_text = "🎯 *AI INSTITUTIONAL CHANNEL DESK COMMENTARY*\n\nEvaluating dynamic parallel channel geometry, breakout/retest triggers, and range-bound liquidity zones."
+        base_text = "🎯 AI INSTITUTIONAL CHANNEL DESK COMMENTARY\n\nEvaluating dynamic parallel channel geometry, breakout/retest triggers, and range-bound liquidity zones."
         return translate_text(base_text, target_language)
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
@@ -105,7 +105,7 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
         except Exception:
             continue
             
-    fallback = "🎯 *AI INSTITUTIONAL CHANNEL DESK COMMENTARY*\n\nDynamic channel mapped successfully. Monitoring boundary reactions for institutional entry deployment."
+    fallback = "🎯 AI INSTITUTIONAL CHANNEL DESK COMMENTARY\n\nDynamic channel mapped successfully. Monitoring boundary reactions for institutional entry deployment."
     return translate_text(fallback, target_language)
 
 # ==========================================
@@ -227,10 +227,6 @@ def fetch_top_down_institutional_data(symbol):
 # 4. DYNAMIC PARALLEL SLOPED CHANNEL & TIMEFRAME PRIORITIZATION ENGINE
 # ==========================================
 def analyze_dynamic_parallel_channel(df_15m, df_30m):
-    """
-    Evaluates 15M and 30M charts dynamically to find the cleanest parallel channel,
-    anchoring lines based on true structural swing lows and highs (non-static).
-    """
     best_tf = "30M"
     best_channel = None
     max_score = -1
@@ -303,31 +299,20 @@ def analyze_dynamic_parallel_channel(df_15m, df_30m):
 # 5. EXACT EXECUTION TRIGGER RULES (BREAK, RETEST, RANGE)
 # ==========================================
 def evaluate_channel_action(current_close, current_high, current_low, lower_limit, upper_limit):
-    """
-    Evaluates price position relative to dynamic channel boundaries:
-    - Break and close below down channel -> SELL
-    - Break and close or retest of up channel -> BUY
-    - No boundary break -> Market is in range: buy demand and sell supply
-    """
-    tolerance = 0.0003  # Buffer for close/retest validation
+    tolerance = 0.0003
     
-    # Rule 1: Break and close below down channel -> SELL
     if current_close < (lower_limit - tolerance):
         return {
             "signal": "SELL",
             "action_type": "BREAK_AND_CLOSE_BELOW",
             "rationale": "Price has registered a break and close below the lower channel boundary. Bearish continuation signal triggered."
         }
-        
-    # Rule 2: Break and close or retest of up channel -> BUY
     elif current_close > (upper_limit + tolerance) or (abs(current_low - upper_limit) <= tolerance) or (abs(current_close - upper_limit) <= tolerance):
         return {
             "signal": "BUY",
             "action_type": "BREAK_AND_CLOSE_OR_RETEST_ABOVE",
             "rationale": "Price has achieved a break/close or clean retest of the upper channel boundary. Bullish execution active."
         }
-        
-    # Rule 3: No boundary break -> Range-bound market action
     else:
         return {
             "signal": "RANGE",
@@ -358,7 +343,7 @@ def central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
     
     direction = action_eval["signal"]
     if direction == "RANGE":
-        direction = "BUY" # Default operational bias for target calculations in range
+        direction = "BUY"
         
     confidence = 88
     
@@ -393,19 +378,16 @@ def central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
     }
 
 def generate_institutional_memorandum(asset_symbol, setup):
-    """
-    Generates comprehensive institutional memorandum incorporating dynamic timeframe selection and exact rules.
-    """
     signal = setup["direction"]
     action = setup["action_type"]
     rationale = setup["rationale"]
     tf_used = setup["selected_tf"]
     
-    memo = f"""📌 INSTITUTIONAL TRADE SETUP ({asset_symbol})
-⏱️ Execution Timeframe Prioritized: {tf_used}
-• Signal Output: {signal}
-• Trigger Type: {action}
-• Current Channel Status: Active Dynamic Parallel Corridor ({tf_used})
+    memo = f"""INSTITUTIONAL TRADE SETUP ({asset_symbol})
+Execution Timeframe Prioritized: {tf_used}
+- Signal Output: {signal}
+- Trigger Type: {action}
+- Current Channel Status: Active Dynamic Parallel Corridor ({tf_used})
 
 MEMORANDUM RATIONALE:
 1. Multi-Timeframe Structural Priority
@@ -415,9 +397,9 @@ Evaluated 30M and 15M market geometries dynamically to select the cleanest, high
 {rationale}
 
 3. Execution Plan
-* If BUY (Upper Channel Break/Retest): Target continuation toward expansion targets.
-* If SELL (Lower Channel Break/Close): Target momentum shift down through structural supports.
-* If RANGE (Contained): Execute strategy of buying local demand and selling local supply."""
+- If BUY (Upper Channel Break/Retest): Target continuation toward expansion targets.
+- If SELL (Lower Channel Break/Close): Target momentum shift down through structural supports.
+- If RANGE (Contained): Execute strategy of buying local demand and selling local supply."""
 
     return memo
 
@@ -507,15 +489,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_auto = chat_id in active_subscribers
     
     welcome_text = (
-        "🏛️ *INSTITUTIONAL DYNAMIC CHANNEL DESK*\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        "Terminal online with **Dynamic 30M/15M Channel Prioritization**, **Break/Close & Retest Rules**, **Range Demand/Supply Logic**, and **Complete Asset Container**.\n\n"
-        "📌 *Status:* Ready. Select an asset category or type any ticker symbol directly into chat."
+        "INSTITUTIONAL DYNAMIC CHANNEL DESK\n"
+        "-----------------------------------\n"
+        "Terminal online with Dynamic 30M/15M Channel Prioritization, Break/Close & Retest Rules, Range Demand/Supply Logic, and Complete Asset Container.\n\n"
+        "Status: Ready. Select an asset category or type any ticker symbol directly into chat."
     )
     await update.message.reply_text(
         welcome_text,
-        reply_markup=get_home_menu("English", is_auto),
-        parse_mode="Markdown"
+        reply_markup=get_home_menu("English", is_auto)
     )
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -527,7 +508,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     symbol = text.upper()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     
-    await update.message.reply_text(f"🔍 Analyzing dynamic parallel channels for **{symbol}** at `{ts}`...")
+    await update.message.reply_text(f"Analyzing dynamic parallel channels for {symbol} at {ts}...")
     try:
         df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
         setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
@@ -541,26 +522,26 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         fmt = f"{{:.{decimals}f}}"
         
         price_box = (
-            f"📌 *CHART ANALYZER ({symbol}):*\n"
-            f"⏱️ *Timestamp:* `{ts}`\n"
-            f"• Prioritized TF: {setup['selected_tf']}\n"
-            f"• 4H Macro Bias: {setup['macro_bias']}\n"
-            f"• Status: {setup['trendline_status']}\n"
-            f"• Signal/Action: **{setup['direction']}** ({setup['action_type']})\n"
-            f"• Current Price: {fmt.format(setup['current_market_price'])}\n"
-            f"• Reference Level: {fmt.format(setup['entry'])}\n"
-            f"• 5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
-            f"• TP1: {fmt.format(setup['tp1'])}\n"
-            f"• TP2: {fmt.format(setup['tp2'])}\n"
+            f"CHART ANALYZER ({symbol}):\n"
+            f"Timestamp: {ts}\n"
+            f"- Prioritized TF: {setup['selected_tf']}\n"
+            f"- 4H Macro Bias: {setup['macro_bias']}\n"
+            f"- Status: {setup['trendline_status']}\n"
+            f"- Signal/Action: {setup['direction']} ({setup['action_type']})\n"
+            f"- Current Price: {fmt.format(setup['current_market_price'])}\n"
+            f"- Reference Level: {fmt.format(setup['entry'])}\n"
+            f"- 5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
+            f"- TP1: {fmt.format(setup['tp1'])}\n"
+            f"- TP2: {fmt.format(setup['tp2'])}\n"
         )
         
-        await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *CHART: {symbol} ({setup['selected_tf']})*\n⏱️ `{ts}`", parse_mode="Markdown")
-        await context.bot.send_message(chat_id=chat_id, text=price_box, parse_mode="Markdown")
-        await context.bot.send_message(chat_id=chat_id, text=memo_text, parse_mode="Markdown")
-        await context.bot.send_message(chat_id=chat_id, text=ai_commentary, parse_mode="Markdown")
-        await context.bot.send_message(chat_id=chat_id, text="📌 *Complete.* Choose next action:", reply_markup=get_home_menu(lang, is_auto), parse_mode="Markdown")
+        await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART: {symbol} ({setup['selected_tf']}) | {ts}")
+        await context.bot.send_message(chat_id=chat_id, text=price_box)
+        await context.bot.send_message(chat_id=chat_id, text=memo_text)
+        await context.bot.send_message(chat_id=chat_id, text=ai_commentary)
+        await context.bot.send_message(chat_id=chat_id, text="Complete. Choose next action:", reply_markup=get_home_menu(lang, is_auto))
     except Exception as e:
-        await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed to analyze '{symbol}': {str(e)}\n\nPlease ensure the ticker symbol is correct.", reply_markup=get_home_menu(lang, is_auto))
+        await context.bot.send_message(chat_id=chat_id, text=f"Failed to analyze '{symbol}': {str(e)}\n\nPlease ensure the ticker symbol is correct.", reply_markup=get_home_menu(lang, is_auto))
 
 async def background_continuous_scanner(application):
     await asyncio.sleep(10)
@@ -579,8 +560,8 @@ async def background_continuous_scanner(application):
                     scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
                     
                     raw_signal_text = (
-                        f"🚨 **INSTITUTIONAL CHANNEL SIGNAL ({symbol})** 🚨\n"
-                        f"⏱️ *Timestamp:* {scan_timestamp}\n\n"
+                        f"INSTITUTIONAL CHANNEL SIGNAL ({symbol})\n"
+                        f"Timestamp: {scan_timestamp}\n\n"
                         f"Timeframe: {setup['selected_tf']}\n"
                         f"Signal: {setup['direction']} ({setup['action_type']})\n"
                         f"Status: {setup['trendline_status']}\n"
@@ -595,9 +576,9 @@ async def background_continuous_scanner(application):
                     lang = "English"
                     final_signal_text = translate_text(raw_signal_text, lang)
                     try:
-                        await application.bot.send_photo(chat_id=CHANNEL_ID, photo=chart_img, caption=f"🎯 *CHANNEL SIGNAL: {symbol}*\n⏱️ `{scan_timestamp}`", parse_mode="Markdown")
+                        await application.bot.send_photo(chat_id=CHANNEL_ID, photo=chart_img, caption=f"CHANNEL SIGNAL: {symbol} | {scan_timestamp}")
                         chart_img.seek(0)
-                        await application.bot.send_message(chat_id=CHANNEL_ID, text=final_signal_text, parse_mode="Markdown")
+                        await application.bot.send_message(chat_id=CHANNEL_ID, text=final_signal_text)
                     except Exception:
                         pass
         except Exception:
@@ -614,24 +595,22 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     is_auto = chat_id in active_subscribers
     
     if data == "menu_home":
-        await query.edit_message_text(text="🏛️ *Main Control Menu:*", reply_markup=get_home_menu(lang, is_auto), parse_mode="Markdown")
+        await query.edit_message_text(text="Main Control Menu:", reply_markup=get_home_menu(lang, is_auto))
 
     elif data == "prompt_custom_ticker":
         await query.edit_message_text(
-            text="✍️ **Type Any Ticker / Pair:**\n\nSimply type any asset symbol (e.g., `EURUSD`, `XAUUSD`, `BTCUSD`, `US30`, `NVDA`) directly into this chat, and the terminal will instantly run the dynamic channel analysis.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_home")]]),
-            parse_mode="Markdown"
-        )
+            text="Type Any Ticker / Pair:\n\nSimply type any asset symbol (e.g., EURUSD, XAUUSD, BTCUSD, US30, NVDA) directly into this chat, and the terminal will instantly run the dynamic channel analysis.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_home")]]))
 
     elif data == "toggle_auto_scan":
         if chat_id in active_subscribers:
             active_subscribers.remove(chat_id)
-            status_msg = "🔴 Continuous GBPAUD scanner disabled."
+            status_msg = "Continuous GBPAUD scanner disabled."
         else:
             active_subscribers.add(chat_id)
-            status_msg = "🟢 Continuous GBPAUD scanner enabled."
+            status_msg = "Continuous GBPAUD scanner enabled."
         is_auto = chat_id in active_subscribers
-        await query.edit_message_text(text=status_msg, reply_markup=get_home_menu(lang, is_auto), parse_mode="Markdown")
+        await query.edit_message_text(text=status_msg, reply_markup=get_home_menu(lang, is_auto))
 
     elif data == "menu_lang_select":
         kb = [
@@ -640,12 +619,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             [InlineKeyboardButton("🇳🇬 Pidgin", callback_data="set_lang|Pidgin")],
             [InlineKeyboardButton("« Back", callback_data="menu_home")]
         ]
-        await query.edit_message_text(text="🌍 *Select Language:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text(text="Select Language:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("set_lang|"):
         new_lang = data.split("|")[1]
         user_languages[chat_id] = new_lang
-        await query.edit_message_text(text=f"✅ Language updated to **{new_lang}**.", reply_markup=get_home_menu(new_lang, is_auto), parse_mode="Markdown")
+        await query.edit_message_text(text=f"Language updated to {new_lang}.", reply_markup=get_home_menu(new_lang, is_auto))
 
     elif data == "menu_analysis":
         kb = [
@@ -658,7 +637,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             [InlineKeyboardButton("🔍 Type Custom Ticker", callback_data="prompt_custom_ticker")],
             [InlineKeyboardButton("« Back", callback_data="menu_home")]
         ]
-        await query.edit_message_text(text="📊 *Select Asset Category for Channel Analysis:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text(text="Select Asset Category for Channel Analysis:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data == "menu_signal":
         kb = [
@@ -671,7 +650,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             [InlineKeyboardButton("🔍 Type Custom Ticker", callback_data="prompt_custom_ticker")],
             [InlineKeyboardButton("« Back", callback_data="menu_home")]
         ]
-        await query.edit_message_text(text="🚨 *Select Asset Category for Channel Signal:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text(text="Select Asset Category for Channel Signal:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("cat_an|") or data.startswith("cat_sig|"):
         action_type, cat_name = data.split("|")
@@ -689,12 +668,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             kb.append(row)
         kb.append([InlineKeyboardButton("« Back to Categories", callback_data="menu_analysis" if prefix=="run_an" else "menu_signal")])
         
-        await query.edit_message_text(text=f"📁 *{cat_name} Assets:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text(text=f"{cat_name} Assets:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data.startswith("run_an|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"🧠 Running Dynamic Channel Analysis for {symbol} at {ts}...")
+        await query.edit_message_text(text=f"Running Dynamic Channel Analysis for {symbol} at {ts}...")
         try:
             df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
@@ -708,31 +687,31 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             fmt = f"{{:.{decimals}f}}"
             
             price_box = (
-                f"📌 *CHART ANALYZER ({symbol}):*\n"
-                f"⏱️ *Timestamp:* `{ts}`\n"
-                f"• Prioritized TF: {setup['selected_tf']}\n"
-                f"• 4H Macro Bias: {setup['macro_bias']}\n"
-                f"• Status: {setup['trendline_status']}\n"
-                f"• Signal/Action: **{setup['direction']}** ({setup['action_type']})\n"
-                f"• Current Price: {fmt.format(setup['current_market_price'])}\n"
-                f"• Reference Level: {fmt.format(setup['entry'])}\n"
-                f"• 5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
-                f"• TP1: {fmt.format(setup['tp1'])}\n"
-                f"• TP2: {fmt.format(setup['tp2'])}\n"
+                f"CHART ANALYZER ({symbol}):\n"
+                f"Timestamp: {ts}\n"
+                f"- Prioritized TF: {setup['selected_tf']}\n"
+                f"- 4H Macro Bias: {setup['macro_bias']}\n"
+                f"- Status: {setup['trendline_status']}\n"
+                f"- Signal/Action: {setup['direction']} ({setup['action_type']})\n"
+                f"- Current Price: {fmt.format(setup['current_market_price'])}\n"
+                f"- Reference Level: {fmt.format(setup['entry'])}\n"
+                f"- 5M Sweet Spot SL: {fmt.format(setup['sl'])}\n"
+                f"- TP1: {fmt.format(setup['tp1'])}\n"
+                f"- TP2: {fmt.format(setup['tp2'])}\n"
             )
             
-            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"🎯 *CHART: {symbol} ({setup['selected_tf']})*\n⏱️ `{ts}`", parse_mode="Markdown")
-            await context.bot.send_message(chat_id=chat_id, text=price_box, parse_mode="Markdown")
-            await context.bot.send_message(chat_id=chat_id, text=memo_text, parse_mode="Markdown")
-            await context.bot.send_message(chat_id=chat_id, text=ai_commentary, parse_mode="Markdown")
-            await context.bot.send_message(chat_id=chat_id, text="📌 *Complete.* Choose next action:", reply_markup=get_home_menu(lang, is_auto), parse_mode="Markdown")
+            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART: {symbol} ({setup['selected_tf']}) | {ts}")
+            await context.bot.send_message(chat_id=chat_id, text=price_box)
+            await context.bot.send_message(chat_id=chat_id, text=memo_text)
+            await context.bot.send_message(chat_id=chat_id, text=ai_commentary)
+            await context.bot.send_message(chat_id=chat_id, text="Complete. Choose next action:", reply_markup=get_home_menu(lang, is_auto))
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed: {str(e)}", reply_markup=get_home_menu(lang, is_auto))
+            await context.bot.send_message(chat_id=chat_id, text=f"Failed: {str(e)}", reply_markup=get_home_menu(lang, is_auto))
 
     elif data.startswith("run_sig|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"🚨 Verifying Channel Signal for {symbol} at {ts}...")
+        await query.edit_message_text(text=f"Verifying Channel Signal for {symbol} at {ts}...")
         try:
             df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
@@ -741,8 +720,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             fmt = f"{{:.{decimals}f}}"
             
             raw_sig = (
-                f"🚨 **INSTITUTIONAL CHANNEL SIGNAL ({symbol})** 🚨\n"
-                f"⏱️ *Timestamp:* {ts}\n\n"
+                f"INSTITUTIONAL CHANNEL SIGNAL ({symbol})\n"
+                f"Timestamp: {ts}\n\n"
                 f"Timeframe: {setup['selected_tf']}\n"
                 f"Signal: {setup['direction']} ({setup['action_type']})\n"
                 f"Status: {setup['trendline_status']}\n"
@@ -752,20 +731,20 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 f"TP2: {fmt.format(setup['tp2'])}\n"
             )
             final_sig = translate_text(raw_sig, lang)
-            await context.bot.send_message(chat_id=chat_id, text=final_sig, parse_mode="Markdown")
-            await context.bot.send_message(chat_id=chat_id, text="📌 *Complete.* Choose next action:", reply_markup=get_home_menu(lang, is_auto), parse_mode="Markdown")
+            await context.bot.send_message(chat_id=chat_id, text=final_sig)
+            await context.bot.send_message(chat_id=chat_id, text="Complete. Choose next action:", reply_markup=get_home_menu(lang, is_auto))
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed: {str(e)}", reply_markup=get_home_menu(lang, is_auto))
+            await context.bot.send_message(chat_id=chat_id, text=f"Failed: {str(e)}", reply_markup=get_home_menu(lang, is_auto))
 
     elif data == "menu_help":
         help_text = (
-            "ℹ️ *TERMINAL GUIDE*\n\n"
-            "• **Dynamic Channels**: Automatically evaluates 30M and 15M charts to prioritize the cleanest parallel channel geometry.\n"
-            "• **Rules**: Break & close below lower channel = SELL. Break/close or retest of upper channel = BUY. Contained in range = Buy demand & sell supply.\n"
-            "• **Custom Tickers**: Type any ticker directly into chat anytime."
+            "TERMINAL GUIDE\n\n"
+            "- Dynamic Channels: Automatically evaluates 30M and 15M charts to prioritize the cleanest parallel channel geometry.\n"
+            "- Rules: Break & close below lower channel = SELL. Break/close or retest of upper channel = BUY. Contained in range = Buy demand & sell supply.\n"
+            "- Custom Tickers: Type any ticker directly into chat anytime."
         )
         kb = [[InlineKeyboardButton("« Back to Home", callback_data="menu_home")]]
-        await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb))
 
 def run_telegram_bot():
     if not TELEGRAM_BOT_TOKEN:
