@@ -63,7 +63,8 @@ def translate_text(text, target_language):
             response = ai_client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=600
+                max_tokens=600,
+                timeout=8
             )
             content = response.choices[0].message.content
             if content and len(content.strip()) > 10:
@@ -93,7 +94,8 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
             response = ai_client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=300
+                max_tokens=300,
+                timeout=8
             )
             content = response.choices[0].message.content
             if content and len(content.strip()) > 20:
@@ -212,20 +214,24 @@ def fetch_institutional_multi_tf_data(symbol):
 # ==========================================
 def analyze_backend_line_geometry(df_30m):
     close_prices = df_30m['Close'].values
+    high_prices = df_30m['High'].values
+    low_prices = df_30m['Low'].values
     x_vals = np.arange(len(df_30m))
 
-    resistance_level = float(close_prices.max())
-    support_level = float(close_prices.min())
+    resistance_level = float(high_prices.max())
+    support_level = float(low_prices.min())
     
     span = len(df_30m)
     slope = (close_prices[-1] - close_prices[0]) / span if span > 0 else 0
     intercept_mid = close_prices[0] - slope * 0
-    
-    channel_width = (resistance_level - support_level) * 0.45
     middle_line = slope * x_vals + intercept_mid
     
-    upper_line = middle_line + channel_width
-    lower_line = middle_line - channel_width
+    # Anchor upper and lower green trendlines directly to actual price peaks and troughs
+    upper_intercept = high_prices.max() - slope * (np.argmax(high_prices))
+    lower_intercept = low_prices.min() - slope * (np.argmin(low_prices))
+    
+    upper_line = slope * x_vals + upper_intercept
+    lower_line = slope * x_vals + lower_intercept
 
     confidence_score = 85.0
     pattern_name = "Head and Shoulders (Right Shoulder Bounce / Breaker Block)"
@@ -351,8 +357,6 @@ def generate_execution_chart(setup):
         mpf.make_addplot(lower_series, color='#00e676', width=2.0, linestyle='-')
     ]
     
-    # Fix compression: Base the y-axis strictly on the visible candles and active price action levels 
-    # rather than forcing distant take-profit targets into the viewport scale.
     price_min = chart_df['Low'].min()
     price_max = chart_df['High'].max()
     padding = (price_max - price_min) * 0.15
@@ -371,13 +375,7 @@ def generate_execution_chart(setup):
     ax = axlist[0]
     ax.axhline(geom_calc['resistance_level'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Structural Resistance / Neckline')
     ax.axhline(geom_calc['support_level'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Breaker Block / Support')
-    
-    # Plot target lines only if they fall within or close to the expanded viewport, or use annotations
     ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2, label='Entry')
-    if setup['tp1'] >= ymin and setup['tp1'] <= ymax:
-        ax.axhline(setup['tp1'], color='#2962ff', linestyle='--', linewidth=1.2, label='TP1')
-    if setup['tp2'] >= ymin and setup['tp2'] <= ymax:
-        ax.axhline(setup['tp2'], color='#e53935', linestyle='--', linewidth=1.2, label='TP2')
     
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     ax.set_title(f"{setup['symbol']} Institutional Geometry Map\nPattern: {setup['pattern_name']} | Confidence: {setup['confidence']:.1f}% | {current_time_str}", color='white', fontsize=10, fontweight='bold', pad=12)
@@ -442,7 +440,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     symbol = text.upper()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     
-    await update.message.reply_text(f"Running multi-timeframe geometric analysis for {symbol}")
+    status_msg = await update.message.reply_text(f"Running multi-timeframe geometric analysis for {symbol}...")
     try:
         setup = central_decision_engine(symbol)
 
@@ -464,12 +462,17 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
         )
         
+        await status_msg.delete()
         await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART MAPPING: {symbol} (30M) | {ts}")
         await context.bot.send_message(chat_id=chat_id, text=summary_box)
         await context.bot.send_message(chat_id=chat_id, text=memo_text)
         await context.bot.send_message(chat_id=chat_id, text=ai_commentary)
         await context.bot.send_message(chat_id=chat_id, text="Complete. Choose next action:", reply_markup=get_home_menu(lang, is_auto))
     except Exception as e:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
         await context.bot.send_message(chat_id=chat_id, text=f"Failed to analyze '{symbol}': {str(e)}", reply_markup=get_home_menu(lang, is_auto))
 
 async def background_continuous_scanner(application):
@@ -600,7 +603,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_an|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"Running institutional analysis for {symbol}")
+        await query.edit_message_text(text=f"Running institutional analysis for {symbol}...")
         try:
             setup = central_decision_engine(symbol)
 
@@ -633,7 +636,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_sig|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"Running analysis for {symbol}")
+        await query.edit_message_text(text=f"Running analysis for {symbol}...")
         try:
             setup = central_decision_engine(symbol)
 
