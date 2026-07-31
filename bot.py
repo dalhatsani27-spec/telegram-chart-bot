@@ -222,20 +222,15 @@ def analyze_backend_line_geometry(df_30m):
     support_level = float(low_prices.min())
     current_close = float(close_prices[-1])
     
-    # Calculate true linear regression slope for trend direction
     span = len(df_30m)
     slope, intercept = np.polyfit(x_vals, close_prices, 1)
     middle_line = slope * x_vals + intercept
     
-    # Dynamic trendline anchor points
     upper_intercept = high_prices.max() - slope * (np.argmax(high_prices))
     lower_intercept = low_prices.min() - slope * (np.argmin(low_prices))
     upper_line = slope * x_vals + upper_intercept
     lower_line = slope * x_vals + lower_intercept
 
-    # True Pattern Classification based on slope and price location
-    recent_momentum = close_prices[-1] - close_prices[-10] if span >= 10 else 0
-    
     if slope > 0.0001 and current_close >= middle_line[-1]:
         pattern_name = "Ascending Channel / Bullish Continuation Structure"
         bias = "BUY"
@@ -243,7 +238,6 @@ def analyze_backend_line_geometry(df_30m):
         pattern_name = "Descending Channel / Bearish Impulsive Trend"
         bias = "SELL"
     else:
-        # Check for Head and Shoulders variants based on swing extremes
         mid_idx = span // 2
         left_shoulder = high_prices[:mid_idx].max()
         head = high_prices.max()
@@ -256,7 +250,6 @@ def analyze_backend_line_geometry(df_30m):
             pattern_name = "Inverted Head and Shoulders (Support Accumulation / Breaker Block)"
             bias = "BUY"
 
-    # True Dynamic Confidence Calculation based on volatility, distance from bounds, and trend consistency
     atr = df_30m['ATR'].iloc[-1] if 'ATR' in df_30m.columns else (resistance_level - support_level) * 0.05
     if atr == 0: atr = 0.001
     
@@ -264,13 +257,11 @@ def analyze_backend_line_geometry(df_30m):
     position_in_channel = (current_close - lower_line[-1]) / channel_width if channel_width != 0 else 0.5
     position_in_channel = np.clip(position_in_channel, 0.0, 1.0)
     
-    # Mathematical confidence score (ranges dynamically from 45.0% to 94.5%)
     base_confidence = 60.0
     trend_strength_bonus = min(20.0, abs(slope) * 10000)
     position_bonus = (1.0 - abs(position_in_channel - 0.5)) * 14.5
     confidence_score = float(np.clip(base_confidence + trend_strength_bonus + position_bonus, 45.0, 94.5))
 
-    # True Invalidation Threshold Calculation
     if bias == "BUY":
         invalidation_threshold = support_level - (atr * 0.5)
         is_valid = current_close >= invalidation_threshold
@@ -301,11 +292,35 @@ def analyze_backend_line_geometry(df_30m):
 
 def evaluate_geometry_signals(geom_eval, macro_bullish):
     bias = geom_eval['calculated_bias']
+    current_close = geom_eval['df']['Close'].iloc[-1]
+    lower_line_val = geom_eval['current_lower']
+    upper_line_val = geom_eval['current_upper']
+    channel_range = upper_line_val - lower_line_val
+    
+    if channel_range == 0:
+        channel_range = 0.001
+        
+    relative_position = (current_close - lower_line_val) / channel_range
+    
     if not geom_eval['is_valid']:
         return {
             "signal": "SELL" if bias == "BUY" else "BUY",
             "action_type": "PATTERN_INVALIDATED_REVERSAL",
             "rationale": "Pattern is INVALID. Price breached structural invalidation threshold."
+        }
+    
+    # BOUNDARY REVERSAL OVERRIDES: Respect floor and ceiling extremes
+    if relative_position <= 0.20:
+        return {
+            "signal": "BUY",
+            "action_type": "LOWER_CHANNEL_SUPPORT_BOUNCE",
+            "rationale": "Price is testing/sweeping the lower channel boundary floor. High probability mean-reversion or support reaction."
+        }
+    elif relative_position >= 0.80:
+        return {
+            "signal": "SELL",
+            "action_type": "UPPER_CHANNEL_RESISTANCE_REJECTION",
+            "rationale": "Price is testing the upper channel boundary ceiling. High probability resistance rejection."
         }
     elif bias == "BUY":
         return {
@@ -776,8 +791,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             "1. Independent Slope & Structural Classification:\n"
             "   - The bot calculates linear regression slopes and swing structures unique to each selected asset.\n"
             "   - Patterns dynamically shift between Ascending Channels, Descending Channels, Normal Head & Shoulders, and Inverted Head & Shoulders based on actual market data.\n\n"
-            "2. Mathematical Confidence Scoring:\n"
-            "   - Confidence is computed dynamically from trend momentum and price position within channels rather than defaulting to static numbers."
+            "2. Mathematical Confidence Scoring & Boundary Filters:\n"
+            "   - Confidence is computed dynamically from trend momentum and price position within channels.\n"
+            "   - Boundary override filters prevent incorrect continuation signals when price interacts directly with structural support floors or resistance ceilings."
         )
         kb = [[InlineKeyboardButton("« Back", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb))
