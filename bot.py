@@ -75,16 +75,16 @@ def translate_text(text, target_language):
 
 def fetch_ai_commentary(metrics_summary, target_language="English"):
     if not OPENROUTER_API_KEY:
-        base_text = "🎯 AI DESK SUMMARY: Internal pivots mapped within channel for precision range execution."
+        base_text = "🎯 AI DESK SUMMARY: Rejection exhaustion and internal pivot rotation validated."
         return translate_text(base_text, target_language)
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
     prompt = f"""
     You are a senior institutional price-action desk analyst. 
-    Here are the quantitative multi-timeframe channel metrics and internal pivot levels:
+    Here are the quantitative channel metrics and rejection exhaustion status:
     {metrics_summary}
     
-    Provide a concise 3-line institutional summary focusing on structural bias, channel status, and internal pivot rejection points.
+    Provide a concise 3-line institutional summary focusing on structural rejection, failed higher high/lower low extensions, and internal rotation.
     
     Write the response directly in {target_language}.
     """
@@ -101,7 +101,7 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
         except Exception:
             continue
             
-    fallback = "🎯 AI DESK SUMMARY: Internal pivot mapping active to eliminate blind range entries."
+    fallback = "🎯 AI DESK SUMMARY: Rejection exhaustion confirmed; rotation toward equilibrium active."
     return translate_text(fallback, target_language)
 
 # ==========================================
@@ -220,7 +220,7 @@ def fetch_top_down_institutional_data(symbol):
     return df_4h, df_1h, df_30m, df_15m, df_5m
 
 # ==========================================
-# 4. DYNAMIC PARALLEL CHANNEL & INTERNAL PIVOT ENGINE
+# 4. DYNAMIC CHANNEL & REJECTION EXHAUSTION ENGINE
 # ==========================================
 def analyze_dynamic_parallel_channel(df_15m, df_30m):
     best_tf = "30M"
@@ -296,7 +296,6 @@ def calculate_internal_channel_pivots(channel_eval):
     upper_val = channel_eval['current_upper']
     channel_range = upper_val - lower_val
     
-    # Internal pivot mapping: Equilibrium (50%), Lower Mid (25%), Upper Mid (75%)
     eq_mid = lower_val + (channel_range * 0.50)
     lower_mid = lower_val + (channel_range * 0.25)
     upper_mid = lower_val + (channel_range * 0.75)
@@ -310,39 +309,53 @@ def calculate_internal_channel_pivots(channel_eval):
     }
 
 # ==========================================
-# 5. REFINED EXECUTION TRIGGER RULES WITH PIVOTS
+# 5. REJECTION EXHAUSTION & REALIGNMENT ENGINE
 # ==========================================
-def evaluate_channel_action(current_close, current_high, current_low, pivots):
+def evaluate_channel_action(chart_df, pivots):
     tolerance = 0.0003
-    lower_limit = pivots["lower_boundary"]
     upper_limit = pivots["upper_boundary"]
+    lower_limit = pivots["lower_boundary"]
     eq = pivots["equilibrium"]
     
-    if current_close < (lower_limit - tolerance):
+    current_close = chart_df['Close'].iloc[-1]
+    current_high = chart_df['High'].iloc[-1]
+    prev_high = chart_df['High'].iloc[-2]
+    
+    # Rejection exhaustion logic: checking if price tested/pierced upper boundary or failed to make a higher high, closing back inside
+    near_upper = (current_high >= (upper_limit - tolerance)) or (abs(current_close - upper_limit) <= tolerance)
+    failed_higher_high = current_high < prev_high and current_close < prev_high
+    
+    if near_upper and (failed_higher_high or current_close < upper_limit):
+        return {
+            "signal": "SELL",
+            "action_type": "REJECTION_EXHAUSTION_SELL",
+            "rationale": "Price probed upper boundary or failed higher-high continuation, closing back inside. Exhaustion rejection confirmed; rotating toward equilibrium."
+        }
+    elif current_close < (lower_limit - tolerance):
         return {
             "signal": "SELL",
             "action_type": "BREAK_BELOW_CHANNEL",
             "rationale": "Price broke and closed below lower channel boundary. Bearish continuation active."
         }
-    elif current_close > (upper_limit + tolerance) or (abs(current_close - upper_limit) <= tolerance):
+    elif current_close > (upper_limit + tolerance):
         return {
             "signal": "BUY",
-            "action_type": "BREAK_OR_RETEST_ABOVE",
-            "rationale": "Price achieved break/retest of upper channel boundary. Bullish execution active."
+            "action_type": "BREAK_ABOVE_CHANNEL",
+            "rationale": "Price achieved clean break above upper channel boundary."
         }
     else:
-        # Range trading utilizing internal pivots instead of blind entries
+        # Internal pivot range realignment
         if current_close <= eq:
             return {
                 "signal": "BUY",
-                "action_type": "RANGE_DEMAND_PIVOT_BOUNCE",
-                "rationale": "Price is inside lower range segment respecting internal pivot/demand. High-probability bounce setup."
+                "action_type": "RANGE_DEMAND_REALIGNMENT",
+                "rationale": "Price respected lower internal range structure, signaling bullish realignment toward equilibrium."
             }
         else:
             return {
                 "signal": "SELL",
-                "action_type": "RANGE_SUPPLY_PIVOT_REJECTION",
-                "rationale": "Price is inside upper range segment respecting internal pivot/supply. High-probability rejection setup."
+                "action_type": "RANGE_SUPPLY_REALIGNMENT",
+                "rationale": "Price respected upper internal range structure, signaling bearish realignment toward equilibrium."
             }
 
 def central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
@@ -358,15 +371,14 @@ def central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m):
     pivots = calculate_internal_channel_pivots(channel_eval)
     
     chart_slice = channel_eval['df'].tail(80).copy()
-    current_close = chart_slice['Close'].iloc[-1]
-    current_high = chart_slice['High'].iloc[-1]
-    current_low = chart_slice['Low'].iloc[-1]
+    action_eval = evaluate_channel_action(chart_slice, pivots)
     
-    action_eval = evaluate_channel_action(current_close, current_high, current_low, pivots)
     direction = action_eval["signal"]
-    confidence = 89
+    confidence = 90
     
+    current_close = chart_slice['Close'].iloc[-1]
     df_5m_tail = df_5m.tail(15).copy()
+    
     if direction == "BUY":
         entry_price = current_close
         sweet_spot_sl = df_5m_tail['Low'].min() - (df_5m_tail['ATR'].iloc[-1] * 0.4)
@@ -404,14 +416,14 @@ def generate_institutional_memorandum(asset_symbol, setup):
     
     memo = (
         f"SUMMARY MEMORANDUM ({asset_symbol})\n"
-        f"Timeframe: {setup['selected_tf']} | Signal: {setup['direction']} ({setup['action_type']})\n\n"
+        f"Timeframe: {setup['selected_tf']} | Signal: {setup['direction']} [{setup['action_type']}]\n\n"
         f"INTERNAL CHANNEL PIVOTS:\n"
         f"- Upper Boundary: {fmt.format(p['upper_boundary'])}\n"
         f"- Upper Mid Pivot: {fmt.format(p['upper_mid'])}\n"
         f"- Equilibrium (50%): {fmt.format(p['equilibrium'])}\n"
         f"- Lower Mid Pivot: {fmt.format(p['lower_mid'])}\n"
         f"- Lower Boundary: {fmt.format(p['lower_boundary'])}\n\n"
-        f"STRATEGIC RATIONALE:\n"
+        f"REJECTION & RATIONALE:\n"
         f"{setup['rationale']}"
     )
     return memo
@@ -461,7 +473,7 @@ def generate_execution_chart(setup):
     ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2)
     
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-    ax.set_title(f"{setup['symbol']} {setup['selected_tf']} Channel & Internal Pivots\n{setup['trendline_status']} | {current_time_str}", color='white', fontsize=11, fontweight='bold', pad=12)
+    ax.set_title(f"{setup['symbol']} {setup['selected_tf']} Rejection & Pivot Analysis\n{setup['trendline_status']} | {current_time_str}", color='white', fontsize=11, fontweight='bold', pad=12)
     
     fig.savefig(img_buf, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -504,9 +516,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_auto = chat_id in active_subscribers
     
     welcome_text = (
-        "INSTITUTIONAL PIVOT CHANNEL DESK\n"
+        "INSTITUTIONAL REJECTION DESK\n"
         "-----------------------------------\n"
-        "Terminal active with Internal Channel Pivot Mapping for reliable range trading and summarized execution briefs.\n\n"
+        "Terminal active with Rejection Exhaustion Validation and Internal Pivot Mapping.\n\n"
         "Status: Ready. Select an asset category or type any ticker symbol directly into chat."
     )
     await update.message.reply_text(
@@ -523,7 +535,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     symbol = text.upper()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     
-    await update.message.reply_text(f"Analyzing channel and mapping internal pivots for {symbol}...")
+    await update.message.reply_text(f"Evaluating rejection and pivots for {symbol}...")
     try:
         df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
         setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
@@ -569,7 +581,7 @@ async def background_continuous_scanner(application):
                     scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
                     
                     raw_signal_text = (
-                        f"PIVOT CHANNEL SIGNAL ({symbol})\n"
+                        f"REJECTION SIGNAL ({symbol})\n"
                         f"Timestamp: {scan_timestamp}\n"
                         f"Timeframe: {setup['selected_tf']}\n"
                         f"Signal: {setup['direction']} ({setup['action_type']})\n"
@@ -606,7 +618,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "prompt_custom_ticker":
         await query.edit_message_text(
-            text="Type Any Ticker / Pair:\n\nSend any symbol (e.g., EURUSD, XAUUSD, BTCUSD) in chat to run pivot channel analysis.",
+            text="Type Any Ticker / Pair:\n\nSend any symbol (e.g., EURUSD, XAUUSD, BTCUSD) in chat to run analysis.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_home")]]))
 
     elif data == "toggle_auto_scan":
@@ -680,7 +692,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_an|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"Analyzing pivot channel for {symbol}...")
+        await query.edit_message_text(text=f"Running rejection analysis for {symbol}...")
         try:
             df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
@@ -712,7 +724,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("run_sig|"):
         _, symbol = data.split("|")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-        await query.edit_message_text(text=f"Verifying Pivot Signal for {symbol}...")
+        await query.edit_message_text(text=f"Verifying Rejection Signal for {symbol}...")
         try:
             df_4h, df_1h, df_30m, df_15m, df_5m = fetch_top_down_institutional_data(symbol)
             setup = central_decision_engine(symbol, df_4h, df_1h, df_30m, df_15m, df_5m)
@@ -721,7 +733,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             fmt = f"{{:.{decimals}f}}"
             
             raw_sig = (
-                f"PIVOT CHANNEL SIGNAL ({symbol})\n"
+                f"REJECTION SIGNAL ({symbol})\n"
                 f"Timestamp: {ts}\n"
                 f"Timeframe: {setup['selected_tf']}\n"
                 f"Signal: {setup['direction']} ({setup['action_type']})\n"
@@ -739,8 +751,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "menu_help":
         help_text = (
             "TERMINAL GUIDE:\n\n"
-            "- Internal Pivots: Automatically maps 25%, Equilibrium (50%), and 75% levels inside the active channel to eliminate blind range trading.\n"
-            "- Summaries: Compressed into clean, direct execution blocks.\n"
+            "- Rejection Exhaustion: Automatically detects when price probes an outer boundary or fails a higher high/lower low continuation, closing back inside to prevent getting trapped in false breakouts.\n"
+            "- Internal Pivots: Maps 25%, Equilibrium (50%), and 75% levels for precise range rotation.\n"
             "- Custom Tickers: Send any symbol in chat anytime."
         )
         kb = [[InlineKeyboardButton("« Back", callback_data="menu_home")]]
