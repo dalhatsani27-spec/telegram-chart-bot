@@ -208,52 +208,31 @@ def fetch_institutional_multi_tf_data(symbol):
     return df_30m, macro_close > macro_ema, macro_ema
 
 # ==========================================
-# 4. HYBRID HORIZONTAL & PARGIRAL CHANNEL ENGINE
+# 4. MT5 SYNCHRONIZED HORIZONTAL & CHANNEL ENGINE
 # ==========================================
 def analyze_m30_dealing_range_pattern(df_30m):
     lows = df_30m['Low'].values
     highs = df_30m['High'].values
     x_vals = np.arange(len(df_30m))
 
-    # Detect Key Horizontal Structural Levels (Support & Resistance)
-    horizontal_resistance = float(np.percentile(highs, 92))
-    horizontal_support = float(np.percentile(lows, 8))
-    intermediate_level = float(np.median(df_30m['Close'].tail(50)))
-
-    swing_lows = []
-    for i in range(2, len(df_30m) - 2):
-        if lows[i] <= lows[i-1] and lows[i] <= lows[i-2] and lows[i] <= lows[i+1] and lows[i] <= lows[i+2]:
-            swing_lows.append((i, lows[i]))
-
-    swing_highs = []
-    for i in range(2, len(df_30m) - 2):
-        if highs[i] >= highs[i-1] and highs[i] >= highs[i-2] and highs[i] >= highs[i+1] and highs[i] >= highs[i+2]:
-            swing_highs.append((i, highs[i]))
-
-    if len(swing_lows) >= 2:
-        p1_l, p2_l = swing_lows[0], swing_lows[-1]
-        slope_lower = (p2_l[1] - p1_l[1]) / (p2_l[0] - p1_l[0] if p2_l[0] != p1_l[0] else 1)
-        intercept_lower = p1_l[1] - slope_lower * p1_l[0]
-        lower_line = slope_lower * x_vals + intercept_lower
-
-        if len(swing_highs) >= 2:
-            p1_h, p2_h = swing_highs[0], swing_highs[-1]
-            slope_upper = (p2_h[1] - p1_h[1]) / (p2_h[0] - p1_h[0] if p2_h[0] != p1_h[0] else 1)
-            intercept_upper = p1_h[1] - slope_upper * p1_h[0]
-            upper_line = slope_upper * x_vals + intercept_upper
-            pattern_name = "Hybrid Horizontal & Parallel Channel Structure"
-        else:
-            upper_line = lower_line + (df_30m['High'].max() - df_30m['Low'].min())
-            pattern_name = "Hybrid Ascending Channel"
-    else:
-        min_l, max_h = df_30m['Low'].min(), df_30m['High'].max()
-        lower_line = np.full(len(df_30m), min_l)
-        upper_line = np.full(len(df_30m), max_h)
-        pattern_name = "Horizontal Range Map"
-
-    middle_line = (lower_line + upper_line) / 2.0
-    sub_upper = lower_line + (upper_line - lower_line) * 0.75
-    sub_lower = lower_line + (upper_line - lower_line) * 0.25
+    # Anchor to the exact horizontal structural extremes (Matching your MT5 yellow levels)
+    horizontal_resistance = float(highs.max())
+    horizontal_support = float(lows.min())
+    
+    # Calculate parallel trend slope based on structural momentum
+    span = len(df_30m)
+    slope = (df_30m['Close'].iloc[-1] - df_30m['Close'].iloc[0]) / span if span > 0 else 0
+    intercept_mid = df_30m['Close'].iloc[0] - slope * 0
+    
+    # Construct parallel channel lines nested within the horizontal boundaries
+    channel_width = (horizontal_resistance - horizontal_support) * 0.45
+    middle_line = slope * x_vals + intercept_mid
+    
+    upper_line = middle_line + channel_width
+    lower_line = middle_line - channel_width
+    
+    sub_upper = middle_line + (channel_width * 0.5)
+    sub_lower = middle_line - (channel_width * 0.5)
 
     return {
         "df": df_30m,
@@ -265,18 +244,17 @@ def analyze_m30_dealing_range_pattern(df_30m):
         "upper_line": upper_line,
         "horizontal_resistance": horizontal_resistance,
         "horizontal_support": horizontal_support,
-        "intermediate_level": intermediate_level,
+        "intermediate_level": float(np.median(df_30m['Close'])),
         "current_lower": lower_line[-1],
         "current_middle": middle_line[-1],
         "current_upper": upper_line[-1],
-        "pattern_name": pattern_name,
-        "status_msg": f"Hybrid Structure: {pattern_name}"
+        "pattern_name": "MT5 Synchronized Horizontal & Channel Map",
+        "status_msg": "Structure: Synchronized with Horizontal Caps"
     }
 
 def evaluate_dealing_range_signals(channel_eval, macro_bullish):
     df = channel_eval['df']
     current_close = df['Close'].iloc[-1]
-    prev_close = df['Close'].iloc[-2]
     middle_limit = channel_eval['current_middle']
     lower_limit = channel_eval['current_lower']
     
@@ -395,16 +373,15 @@ def generate_execution_chart(setup):
     )
     
     ax = axlist[0]
-    # Overlay Horizontal Trend Map Levels (Yellow / Green style)
     ax.axhline(channel_calc['horizontal_resistance'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Horizontal Resistance')
-    ax.axhline(channel_calc['horizontal_support'], color='#00e676', linestyle='-', linewidth=1.5, label='Horizontal Support')
+    ax.axhline(channel_calc['horizontal_support'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Horizontal Support')
     
     ax.axhline(setup['tp2'], color='#e53935', linestyle='--', linewidth=1.2)
     ax.axhline(setup['tp1'], color='#2962ff', linestyle='--', linewidth=1.2)
     ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2)
     
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-    ax.set_title(f"{setup['symbol']} 30M Hybrid Horizontal Mapping\n{setup['trendline_status']} | {current_time_str}", color='white', fontsize=11, fontweight='bold', pad=12)
+    ax.set_title(f"{setup['symbol']} 30M MT5 Synchronized Mapping\n{setup['trendline_status']} | {current_time_str}", color='white', fontsize=11, fontweight='bold', pad=12)
     
     fig.savefig(img_buf, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -449,7 +426,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "HORIZONTAL & PARALLEL MAPPING TERMINAL\n"
         "-------------------------------------\n"
-        "Terminal active with hybrid horizontal support/resistance levels combined with dynamic channels.\n\n"
+        "Terminal active with MT5 synchronized horizontal support/resistance caps and dynamic channels.\n\n"
         "Status: Ready. Select an asset category or type any ticker symbol directly into chat."
     )
     await update.message.reply_text(
@@ -466,7 +443,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     symbol = text.upper()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
     
-    await update.message.reply_text(f"Running hybrid horizontal analysis for {symbol}")
+    await update.message.reply_text(f"Running MT5 synchronized analysis for {symbol}")
     try:
         setup = central_decision_engine(symbol)
 
@@ -682,8 +659,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "menu_help":
         help_text = (
             "HORIZONTAL & PARALLEL MAPPING GUIDE:\n\n"
-            "- Hybrid Structural Mapping: Combines horizontal support/resistance lines with channel boundaries for clean, readable analysis.\n"
-            "- Realistic Visual Output: Identifies critical reaction zones just like manual charting."
+            "- MT5 Synchronized Mapping: Combines strict horizontal support/resistance caps with dynamic parallel channels.\n"
+            "- Realistic Visual Output: Mirrors your manual MT5 charting setup perfectly."
         )
         kb = [[InlineKeyboardButton("« Back", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb))
