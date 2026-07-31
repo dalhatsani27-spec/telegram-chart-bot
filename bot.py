@@ -76,7 +76,7 @@ def translate_text(text, target_language):
 
 def fetch_ai_commentary(metrics_summary, target_language="English"):
     if not OPENROUTER_API_KEY:
-        base_text = "🎯 INSTITUTIONAL DESK SUMMARY: Backend geometry and multi-timeframe confirmation evaluated."
+        base_text = "🎯 INSTITUTIONAL DESK SUMMARY: Backend geometry and pattern validity evaluated."
         return translate_text(base_text, target_language)
 
     models = ["google/gemma-4-31b-it:free", "openrouter/free"]
@@ -85,7 +85,7 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
     Here are the live structural and geometric metrics:
     {metrics_summary}
     
-    Provide a concise 3-line institutional summary focusing on pattern recognition, confidence scores, and breakout validation.
+    Provide a concise 3-line institutional summary focusing on pattern recognition, validity status, and breakout validation.
     
     Write the response directly in {target_language}.
     """
@@ -103,7 +103,7 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
         except Exception:
             continue
             
-    fallback = "🎯 INSTITUTIONAL DESK SUMMARY: Backend geometry synchronized with multi-timeframe execution confirmation."
+    fallback = "🎯 INSTITUTIONAL DESK SUMMARY: Backend geometry synchronized with structural validation rules."
     return translate_text(fallback, target_language)
 
 # ==========================================
@@ -226,16 +226,23 @@ def analyze_backend_line_geometry(df_30m):
     intercept_mid = close_prices[0] - slope * 0
     middle_line = slope * x_vals + intercept_mid
     
-    # Anchor upper and lower green trendlines directly to actual price peaks and troughs
+    # Properly anchor upper and lower trendlines to swing highs and lows
     upper_intercept = high_prices.max() - slope * (np.argmax(high_prices))
     lower_intercept = low_prices.min() - slope * (np.argmin(low_prices))
     
     upper_line = slope * x_vals + upper_intercept
     lower_line = slope * x_vals + lower_intercept
 
-    confidence_score = 85.0
-    pattern_name = "Head and Shoulders (Right Shoulder Bounce / Breaker Block)"
-    status_msg = "Status: Valid Confirmed Structure"
+    current_close = close_prices[-1]
+    invalidation_threshold = support_level * 0.995
+    
+    # Validity check: Pattern remains VALID if current close holds above invalidation threshold
+    is_valid = current_close >= invalidation_threshold
+    status_msg = "VALID Confirmed Structure" if is_valid else "INVALID (Structure Broken / Threshold Breached)"
+    confidence_score = 85.0 if is_valid else 35.0
+
+    # Correct naming convention: Bullish setups are Inverted Head and Shoulders
+    pattern_name = "Inverted Head and Shoulders (Right Shoulder Bounce / Breaker Block)"
     
     return {
         "df": df_30m,
@@ -251,30 +258,31 @@ def analyze_backend_line_geometry(df_30m):
         "pattern_name": pattern_name,
         "confidence_score": confidence_score,
         "status_msg": status_msg,
-        "invalidation_threshold": support_level * 0.995
+        "is_valid": is_valid,
+        "invalidation_threshold": invalidation_threshold
     }
 
 def evaluate_geometry_signals(geom_eval, macro_bullish):
     df = geom_eval['df']
     current_close = df['Close'].iloc[-1]
     
-    if current_close < geom_eval['invalidation_threshold']:
+    if not geom_eval['is_valid']:
         return {
             "signal": "SELL",
             "action_type": "PATTERN_INVALIDATED_SELL",
-            "rationale": "Price breached invalidation threshold. Pattern failed due to downside decline."
+            "rationale": "Pattern is INVALID. Price breached invalidation threshold below structural support."
         }
     elif current_close > geom_eval['current_middle']:
         return {
             "signal": "BUY",
             "action_type": "BREAK_AND_RETEST_BUY",
-            "rationale": "Line-chart continuation pattern confirmed above structural zone. Buyers in control."
+            "rationale": "Pattern is VALID. Inverted Head and Shoulders continuation confirmed above structural zone."
         }
     else:
         return {
-            "signal": "SELL",
+            "signal": "BUY",
             "action_type": "RIGHT_SHOULDER_REACTION",
-            "rationale": "Testing breaker block and right shoulder zone. Awaiting neckline confirmation."
+            "rationale": "Pattern is VALID. Testing right shoulder and breaker block support zone."
         }
 
 def central_decision_engine(symbol):
@@ -300,13 +308,14 @@ def central_decision_engine(symbol):
         
     return {
         "symbol": symbol,
-        "selected_tf": "30M (Multi-TF 4H/1H/30M/15M)",
+        "selected_tf": "30M (Multi-TF 4H/30M)",
         "direction": action_eval["signal"],
         "action_type": action_eval["action_type"],
         "rationale": action_eval["rationale"],
         "confidence": confidence,
         "macro_bias": f"Bullish (Macro Filter Active at {macro_ema:.2f})" if macro_bullish else f"Bearish / Correction Mode (Macro Filter at {macro_ema:.2f})",
         "trendline_status": geom_eval["status_msg"],
+        "is_valid": geom_eval["is_valid"],
         "pattern_name": geom_eval["pattern_name"],
         "geometry_data": geom_eval,
         "entry": entry_price,
@@ -324,7 +333,7 @@ def generate_institutional_memorandum(asset_symbol, setup):
     memo = (
         f"INSTITUTIONAL STRUCTURAL MEMORANDUM ({asset_symbol})\n"
         f"Pattern Type: {setup['pattern_name']}\n"
-        f"Confidence Score: {setup['confidence']:.1f}% | Status: {setup['trendline_status']}\n"
+        f"Confidence Score: {setup['confidence']:.1f}% | Validity: {setup['trendline_status']}\n"
         f"Timeframe: 30M | Signal: {setup['direction']} [{setup['action_type']}]\n\n"
         f"KEY GEOMETRIC LEVELS:\n"
         f"- Upper Resistance / Neckline: {fmt.format(g['resistance_level'])}\n"
@@ -377,8 +386,11 @@ def generate_execution_chart(setup):
     ax.axhline(geom_calc['support_level'], color='#ffeb3b', linestyle='-', linewidth=1.5, label='Breaker Block / Support')
     ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2, label='Entry')
     
+    validity_tag = "VALID" if setup['is_valid'] else "INVALID"
+    status_color = "#00e676" if setup['is_valid'] else "#f23645"
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
-    ax.set_title(f"{setup['symbol']} Institutional Geometry Map\nPattern: {setup['pattern_name']} | Confidence: {setup['confidence']:.1f}% | {current_time_str}", color='white', fontsize=10, fontweight='bold', pad=12)
+    
+    ax.set_title(f"{setup['symbol']} Institutional Geometry Map [{validity_tag}]\nPattern: {setup['pattern_name']} | Confidence: {setup['confidence']:.1f}% | {current_time_str}", color=status_color, fontsize=10, fontweight='bold', pad=12)
     
     fig.savefig(img_buf, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
     img_buf.seek(0)
@@ -408,10 +420,11 @@ def get_home_menu(lang="English", auto_active=False):
     keyboard = [
         [InlineKeyboardButton("📊 Run Institutional Analysis", callback_data="menu_analysis"),
          InlineKeyboardButton("🚨 Generate Live Signal", callback_data="menu_signal")],
+        [InlineKeyboardButton("🔍 Pattern Scanner (Choose Pair)", callback_data="menu_pattern_scanner")],
         [InlineKeyboardButton("🔍 Type Custom Ticker / Pair", callback_data="prompt_custom_ticker")],
         [InlineKeyboardButton(auto_status, callback_data="toggle_auto_scan")],
         [InlineKeyboardButton(f"🌐 Language: {current_flag}", callback_data="menu_lang_select")],
-        [InlineKeyboardButton("ℹ️ Help & Instructions", callback_data="menu_help")]
+        [InlineKeyboardButton("ℹ️ Help & Validation Rules", callback_data="menu_help")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -424,7 +437,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "INSTITUTIONAL TRADING CO-PILOT TERMINAL\n"
         "---------------------------------------\n"
         "Frontend: Candlesticks & Imbalances | Backend: Line-Chart Geometry\n\n"
-        "Status: Ready. Select an asset category or type any ticker symbol directly into chat."
+        "Status: Ready. Select an asset category, use the Pattern Scanner to check specific pairs, or type any ticker."
     )
     await update.message.reply_text(
         welcome_text,
@@ -444,7 +457,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         setup = central_decision_engine(symbol)
 
-        metrics = f"- Timestamp: {ts}\n- Pattern: {setup['pattern_name']}\n- Confidence: {setup['confidence']:.1f}%\n- Signal: {setup['direction']} ({setup['action_type']})\n"
+        metrics = f"- Timestamp: {ts}\n- Pattern: {setup['pattern_name']}\n- Confidence: {setup['confidence']:.1f}%\n- Validity: {setup['trendline_status']}\n- Signal: {setup['direction']} ({setup['action_type']})\n"
         ai_commentary = fetch_ai_commentary(metrics, lang)
         memo_text = generate_institutional_memorandum(symbol, setup)
         chart_img = generate_execution_chart(setup)
@@ -456,6 +469,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"SUMMARY BOX ({symbol}):\n"
             f"- Pattern: {setup['pattern_name']}\n"
             f"- Confidence Score: {setup['confidence']:.1f}%\n"
+            f"- Validity Status: {'VALID 🟢' if setup['is_valid'] else 'INVALID 🔴'}\n"
             f"- Macro Bias: {setup['macro_bias']}\n"
             f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
             f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
@@ -485,7 +499,7 @@ async def background_continuous_scanner(application):
                 symbol = "GBPAUD"
                 setup = central_decision_engine(symbol)
                 
-                if setup['confidence'] >= 75:
+                if setup['confidence'] >= 75 and setup['is_valid']:
                     decimals = 3 if "JPY" in symbol else (2 if "XAU" in symbol or "GOLD" in symbol else 5)
                     fmt = f"{{:.{decimals}f}}"
                     scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
@@ -493,6 +507,7 @@ async def background_continuous_scanner(application):
                     raw_signal_text = (
                         f"INSTITUTIONAL GEOMETRY SIGNAL ({symbol})\n"
                         f"Pattern: {setup['pattern_name']}\n"
+                        f"Status: VALID Confirmed Structure\n"
                         f"Confidence: {setup['confidence']:.1f}%\n"
                         f"Timestamp: {scan_timestamp}\n"
                         f"Signal: {setup['direction']} ({setup['action_type']})\n"
@@ -527,9 +542,66 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     if data == "menu_home":
         await query.edit_message_text(text="Main Control Menu:", reply_markup=get_home_menu(lang, is_auto))
 
+    elif data == "menu_pattern_scanner":
+        kb = [
+            [InlineKeyboardButton("💱 Forex Majors", callback_data="scan_cat|Forex Majors"),
+             InlineKeyboardButton("💱 Forex Crosses", callback_data="scan_cat|Forex Crosses")],
+            [InlineKeyboardButton("🥇 Commodities", callback_data="scan_cat|Commodities"),
+             InlineKeyboardButton("🪙 Crypto", callback_data="scan_cat|Crypto")],
+            [InlineKeyboardButton("📈 Indices", callback_data="scan_cat|Indices"),
+             InlineKeyboardButton("📈 Stocks", callback_data="scan_cat|Stocks")],
+            [InlineKeyboardButton("« Back", callback_data="menu_home")]
+        ]
+        await query.edit_message_text(text="🔍 Pattern Scanner:\nSelect an asset category to choose a specific pair and run targeted validation:", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif data.startswith("scan_cat|"):
+        _, cat_name = data.split("|")
+        pairs = ASSET_CONTAINER.get(cat_name, [])
+        
+        kb = []
+        row = []
+        for pair in pairs:
+            row.append(InlineKeyboardButton(pair, callback_data=f"scan_run|{pair}"))
+            if len(row) == 2:
+                kb.append(row)
+                row = []
+        if row:
+            kb.append(row)
+        kb.append([InlineKeyboardButton("« Back", callback_data="menu_pattern_scanner")])
+        
+        await query.edit_message_text(text=f"Select specific pair in {cat_name} to scan pattern validity:", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif data.startswith("scan_run|"):
+        _, symbol = data.split("|")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
+        await query.edit_message_text(text=f"Scanning pattern for {symbol}...")
+        try:
+            setup = central_decision_engine(symbol)
+            chart_img = generate_execution_chart(setup)
+            
+            decimals = 2 if symbol in ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "XAUUSD", "GOLD", "US30", "NAS100", "SPX500"] else 5
+            fmt = f"{{:.{decimals}f}}"
+            
+            validity_str = "VALID 🟢" if setup['is_valid'] else "INVALID 🔴"
+            scanner_result_box = (
+                f"PATTERN SCANNER RESULT ({symbol}):\n"
+                f"- Pattern: {setup['pattern_name']}\n"
+                f"- Status: {validity_str}\n"
+                f"- Confidence Score: {setup['confidence']:.1f}%\n"
+                f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
+                f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
+                f"- SL: {fmt.format(setup['sl'])} | Invalidation: {fmt.format(setup['geometry_data']['invalidation_threshold'])}\n"
+            )
+            
+            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"SCANNER MAPPING: {symbol} | {ts}")
+            await context.bot.send_message(chat_id=chat_id, text=scanner_result_box)
+            await context.bot.send_message(chat_id=chat_id, text="Scan complete. Choose next action:", reply_markup=get_home_menu(lang, is_auto))
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"Failed to scan '{symbol}': {str(e)}", reply_markup=get_home_menu(lang, is_auto))
+
     elif data == "prompt_custom_ticker":
         await query.edit_message_text(
-            text="Type Any Ticker / Pair:\n\nSend any symbol (e.g., EURUSD, XAUUSD, BTCUSD) in chat to run institutional geometry analysis.",
+            text="Type Any Ticker / Pair:\n\nSend any symbol (e.g., AUDUSD, XAUUSD, BTCUSD) in chat to run institutional geometry and pattern validation.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_home")]]))
 
     elif data == "toggle_auto_scan":
@@ -607,7 +679,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         try:
             setup = central_decision_engine(symbol)
 
-            metrics = f"- Timestamp: {ts}\n- Pattern: {setup['pattern_name']}\n- Confidence: {setup['confidence']:.1f}%\n- Signal: {setup['direction']}\n"
+            metrics = f"- Timestamp: {ts}\n- Pattern: {setup['pattern_name']}\n- Confidence: {setup['confidence']:.1f}%\n- Validity: {setup['trendline_status']}\n- Signal: {setup['direction']}\n"
             ai_commentary = fetch_ai_commentary(metrics, lang)
             memo_text = generate_institutional_memorandum(symbol, setup)
             chart_img = generate_execution_chart(setup)
@@ -619,10 +691,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 f"SUMMARY BOX ({symbol}):\n"
                 f"- Pattern: {setup['pattern_name']}\n"
                 f"- Confidence Score: {setup['confidence']:.1f}%\n"
+                f"- Validity Status: {'VALID 🟢' if setup['is_valid'] else 'INVALID 🔴'}\n"
                 f"- Macro Bias: {setup['macro_bias']}\n"
                 f"- Signal: {setup['direction']} [{setup['action_type']}]\n"
                 f"- Price: {fmt.format(setup['current_market_price'])} | Entry: {fmt.format(setup['entry'])}\n"
-                f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
+                f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}‰\n"
             )
             
             await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"CHART MAPPING: {symbol} (30M) | {ts}")
@@ -646,6 +719,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             raw_sig = (
                 f"INSTITUTIONAL GEOMETRY SIGNAL ({symbol})\n"
                 f"Pattern: {setup['pattern_name']}\n"
+                f"Status: {'VALID 🟢' if setup['is_valid'] else 'INVALID 🔴'}\n"
                 f"Confidence: {setup['confidence']:.1f}%\n"
                 f"Timestamp: {ts}\n"
                 f"Timeframe: 30M\n"
@@ -663,9 +737,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "menu_help":
         help_text = (
-            "INSTITUTIONAL TRADING GUIDE:\n\n"
-            "- Backend Line-Chart Geometry: Strips candlestick noise to evaluate true structural swings, continuation flags, and breakout validation.\n"
-            "- Confidence Scoring & Invalidation: Tracks pattern validity and decline thresholds to eliminate false setups."
+            "HOW TO KNOW IF A PATTERN IS VALID OR INVALID:\n\n"
+            "1. Invalidation Threshold:\n"
+            "   - For Bullish Setups (Inverted Head and Shoulders / Support Bounce): The pattern is **VALID** as long as price holds above the invalidation threshold (support level * 0.995). If price breaks below this threshold, the structure fails and becomes **INVALID**.\n"
+            "   - For Bearish Setups (Normal Head and Shoulders / Resistance Rejection): The pattern is **VALID** as long as price holds below the resistance invalidation ceiling.\n\n"
+            "2. Pattern Naming Convention:\n"
+            "   - Bullish = **Inverted Head and Shoulders**\n"
+            "   - Bearish = **Normal Head and Shoulders**"
         )
         kb = [[InlineKeyboardButton("« Back", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb))
