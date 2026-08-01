@@ -2,21 +2,11 @@
 patterns.py
 ================
 Professional-grade price-action pattern detection engine.
-
-Design goals:
-  - Detect swing highs/lows (fractal pivots).
-  - Scan for common chart patterns (Head & Shoulders, Flags, Triangles, Wedges, etc.).
-  - Return trigger lines and key points for clear execution mapping.
-  - Prioritize continuation structures (Flags/Pennants) per strategic requirements.
 """
 
 import numpy as np
 import pandas as pd
 
-
-# ----------------------------------------------------------------------------
-# 1. SWING PIVOT DETECTION
-# ----------------------------------------------------------------------------
 def find_pivots(df, left=3, right=3):
     highs = df['High'].values
     lows = df['Low'].values
@@ -33,7 +23,6 @@ def find_pivots(df, left=3, right=3):
 
     return pivot_highs, pivot_lows
 
-
 def _dedupe_adjacent(pivots, min_gap):
     if not pivots:
         return pivots
@@ -43,10 +32,6 @@ def _dedupe_adjacent(pivots, min_gap):
             out.append(p)
     return out
 
-
-# ----------------------------------------------------------------------------
-# 2. SHARED HELPERS
-# ----------------------------------------------------------------------------
 def _line_through(p1, p2):
     (x1, y1), (x2, y2) = p1, p2
     if x2 == x1:
@@ -55,30 +40,27 @@ def _line_through(p1, p2):
     intercept = y1 - slope * x1
     return slope, intercept
 
-
 def _pct(a, b):
     if b == 0:
         return 0.0
     return (a - b) / abs(b)
-
 
 def _atr(df):
     if 'ATR' in df.columns and not df['ATR'].isna().all():
         return float(df['ATR'].iloc[-1])
     return float((df['High'] - df['Low']).tail(14).mean())
 
-
 class Pattern:
     def __init__(self, name, category, bias, trigger_price, trigger_line,
                  key_points, confidence, note):
-        self.name = name                 
-        self.category = category         
-        self.bias = bias                 
-        self.trigger_price = trigger_price   
-        self.trigger_line = trigger_line     
-        self.key_points = key_points          
-        self.confidence = confidence      
-        self.note = note                  
+        self.name = name
+        self.category = category
+        self.bias = bias
+        self.trigger_price = trigger_price
+        self.trigger_line = trigger_line
+        self.key_points = key_points
+        self.confidence = confidence
+        self.note = note
 
     def to_dict(self):
         return {
@@ -86,11 +68,6 @@ class Pattern:
             "trigger_price": self.trigger_price, "trigger_line": self.trigger_line,
             "key_points": self.key_points, "confidence": self.confidence, "note": self.note,
         }
-
-
-# ----------------------------------------------------------------------------
-# 3. INDIVIDUAL PATTERN DETECTORS
-# ----------------------------------------------------------------------------
 
 def detect_double_top(df, ph, pl):
     if len(ph) < 2:
@@ -114,9 +91,9 @@ def detect_double_top(df, ph, pl):
         trigger_line=[(i1, neckline), (i2, neckline)],
         key_points=[(i1, h1, "Top 1"), (i2, h2, "Top 2"), (trough_i, neckline, "Neckline")],
         confidence=conf,
-        note=f"Two near-equal highs ({h1:.5f} / {h2:.5f}) with neckline at {neckline:.5f}."
+        note=f"Two near-equal highs ({h1:.5f} / {h2:.5f}) with neckline at {neckline:.5f}. "
+             f"A daily/session close below the neckline confirms the breakdown."
     )
-
 
 def detect_double_bottom(df, ph, pl):
     if len(pl) < 2:
@@ -140,9 +117,9 @@ def detect_double_bottom(df, ph, pl):
         trigger_line=[(i1, neckline), (i2, neckline)],
         key_points=[(i1, l1, "Bottom 1"), (i2, l2, "Bottom 2"), (peak_i, neckline, "Neckline")],
         confidence=conf,
-        note=f"Two near-equal lows ({l1:.5f} / {l2:.5f}) with neckline at {neckline:.5f}."
+        note=f"Two near-equal lows ({l1:.5f} / {l2:.5f}) with neckline at {neckline:.5f}. "
+             f"A close above the neckline confirms the breakout."
     )
-
 
 def detect_triple_top(df, ph, pl):
     if len(ph) < 3:
@@ -169,7 +146,6 @@ def detect_triple_top(df, ph, pl):
         note=f"Three tests of resistance near {max(tops):.5f} rejected. Neckline at {neckline:.5f}."
     )
 
-
 def detect_triple_bottom(df, ph, pl):
     if len(pl) < 3:
         return None
@@ -194,7 +170,6 @@ def detect_triple_bottom(df, ph, pl):
         confidence=68,
         note=f"Three tests of support near {min(bots):.5f} held. Neckline at {neckline:.5f}."
     )
-
 
 def detect_head_shoulders(df, ph, pl):
     if len(ph) < 3:
@@ -222,9 +197,9 @@ def detect_head_shoulders(df, ph, pl):
         trigger_line=[(t1, float(df['Low'].iloc[t1])), (t2, float(df['Low'].iloc[t2]))],
         key_points=[(i1, ls, "L Shoulder"), (i2, head, "Head"), (i3, rs, "R Shoulder")],
         confidence=72,
-        note=f"Classic H&S structure with neckline at {neckline_now:.5f}."
+        note=f"Classic H&S: head {head:.5f} above shoulders {ls:.5f}/{rs:.5f}. "
+             f"Neckline (sloped) currently ~{neckline_now:.5f} — close below confirms."
     )
-
 
 def detect_inverse_head_shoulders(df, ph, pl):
     if len(pl) < 3:
@@ -252,9 +227,9 @@ def detect_inverse_head_shoulders(df, ph, pl):
         trigger_line=[(t1, float(df['High'].iloc[t1])), (t2, float(df['High'].iloc[t2]))],
         key_points=[(i1, ls, "L Shoulder"), (i2, head, "Head"), (i3, rs, "R Shoulder")],
         confidence=72,
-        note=f"Inverse H&S structure with neckline at {neckline_now:.5f}."
+        note=f"Inverse H&S: head {head:.5f} below shoulders {ls:.5f}/{rs:.5f}. "
+             f"Neckline (sloped) currently ~{neckline_now:.5f} — close above confirms."
     )
-
 
 def _fit_trend(points):
     xs = np.array([p[0] for p in points], dtype=float)
@@ -263,7 +238,6 @@ def _fit_trend(points):
         return 0.0, float(ys[-1]) if len(ys) else 0.0
     slope, intercept = np.polyfit(xs, ys, 1)
     return float(slope), float(intercept)
-
 
 def detect_triangle_or_wedge(df, ph, pl, lookback=60):
     n = len(df)
@@ -296,30 +270,42 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
     if abs(up_norm) < FLAT and lo_norm > FLAT:
         return Pattern(
             "Ascending Triangle", "continuation", "BUY",
-            trigger_price=float(upper_now), trigger_line=line,
+            trigger_price=float(upper_now),
+            trigger_line=line,
             key_points=[(p, y, "Resistance") for p, y in upper_pts] + [(p, y, "Higher Low") for p, y in lower_pts],
-            confidence=65, note=f"Flat resistance at {upper_now:.5f} with rising support."
+            confidence=65,
+            note=f"Flat resistance near {upper_now:.5f} with rising higher-lows underneath — "
+                 f"buyers stepping in earlier each time. Breakout above the flat top favors continuation up."
         )
     if up_norm < -FLAT and abs(lo_norm) < FLAT:
         return Pattern(
             "Descending Triangle", "continuation", "SELL",
-            trigger_price=float(lower_now), trigger_line=lower_line,
+            trigger_price=float(lower_now),
+            trigger_line=lower_line,
             key_points=[(p, y, "Support") for p, y in lower_pts] + [(p, y, "Lower High") for p, y in upper_pts],
-            confidence=65, note=f"Flat support at {lower_now:.5f} with falling resistance."
+            confidence=65,
+            note=f"Flat support near {lower_now:.5f} with falling lower-highs above — "
+                 f"sellers stepping in earlier each time. Breakdown below flat support favors continuation down."
         )
     if up_norm > FLAT and lo_norm > FLAT and lo_norm > up_norm:
         return Pattern(
             "Rising Wedge", "reversal", "SELL",
-            trigger_price=float(lower_now), trigger_line=lower_line,
+            trigger_price=float(lower_now),
+            trigger_line=lower_line,
             key_points=[(p, y, "Upper") for p, y in upper_pts] + [(p, y, "Lower") for p, y in lower_pts],
-            confidence=63, note="Both lines rising but converging — bearish reversal potential."
+            confidence=63,
+            note="Both boundaries rising but converging (upper line losing steam faster) — "
+                 "classic exhaustion structure. Break of the rising lower trendline signals reversal down."
         )
     if up_norm < -FLAT and lo_norm < -FLAT and up_norm < lo_norm:
         return Pattern(
             "Falling Wedge", "reversal", "BUY",
-            trigger_price=float(upper_now), trigger_line=line,
+            trigger_price=float(upper_now),
+            trigger_line=line,
             key_points=[(p, y, "Upper") for p, y in upper_pts] + [(p, y, "Lower") for p, y in lower_pts],
-            confidence=63, note="Both lines falling but converging — bullish reversal potential."
+            confidence=63,
+            note="Both boundaries falling but converging (lower line losing steam faster) — "
+                 "selling pressure fading. Break of the falling upper trendline signals reversal up."
         )
     if up_norm < -FLAT and lo_norm > FLAT:
         bias = "BUY" if current >= (upper_now + lower_now) / 2 else "SELL"
@@ -328,10 +314,12 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
             trigger_price=float(upper_now if bias == "BUY" else lower_now),
             trigger_line=line if bias == "BUY" else lower_line,
             key_points=[(p, y, "Upper") for p, y in upper_pts] + [(p, y, "Lower") for p, y in lower_pts],
-            confidence=55, note="Converging range structure."
+            confidence=55,
+            note="Converging trendlines with contracting range (coiling price action). "
+                 "Direction is set by whichever side breaks first — currently leaning "
+                 + ("up." if bias == "BUY" else "down.")
         )
     return None
-
 
 def detect_rectangle(df, ph, pl, lookback=50):
     n = len(df)
@@ -346,6 +334,8 @@ def detect_rectangle(df, ph, pl, lookback=50):
     bottom = float(np.mean(lows))
     if (max(highs) - min(highs)) / top > 0.01 or (max(lows) - min(lows)) / bottom > 0.01:
         return None
+    if (top - bottom) / top < 0.003:
+        return None
     current = float(df['Close'].iloc[-1])
     bias = "BUY" if current <= bottom * 1.003 else ("SELL" if current >= top * 0.997 else None)
     if bias is None:
@@ -353,11 +343,14 @@ def detect_rectangle(df, ph, pl, lookback=50):
     return Pattern(
         "Rectangle / Range", "continuation", bias,
         trigger_price=top if bias == "SELL" else bottom,
-        trigger_line=[(recent_ph[0], top), (recent_ph[-1], top)] if bias == "SELL" else [(recent_pl[0], bottom), (recent_pl[-1], bottom)],
-        key_points=[(p, df['High'].iloc[p], "High") for p in recent_ph] + [(p, df['Low'].iloc[p], "Low") for p in recent_pl],
-        confidence=52, note=f"Range between {bottom:.5f} and {top:.5f}."
+        trigger_line=[(recent_ph[0], top), (recent_ph[-1], top)] if bias == "SELL"
+                     else [(recent_pl[0], bottom), (recent_pl[-1], bottom)],
+        key_points=[(p, df['High'].iloc[p], "Range High") for p in recent_ph] +
+                   [(p, df['Low'].iloc[p], "Range Low") for p in recent_pl],
+        confidence=52,
+        note=f"Price ranging between {bottom:.5f} and {top:.5f}. Currently testing the "
+             f"{'top' if bias=='SELL' else 'bottom'} of the range."
     )
-
 
 def detect_flag_or_pennant(df, lookback_pole=20, lookback_flag=15):
     n = len(df)
@@ -413,15 +406,15 @@ def detect_flag_or_pennant(df, lookback_pole=20, lookback_flag=15):
         name, "continuation", bias,
         trigger_price=float(trigger_price),
         trigger_line=trigger_line,
-        key_points=[(pole_start, float(pole_df['Close'].iloc[0]), "Pole Start"), (flag_start, float(pole_df['Close'].iloc[-1]), "Pole End")],
+        key_points=[(pole_start, float(pole_df['Close'].iloc[0]), "Pole Start"),
+                    (flag_start, float(pole_df['Close'].iloc[-1]), "Pole End / Flag Start")],
         confidence=float(np.clip(conf, 55, 92)),
-        note=f"High-conviction {name} setup with trigger near {trigger_price:.5f}."
+        note=(f"Strong {'bullish' if pole_up else 'bearish'} flagpole ({abs(pole_move):.5f}, "
+              f"{clean_frac*100:.0f}% directional bars) followed by a tight "
+              f"{retrace*100:.0f}%-retrace consolidation. Watch {trigger_price:.5f} — a break "
+              f"in the pole's direction projects continuation roughly equal to the flagpole length.")
     )
 
-
-# ----------------------------------------------------------------------------
-# 4. TOP-LEVEL SCANNER
-# ----------------------------------------------------------------------------
 _PRIORITY = {
     "Bull Flag": 100, "Bear Flag": 100, "Bullish Pennant": 98, "Bearish Pennant": 98,
     "Ascending Triangle": 85, "Descending Triangle": 85, "Symmetrical Triangle": 80,
@@ -431,7 +424,6 @@ _PRIORITY = {
     "Triple Top": 66, "Triple Bottom": 66,
     "Rectangle / Range": 50,
 }
-
 
 def scan_all_patterns(df, left=3, right=3):
     ph, pl = find_pivots(df, left=left, right=right)
