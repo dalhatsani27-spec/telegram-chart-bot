@@ -17,6 +17,13 @@ from openai import OpenAI
 
 from patterns import scan_all_patterns, _atr as pattern_atr
 
+# Optional MetaTrader 5 Local Resource Import
+try:
+    import MetaTrader5 as mt5
+    MT5_LOCAL_AVAILABLE = True
+except ImportError:
+    MT5_LOCAL_AVAILABLE = False
+
 # ==========================================
 # 1. FLASK WEB SERVER & EA BRIDGE ENDPOINTS
 # ==========================================
@@ -66,7 +73,7 @@ def ea_get_signal():
                 "pattern": setup["pattern_name"],
                 "valid": True
             }), 200
-    except Exception as e:
+    except Exception:
         pass
     return jsonify({"symbol": symbol, "direction": "NO_SIGNAL", "valid": False}), 200
 
@@ -155,8 +162,30 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
     return translate_text(fallback, target_language)
 
 # ==========================================
-# 3. RESILIENT DATA CLEANING & NORMALIZATION ENGINE
+# 3. LOCAL MT5 & RESILIENT DATA CLEANING ENGINE
 # ==========================================
+def fetch_mt5_local_rates(symbol, tf_code, count=200):
+    """Fallback engine for fetching local MT5 terminal data directly if connected."""
+    if not MT5_LOCAL_AVAILABLE or not mt5.initialize():
+        return pd.DataFrame()
+    
+    tf_map = {
+        "1min": mt5.TIMEFRAME_M1, "3min": mt5.TIMEFRAME_M3, 
+        "5min": mt5.TIMEFRAME_M5, "15min": mt5.TIMEFRAME_M15, 
+        "30min": mt5.TIMEFRAME_M30, "1h": mt5.TIMEFRAME_H1, "4h": mt5.TIMEFRAME_H4
+    }
+    mt5_tf = tf_map.get(tf_code, mt5.TIMEFRAME_M30)
+    rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, count)
+    
+    if rates is None or len(rates) == 0:
+        return pd.DataFrame()
+        
+    df = pd.DataFrame(rates)
+    df['datetime'] = pd.to_datetime(df['time'], unit='s')
+    df.set_index('datetime', inplace=True)
+    df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'}, inplace=True)
+    return df[['Open', 'High', 'Low', 'Close']]
+
 def normalize_ticker_twelve_data(symbol):
     symbol = symbol.strip().upper().replace("[", "").replace("]", "").replace("'", "")
     mapping = {
@@ -228,6 +257,11 @@ def fetch_institutional_multi_tf_data(symbol):
     df_30m = clean_and_normalize_data(fetch_twelve_data(symbol, interval="30min", outputsize=150))
     df_4h = clean_and_normalize_data(fetch_twelve_data(symbol, interval="4h", outputsize=150))
     
+    if df_30m.empty:
+        df_30m = clean_and_normalize_data(fetch_mt5_local_rates(symbol, "30min", 150))
+    if df_4h.empty:
+        df_4h = clean_and_normalize_data(fetch_mt5_local_rates(symbol, "4h", 150))
+
     if df_30m.empty or df_4h.empty:
         ticker = normalize_ticker_yfinance(symbol)
         try:
@@ -278,6 +312,9 @@ def fetch_timeframe_data(symbol, tf_code, outputsize=250):
     raw = fetch_twelve_data(symbol, interval=td_interval, outputsize=min(fetch_size, 5000))
 
     if raw.empty:
+        raw = fetch_mt5_local_rates(symbol, tf_code, fetch_size)
+
+    if raw.empty:
         ticker = normalize_ticker_yfinance(symbol)
         yf_interval = _TF_YF_INTERVAL[tf_code]
         period = _TF_YF_PERIOD.get(yf_interval, "30d")
@@ -305,6 +342,8 @@ def fetch_timeframe_data(symbol, tf_code, outputsize=250):
 
 def fetch_macro_reference(symbol):
     df_1h = clean_and_normalize_data(fetch_twelve_data(symbol, interval="1h", outputsize=150))
+    if df_1h.empty:
+        df_1h = clean_and_normalize_data(fetch_mt5_local_rates(symbol, "1h", 150))
     if df_1h.empty:
         ticker = normalize_ticker_yfinance(symbol)
         try:
@@ -620,11 +659,11 @@ def generate_institutional_memorandum(asset_symbol, setup):
 # ==========================================
 # 5. FRONT-END CANDLESTICK & PATTERN/GEOMETRY CHART RENDERER
 # ==========================================
-def generate_execution_chart(setup):
+def generate_execution_chart(setup, mobile_view=False):
     img_buf = io.BytesIO()
     g = setup['geometry_data']
     full_df = g['df']
-    chart_len = min(90, len(full_df))
+    chart_len = min(60 if mobile_view else 90, len(full_df))
     chart_df = full_df.tail(chart_len).copy()
     offset = len(full_df) - chart_len
 
@@ -653,9 +692,10 @@ def generate_execution_chart(setup):
     ymin = price_min - padding
     ymax = price_max + padding
 
+    figsize = (8, 9) if mobile_view else (12, 7)
     fig, axlist = mpf.plot(
         chart_df, type='candle', style=style, volume=False,
-        addplot=addplots if addplots else None, returnfig=True, figsize=(12, 7),
+        addplot=addplots if addplots else None, returnfig=True, figsize=figsize,
         ylim=(ymin, ymax)
     )
     ax = axlist[0]
@@ -712,6 +752,7 @@ def generate_execution_chart(setup):
 # 6. PROFESSIONAL TELEGRAM MENU & ASSET CONTAINER
 # ==========================================
 user_languages = {}
+user_view_modes = {}  # Dynamic UI Toggle state: Mobile (True) vs Desktop (False)
 active_subscribers = set()
 pending_custom_ticker_tf = {}
 
@@ -726,12 +767,16 @@ ASSET_CONTAINER = {
 
 SCALP_TIMEFRAMES = [("1min", "1 Minute"), ("3min", "3 Minute"), ("5min", "5 Minute"), ("15min", "15 Minute")]
 
-def get_home_menu(lang="English", auto_active=False):
+def get_home_menu(chat_id):
+    lang = user_languages.get(chat_id, "English")
+    is_mobile = user_view_modes.get(chat_id, False)
+    auto_active = chat_id in active_subscribers
+
     lang_flags = {"English": "🇬🇧 English", "Hausa": "🇳🇬 Hausa", "Pidgin": "🇳🇬 Pidgin"}
     current_flag = lang_flags.get(lang, "🇬🇧 English")
-    auto_status = "🟢 GBPAUD Continuous Scanner: ON" if auto_active else "🔴 GBPAUD Continuous Scanner: OFF"
+    auto_status = "🟢 GBPAUD Scanner: ON" if auto_active else "🔴 GBPAUD Scanner: OFF"
+    view_toggle_btn = "📱 View Mode: MOBILE" if is_mobile else "💻 View Mode: DESKTOP"
     
-    # Check MT5 connection status
     is_mt5_connected = (time.time() - ea_telemetry.get("last_ping", 0)) < 45
     mt5_status_btn = "🟢 MT5 CONNECTED" if is_mt5_connected else "🔴 MT5 DISCONNECTED"
 
@@ -741,7 +786,8 @@ def get_home_menu(lang="English", auto_active=False):
         [InlineKeyboardButton("⚡ Scalper Mode (1m/3m/5m/15m)", callback_data="menu_scalper")],
         [InlineKeyboardButton("🔍 Pattern Scanner (Choose Pair)", callback_data="menu_pattern_scanner")],
         [InlineKeyboardButton("🔍 Type Custom Ticker / Pair", callback_data="prompt_custom_ticker")],
-        [InlineKeyboardButton(auto_status, callback_data="toggle_auto_scan")],
+        [InlineKeyboardButton(auto_status, callback_data="toggle_auto_scan"),
+         InlineKeyboardButton(view_toggle_btn, callback_data="toggle_view_mode")],
         [InlineKeyboardButton(f"📡 Status: {mt5_status_btn}", callback_data="view_mt5_status")],
         [InlineKeyboardButton(f"🌐 Language: {current_flag}", callback_data="menu_lang_select")],
         [InlineKeyboardButton("ℹ️ Help & Validation Rules", callback_data="menu_help")]
@@ -777,7 +823,7 @@ def get_pairs_keyboard(pairs, prefix, back_callback):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_languages[chat_id] = "English"
-    is_auto = chat_id in active_subscribers
+    user_view_modes[chat_id] = False
     
     welcome_text = (
         "INSTITUTIONAL TRADING CO-PILOT TERMINAL\n"
@@ -789,7 +835,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(
         welcome_text,
-        reply_markup=get_home_menu("English", is_auto)
+        reply_markup=get_home_menu(chat_id)
     )
 
 def _decimals_for(symbol):
@@ -801,6 +847,7 @@ def _decimals_for(symbol):
 
 async def send_full_analysis(context, chat_id, symbol, timeframe, lang, is_auto):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S WAT")
+    is_mobile = user_view_modes.get(chat_id, False)
     try:
         setup = central_decision_engine(symbol, timeframe=timeframe)
 
@@ -809,7 +856,7 @@ async def send_full_analysis(context, chat_id, symbol, timeframe, lang, is_auto)
                    f"- Timeframe: {setup['selected_tf']}\n")
         ai_commentary = fetch_ai_commentary(metrics, lang)
         memo_text = generate_institutional_memorandum(symbol, setup)
-        chart_img = generate_execution_chart(setup)
+        chart_img = generate_execution_chart(setup, mobile_view=is_mobile)
 
         fmt = f"{{:.{_decimals_for(symbol)}f}}"
         summary_box = (
@@ -826,9 +873,9 @@ async def send_full_analysis(context, chat_id, symbol, timeframe, lang, is_auto)
         await context.bot.send_message(chat_id=chat_id, text=summary_box)
         await context.bot.send_message(chat_id=chat_id, text=memo_text)
         await context.bot.send_message(chat_id=chat_id, text=ai_commentary)
-        await context.bot.send_message(chat_id=chat_id, text="Complete. Choose next action:", reply_markup=get_home_menu(lang, is_auto))
+        await context.bot.send_message(chat_id=chat_id, text="Complete. Choose next action:", reply_markup=get_home_menu(chat_id))
     except Exception as e:
-        await context.bot.send_message(chat_id=chat_id, text=f"Failed to analyze '{symbol}': {str(e)}", reply_markup=get_home_menu(lang, is_auto))
+        await context.bot.send_message(chat_id=chat_id, text=f"Failed to analyze '{symbol}': {str(e)}", reply_markup=get_home_menu(chat_id))
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -874,7 +921,7 @@ async def background_continuous_scanner(application):
                         f"TP2: {fmt.format(setup['tp2'])}\n"
                     )
                     
-                    chart_img = generate_execution_chart(setup)
+                    chart_img = generate_execution_chart(setup, mobile_view=False)
                     lang = "English"
                     final_signal_text = translate_text(raw_signal_text, lang)
                     try:
@@ -897,7 +944,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     is_auto = chat_id in active_subscribers
     
     if data == "menu_home":
-        await query.edit_message_text(text="Main Control Menu:", reply_markup=get_home_menu(lang, is_auto))
+        await query.edit_message_text(text="Main Control Menu:", reply_markup=get_home_menu(chat_id))
+
+    elif data == "toggle_view_mode":
+        user_view_modes[chat_id] = not user_view_modes.get(chat_id, False)
+        mode_str = "MOBILE 📱" if user_view_modes[chat_id] else "DESKTOP 💻"
+        await query.edit_message_text(text=f"Chart layout toggled to {mode_str} mode.", reply_markup=get_home_menu(chat_id))
 
     elif data == "view_mt5_status":
         is_connected = (time.time() - ea_telemetry.get("last_ping", 0)) < 45
@@ -991,8 +1043,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         else:
             active_subscribers.add(chat_id)
             status_msg = "Continuous GBPAUD scanner enabled."
-        is_auto = chat_id in active_subscribers
-        await query.edit_message_text(text=status_msg, reply_markup=get_home_menu(lang, is_auto))
+        await query.edit_message_text(text=status_msg, reply_markup=get_home_menu(chat_id))
 
     elif data == "menu_lang_select":
         kb = [
@@ -1006,7 +1057,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("set_lang|"):
         new_lang = data.split("|")[1]
         user_languages[chat_id] = new_lang
-        await query.edit_message_text(text=f"Language updated to {new_lang}.", reply_markup=get_home_menu(new_lang, is_auto))
+        await query.edit_message_text(text=f"Language updated to {new_lang}.", reply_markup=get_home_menu(chat_id))
 
     elif data == "menu_analysis":
         extra = [InlineKeyboardButton("🔍 Type Custom Ticker", callback_data="prompt_custom_ticker")]
@@ -1062,9 +1113,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 )
             final_sig = translate_text(raw_sig, lang)
             await context.bot.send_message(chat_id=chat_id, text=final_sig)
-            await context.bot.send_message(chat_id=chat_id, text="Complete. Choose next action:", reply_markup=get_home_menu(lang, is_auto))
+            await context.bot.send_message(chat_id=chat_id, text="Complete. Choose next action:", reply_markup=get_home_menu(chat_id))
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"Failed: {str(e)}", reply_markup=get_home_menu(lang, is_auto))
+            await context.bot.send_message(chat_id=chat_id, text=f"Failed: {str(e)}", reply_markup=get_home_menu(chat_id))
 
     elif data == "menu_help":
         help_text = (
@@ -1084,8 +1135,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             "   - 'VALID' means price hasn't yet closed through the pattern's invalidation level; "
             "'INVALID' means it has, and the bot will not auto-flip to the opposite trade -- it waits for "
             "a fresh structure.\n\n"
-            "3. Scalper Mode:\n"
-            "   - Runs the identical pattern engine on 1m/3m/5m/15m candles, using the 1H trend as directional context."
+            "3. Scalper Mode & View Toggles:\n"
+            "   - Runs the identical pattern engine on 1m/3m/5m/15m candles, using the 1H trend as directional context.\n"
+            "   - Toggle between Mobile (vertical tall aspect) and Desktop (wide landscape aspect) views anytime from the main menu."
         )
         kb = [[InlineKeyboardButton("« Back", callback_data="menu_home")]]
         await query.edit_message_text(text=help_text, reply_markup=InlineKeyboardMarkup(kb))
