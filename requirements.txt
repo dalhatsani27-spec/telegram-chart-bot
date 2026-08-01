@@ -1,10 +1,10 @@
-python-telegram-bot[job-queue]
+python-telegram-bot>=20.0
 flask
-yfinance
-mplfinance
-pillow
-openai
 requests
 numpy
 pandas
-twelvedata
+mplfinance
+matplotlib
+openai
+yfinance
+MetaTrader5
