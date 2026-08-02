@@ -30,8 +30,36 @@ class TradeStateManager:
     def __init__(self):
         self.mode = MODE_OFF
         self.lot_mode = "MIN"  # "MIN" or "RISK" -- mirrored from the EA's on-chart toggle / Telegram
+        self.watched_symbol = None  # the single asset the away-mode background scanner focuses on
         self._commands = {}     # symbol -> command dict, consumed by EA on next poll
         self._pending_approvals = {}  # approval_id -> dict
+        self._ea_last_seen = {}  # symbol -> timestamp of last successful EA poll
+
+    # ---------------- watched symbol (away-mode background scanner) ----------------
+    def set_watched_symbol(self, symbol):
+        self.watched_symbol = symbol.strip().upper() if symbol else None
+
+    def get_watched_symbol(self):
+        return self.watched_symbol
+
+    def clear_watched_symbol(self):
+        self.watched_symbol = None
+
+    # ---------------- EA heartbeat ----------------
+    def mark_ea_seen(self, symbol):
+        self._ea_last_seen[symbol] = time.time()
+
+    def is_ea_available(self, symbol, timeout_seconds=180):
+        """
+        True if this symbol's EA has checked in recently enough to be
+        considered "connected right now". Used to auto-fall-back a
+        confirmed signal to a manual Copy Trade ticket when nobody's
+        actually there to execute it, regardless of what Mode was last set.
+        """
+        last = self._ea_last_seen.get(symbol)
+        if last is None:
+            return False
+        return (time.time() - last) <= timeout_seconds
 
     # ---------------- mode ----------------
     def set_mode(self, mode):
