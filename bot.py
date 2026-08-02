@@ -14,6 +14,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 from openai import OpenAI
 
 from patterns import scan_all_patterns, _atr as pattern_atr
+from volume_profile import compute_volume_profile
 import mt5_data
 import legacy_data
 import trade_state as ts
@@ -29,6 +30,23 @@ app = Flask(__name__)
 @app.route('/')
 def health_check():
     return "Price-Action Engine + MT5 Control Center Active", 200
+
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+
+def keep_alive_ping():
+    """Only relevant when deployed on Render (free tier sleeps after inactivity).
+    No-op locally/Termux since RENDER_EXTERNAL_URL won't be set there."""
+    if not RENDER_EXTERNAL_URL:
+        return
+    import requests
+    while True:
+        time.sleep(600)
+        try:
+            requests.get(RENDER_EXTERNAL_URL, timeout=10)
+        except Exception:
+            pass
+
+threading.Thread(target=keep_alive_ping, daemon=True).start()
 
 engine_api.register_routes(app)
 
@@ -168,7 +186,8 @@ def build_display_setup(symbol, timeframe):
     if df is None or df.empty or len(df) < 40:
         raise ValueError(f"Unable to retrieve market data for '{symbol}' on {timeframe}.")
     tf_label = TF_LABELS.get(timeframe, timeframe)
-    best, all_patterns = scan_all_patterns(df)
+    volume_profile = compute_volume_profile(df)
+    best, all_patterns = scan_all_patterns(df, volume_profile=volume_profile)
     current_close = float(df['Close'].iloc[-1])
 
     if best is not None:
@@ -198,7 +217,8 @@ def build_display_setup(symbol, timeframe):
             "is_valid": is_valid, "pattern_name": best.name,
             "geometry_data": {"df": df, "mode": "pattern", "resistance_level": resistance_level, "support_level": support_level,
                               "invalidation_threshold": structural_sl, "trigger_line": best.trigger_line,
-                              "key_points": best.key_points, "trigger_price": trigger, "category": best.category},
+                              "key_points": best.key_points, "trigger_price": trigger, "category": best.category,
+                              "volume_profile": volume_profile},
             "entry": current_close, "current_market_price": current_close,
             "sl": structural_sl if is_valid else None, "tp1": tp1 if is_valid else None, "tp2": tp2 if is_valid else None,
         }
@@ -215,6 +235,7 @@ def build_display_setup(symbol, timeframe):
         else:
             sl = tp1 = tp2 = None
         geom_eval["mode"] = "channel"
+        geom_eval["volume_profile"] = volume_profile
         return {
             "symbol": symbol, "selected_tf": tf_label, "direction": direction, "action_type": action_eval["action_type"],
             "rationale": action_eval["rationale"], "confidence": geom_eval["confidence_score"],
@@ -273,6 +294,40 @@ def generate_execution_chart(setup):
 
     ax.axhline(g['resistance_level'], color='#ffb300', linestyle='-', linewidth=1.0, alpha=0.5)
     ax.axhline(g['support_level'], color='#ffb300', linestyle='-', linewidth=1.0, alpha=0.5)
+
+    # --- Volume Profile sidebar (Point of Control + Value Area) ---
+    vp = g.get("volume_profile")
+    if vp is not None:
+        try:
+            vp_ax = ax.inset_axes([1.0, 0, 0.12, 1], transform=ax.transAxes, sharey=ax)
+            bin_edges = vp["bin_edges"]; bin_volumes = vp["bin_volumes"]
+            centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+            heights = (bin_edges[1] - bin_edges[0])
+            max_vol = bin_volumes.max() or 1.0
+            colors = ['#ff9800' if abs(c - vp["poc_price"]) <= heights else
+                     ('#546e7a' if (vp["value_area_low"] <= c <= vp["value_area_high"]) else '#37474f')
+                     for c in centers]
+            vp_ax.barh(centers, bin_volumes / max_vol, height=heights, color=colors, alpha=0.85)
+            vp_ax.axis('off')
+        except Exception:
+            pass  # visual-only feature -- never let it break the trade chart itself
+
+    # --- Long/Short position box (TradingView-style entry->TP / entry->SL) ---
+    if setup['sl'] is not None and setup['tp1'] is not None:
+        entry_p = setup['entry']; sl_p = setup['sl']; tp_p = setup['tp1']
+        box_x0 = max(0, chart_len - 12); box_x1 = chart_len - 1
+        risk = abs(entry_p - sl_p); reward = abs(tp_p - entry_p)
+        rr = (reward / risk) if risk > 0 else 0
+        ax.add_patch(plt.Rectangle((box_x0, min(entry_p, tp_p)), box_x1 - box_x0, abs(tp_p - entry_p),
+                                   color='#089981', alpha=0.25, zorder=3))
+        ax.add_patch(plt.Rectangle((box_x0, min(entry_p, sl_p)), box_x1 - box_x0, abs(sl_p - entry_p),
+                                   color='#f23645', alpha=0.25, zorder=3))
+        ax.annotate(f"R:R 1:{rr:.1f}", (box_x0, max(entry_p, tp_p)), fontsize=8, color='#ffffff',
+                   textcoords="offset points", xytext=(0, 4))
+        for lvl, label, clr in [(tp_p, "TP1", '#089981'), (setup.get('tp2'), "TP2", '#00e676'), (sl_p, "SL", '#f23645')]:
+            if lvl is not None:
+                ax.axhline(lvl, color=clr, linestyle=':', linewidth=1.0, alpha=0.7)
+
     if setup['sl'] is not None:
         ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2)
 
@@ -390,6 +445,31 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "and this mobile control panel.\n\nMaster switch is OFF by default -- turn it on "
         "from the Mobile Control Panel when you're ready to trade.",
         reply_markup=get_home_menu())
+
+# When no EA has checked in recently for a symbol (you're away from the PC),
+# this loop keeps scanning a small watchlist so Copy Trade tickets keep
+# coming -- throttled deliberately to respect the Twelve Data free tier,
+# since MT5-native data isn't available without a connected terminal.
+WATCHLIST = ["EURUSD", "GBPUSD", "XAUUSD", "GBPAUD"]
+WATCHLIST_TIMEFRAME = "15min"
+WATCHLIST_SCAN_INTERVAL_SECONDS = 300  # 5 minutes -- keeps well under free-tier rate limits
+
+async def background_watchlist_scanner():
+    await asyncio.sleep(15)
+    while True:
+        try:
+            for symbol in WATCHLIST:
+                if ts.state.get_mode() == ts.MODE_OFF:
+                    continue
+                if ts.state.is_ea_available(symbol):
+                    continue  # an EA is already covering this one in real time, don't duplicate
+                try:
+                    engine.poll(symbol, WATCHLIST_TIMEFRAME)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await asyncio.sleep(WATCHLIST_SCAN_INTERVAL_SECONDS)
 
 async def send_full_analysis(context, chat_id, symbol, timeframe):
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -606,7 +686,7 @@ engine._notify_callbacks["report_event"] = on_report_event
 # ==========================================
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="127.0.0.1", port=port, use_reloader=False)
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 def run_telegram_bot():
     global TELEGRAM_LOOP, TELEGRAM_APP
@@ -626,6 +706,7 @@ def run_telegram_bot():
     loop.run_until_complete(app_bot.initialize())
     loop.run_until_complete(app_bot.start())
     loop.run_until_complete(app_bot.updater.start_polling(drop_pending_updates=True))
+    loop.create_task(background_watchlist_scanner())
     loop.run_forever()
 
 if __name__ == "__main__":
