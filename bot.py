@@ -401,14 +401,18 @@ def get_mobile_panel_menu():
     copy_active = (mode == ts.MODE_COPY_TRADE)
     copy_label = "🟢 Copy Trade (Away Mode): ON" if copy_active else "⚪ Copy Trade (Away Mode): OFF"
     lot_label = f"Lot Mode: {ts.state.lot_mode}"
+    watched = ts.state.get_watched_symbol()
+    watch_label = f"🎯 Watching: {watched} (tap to change)" if watched else "🎯 Select Asset to Watch"
 
     keyboard = [
         [InlineKeyboardButton(master_label, callback_data="toggle_master")],
         [InlineKeyboardButton(trade_mode_label, callback_data="toggle_trade_mode")],
         [InlineKeyboardButton(copy_label, callback_data="toggle_copy_trade")],
         [InlineKeyboardButton(lot_label, callback_data="toggle_lot_mode")],
+        [InlineKeyboardButton(watch_label, callback_data="menu_watch_asset")],
         [InlineKeyboardButton("💰 Account & PnL", callback_data="show_account_pnl"),
          InlineKeyboardButton("📈 Open Positions", callback_data="show_open_positions")],
+        [InlineKeyboardButton("📊 Pattern Win Rates", callback_data="show_pattern_stats")],
         [InlineKeyboardButton("« Back", callback_data="menu_home")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -446,11 +450,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "from the Mobile Control Panel when you're ready to trade.",
         reply_markup=get_home_menu())
 
-# When no EA has checked in recently for a symbol (you're away from the PC),
-# this loop keeps scanning a small watchlist so Copy Trade tickets keep
-# coming -- throttled deliberately to respect the Twelve Data free tier,
-# since MT5-native data isn't available without a connected terminal.
-WATCHLIST = ["EURUSD", "GBPUSD", "XAUUSD", "GBPAUD"]
+# When no EA has checked in recently for the watched symbol (you're away
+# from the PC), this loop keeps scanning it so Copy Trade tickets keep
+# coming -- throttled to respect the Twelve Data free tier. The symbol
+# itself is chosen from the Mobile Control Panel, not hardcoded -- if none
+# is selected, this loop does nothing until you pick one.
 WATCHLIST_TIMEFRAME = "15min"
 WATCHLIST_SCAN_INTERVAL_SECONDS = 300  # 5 minutes -- keeps well under free-tier rate limits
 
@@ -458,11 +462,8 @@ async def background_watchlist_scanner():
     await asyncio.sleep(15)
     while True:
         try:
-            for symbol in WATCHLIST:
-                if ts.state.get_mode() == ts.MODE_OFF:
-                    continue
-                if ts.state.is_ea_available(symbol):
-                    continue  # an EA is already covering this one in real time, don't duplicate
+            symbol = ts.state.get_watched_symbol()
+            if symbol and ts.state.get_mode() != ts.MODE_OFF and not ts.state.is_ea_available(symbol):
                 try:
                     engine.poll(symbol, WATCHLIST_TIMEFRAME)
                 except Exception:
@@ -543,6 +544,34 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         ts.state.set_lot_mode("RISK" if ts.state.lot_mode == "MIN" else "MIN")
         await query.edit_message_text("📱 MOBILE CONTROL PANEL", reply_markup=get_mobile_panel_menu())
 
+    # ---------------- Watched asset selection (away-mode background scanner) ----------------
+    elif data == "menu_watch_asset":
+        watched = ts.state.get_watched_symbol()
+        extra = [InlineKeyboardButton("⛔ Clear Selection (stop watching)", callback_data="watch_clear")] if watched else None
+        text = (f"🎯 Currently watching: {watched}\n\nThis is the single asset the background scanner "
+               f"focuses on for Copy Trade tickets when you're away and no EA is connected. "
+               f"Pick a new one to replace it, or clear it to stop." if watched else
+               "🎯 No asset selected yet.\n\nThis is what the background scanner watches for Copy Trade "
+               "tickets when you're away and no EA is connected. Pick one below.")
+        kb = get_category_keyboard("watch_cat", "menu_mobile_panel", extra_row=extra)
+        await query.edit_message_text(text, reply_markup=kb)
+
+    elif data.startswith("watch_cat|"):
+        _, cat = data.split("|", 1)
+        await query.edit_message_text(f"{cat} — select the asset to watch:",
+                                       reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "watch_set", "menu_watch_asset"))
+
+    elif data.startswith("watch_set|"):
+        _, symbol = data.split("|", 1)
+        ts.state.set_watched_symbol(symbol)
+        await query.edit_message_text(f"🎯 Now watching {symbol}. It'll stay focused on this until you change "
+                                      f"or clear it.", reply_markup=get_mobile_panel_menu())
+
+    elif data == "watch_clear":
+        ts.state.clear_watched_symbol()
+        await query.edit_message_text("🎯 Watch cleared. Background scanner is idle until you pick a new asset.",
+                                       reply_markup=get_mobile_panel_menu())
+
     elif data == "show_account_pnl":
         acc = mt5_data.get_account_summary()
         if acc is None:
@@ -566,6 +595,18 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         else:
             lines = [f"{p['symbol']} {p['type']} {p['volume']} lots | Entry {p['price_open']:.5f} | PnL {p['profit']:.2f}" for p in positions]
             text = "OPEN POSITIONS:\n" + "\n".join(lines)
+        await query.edit_message_text(text, reply_markup=get_mobile_panel_menu())
+
+    elif data == "show_pattern_stats":
+        stats = mt5_data.get_pattern_win_rates(magic_number=778899, days=30)
+        if not stats:
+            text = "No closed trades yet (or MT5 not reachable) -- pattern win-rates will show up here once you have trade history."
+        else:
+            lines = ["PATTERN WIN RATES (last 30 days):"]
+            for name, s in stats.items():
+                wr = f"{s['win_rate']:.0f}%" if s['win_rate'] is not None else "n/a"
+                lines.append(f"- {name}: {s['trades']} trades | {s['wins']} wins ({wr}) | PnL {s['pnl']:.2f}")
+            text = "\n".join(lines)
         await query.edit_message_text(text, reply_markup=get_mobile_panel_menu())
 
     # ---------------- Approval flow ----------------
