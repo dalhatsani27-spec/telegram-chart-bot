@@ -513,11 +513,18 @@ _PRIORITY = {
 }
 
 
-def scan_all_patterns(df, left=3, right=3):
+def scan_all_patterns(df, left=3, right=3, volume_profile=None):
     """
     Runs every detector against the given OHLC dataframe (must have a
     'Close'-indexed reset-friendly integer position order — pass df as-is,
     positions are derived internally).
+
+    volume_profile: optional dict from volume_profile.compute_volume_profile().
+    When provided, each detected pattern's confidence is adjusted based on
+    whether its trigger/neckline sits at a volume-significant level (Point
+    of Control / Value Area) or in a thin, low-activity gap. This is a
+    post-detection adjustment layered on top -- it never changes whether a
+    pattern is detected, only how much weight its trigger level deserves.
 
     Returns: (best_pattern_or_None, all_detected_list)
     """
@@ -554,6 +561,16 @@ def scan_all_patterns(df, left=3, right=3):
 
     if not detected:
         return None, []
+
+    if volume_profile is not None:
+        from volume_profile import level_volume_bonus
+        for p in detected:
+            bonus = level_volume_bonus(volume_profile, p.trigger_price)
+            p.confidence = float(np.clip(p.confidence + bonus, 0.0, 100.0))
+            if bonus > 0:
+                p.note += " Trigger level sits at a high-volume node (POC/Value Area) -- reinforced."
+            elif bonus < 0:
+                p.note += " Trigger level sits in a thin, low-activity price gap -- treat with extra caution."
 
     detected.sort(key=lambda p: (_PRIORITY.get(p.name, 40) + p.confidence), reverse=True)
     return detected[0], detected
