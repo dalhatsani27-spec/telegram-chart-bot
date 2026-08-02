@@ -15,6 +15,8 @@ from openai import OpenAI
 
 from patterns import scan_all_patterns, _atr as pattern_atr
 from volume_profile import compute_volume_profile
+from confirmation_engine import check_current_confirmation
+import htf_context
 import mt5_data
 import legacy_data
 import trade_state as ts
@@ -186,11 +188,21 @@ def build_display_setup(symbol, timeframe):
     if df is None or df.empty or len(df) < 40:
         raise ValueError(f"Unable to retrieve market data for '{symbol}' on {timeframe}.")
     tf_label = TF_LABELS.get(timeframe, timeframe)
-    volume_profile = compute_volume_profile(df)
-    best, all_patterns = scan_all_patterns(df, volume_profile=volume_profile)
+    volume_profile = compute_volume_profile(df.iloc[:-1])
+    # Establish the pattern from everything EXCEPT the newest candle -- so a
+    # fresh breakout candle can't retroactively change what pattern we're
+    # watching right when we most need the watch to stay locked (same fix
+    # applied to engine.py's live polling path).
+    best, all_patterns = scan_all_patterns(df.iloc[:-1], volume_profile=volume_profile)
     current_close = float(df['Close'].iloc[-1])
 
     if best is not None:
+        htf_bias, htf_desc = htf_context.get_htf_bias(symbol, timeframe)
+        htf_delta, htf_note = htf_context.htf_alignment_adjustment(best.bias, htf_bias, htf_desc)
+        if htf_delta != 0.0:
+            best.confidence = float(np.clip(best.confidence + htf_delta, 0.0, 100.0))
+            best.note += f" {htf_note}"
+
         atr = pattern_atr(df) or 0.001
         direction = best.bias; trigger = best.trigger_price
         span_xs = [p[0] for p in (best.trigger_line or [])]
@@ -209,11 +221,23 @@ def build_display_setup(symbol, timeframe):
             is_valid = current_close < structural_sl
         secondary = [p.name for p in all_patterns if p is not best][:2]
         rationale = best.note + (f" Also developing: {', '.join(secondary)}." if secondary else "")
+
+        confirmed, confirmation_type = check_current_confirmation(df, trigger, direction) if is_valid else (False, None)
+        if confirmed:
+            trendline_status = f"✅ CONFIRMED via {confirmation_type} at {trigger:.5f}"
+            action_type = f"{best.name.upper().replace(' ', '_')}_{confirmation_type.upper().replace(' ', '_')}_CONFIRMED"
+        elif is_valid:
+            trendline_status = f"Awaiting confirmation (marubozu OR a qualifying candlestick pattern) at {trigger:.5f}"
+            action_type = f"{best.name.upper().replace(' ', '_')}_WATCH"
+        else:
+            trendline_status = "Structure invalidated"
+            action_type = "AWAITING_CONFIRMATION"
+
         return {
             "symbol": symbol, "selected_tf": tf_label, "direction": direction if is_valid else "NO_SIGNAL",
-            "action_type": f"{best.name.upper().replace(' ', '_')}_WATCH" if is_valid else "AWAITING_MARUBOZU_CONFIRMATION",
+            "action_type": action_type,
             "rationale": rationale, "confidence": float(np.clip(best.confidence, 40, 97)),
-            "trendline_status": f"Watching for marubozu confirmation at {trigger:.5f}" if is_valid else "Structure invalidated",
+            "trendline_status": trendline_status,
             "is_valid": is_valid, "pattern_name": best.name,
             "geometry_data": {"df": df, "mode": "pattern", "resistance_level": resistance_level, "support_level": support_level,
                               "invalidation_threshold": structural_sl, "trigger_line": best.trigger_line,
