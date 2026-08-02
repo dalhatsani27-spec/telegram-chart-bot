@@ -8,10 +8,12 @@ analysis buttons call too.
 """
 
 import time
+import numpy as np
 from patterns import scan_all_patterns
 from confirmation_engine import ConfirmationEngine
 from trade_setup import build_trade_setup
 from volume_profile import compute_volume_profile
+import htf_context
 import trade_state as ts
 import mt5_data
 
@@ -62,11 +64,22 @@ def poll(symbol, tf, magic_number=None, pushed_df=None):
     established_df = df.iloc[:-1]
     volume_profile = compute_volume_profile(established_df)
     best, all_patterns = scan_all_patterns(established_df, volume_profile=volume_profile)
+
+    htf_bias = htf_desc = None
+    if best is not None:
+        htf_bias, htf_desc = htf_context.get_htf_bias(symbol, tf)
+        delta, htf_note = htf_context.htf_alignment_adjustment(best.bias, htf_bias, htf_desc)
+        if delta != 0.0:
+            best.confidence = float(np.clip(best.confidence + delta, 0.0, 100.0))
+            best.note += f" {htf_note}"
+
     decision = _confirmation_engine.step(symbol, tf, df, best)
     response["pattern"] = best.name if best else None
     response["reason"] = decision["reason"]
     response["trigger_price"] = best.trigger_price if best else None
     response["bias"] = best.bias if best else None
+    response["htf_bias"] = htf_bias
+    response["htf_context"] = htf_desc
     if volume_profile is not None:
         response["poc_price"] = volume_profile["poc_price"]
         response["value_area_low"] = volume_profile["value_area_low"]
