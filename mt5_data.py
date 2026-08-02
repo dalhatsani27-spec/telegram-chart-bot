@@ -71,8 +71,10 @@ def fetch_candles(symbol, tf_code, count=250):
                     df = pd.DataFrame(rates)
                     df['time'] = pd.to_datetime(df['time'], unit='s')
                     df.set_index('time', inplace=True)
-                    df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'}, inplace=True)
-                    return legacy_data.clean_and_normalize_data(df[['Open', 'High', 'Low', 'Close']])
+                    df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close',
+                                       'tick_volume': 'Volume'}, inplace=True)
+                    cols = ['Open', 'High', 'Low', 'Close'] + (['Volume'] if 'Volume' in df.columns else [])
+                    return legacy_data.clean_and_normalize_data(df[cols])
 
     # Fallback: legacy Twelve Data / yfinance path
     return legacy_data.fetch_timeframe_data_legacy(symbol, tf_code, count)
