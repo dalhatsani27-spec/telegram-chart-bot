@@ -6,4 +6,4 @@ pandas
 mplfinance
 matplotlib
 openai
-twelvedata
+yfinance
