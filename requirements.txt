@@ -6,5 +6,4 @@ pandas
 mplfinance
 matplotlib
 openai
-yfinance
-MetaTrader5
+twelvedata
