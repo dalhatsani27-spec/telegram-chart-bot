@@ -35,6 +35,8 @@ FIB_ZONE_LOW = 0.50
 FIB_ZONE_HIGH = 0.79
 FIB_ENTRY_ANCHOR = 0.618
 
+from candlestick_patterns import detect_confirmation_candle
+
 
 def is_marubozu(o, h, l, c, atr):
     rng = h - l
@@ -130,19 +132,25 @@ class ConfirmationEngine:
                     "order_type": None, "expiry_bars": None, "reason": "not_broken_yet"}
 
         if not is_marubozu(o, h, l, c, atr):
-            return {"action": "NONE", "pattern": best_pattern, "fire_price": None,
-                    "order_type": None, "expiry_bars": None, "reason": "broke_but_not_marubozu"}
+            candle_confirmed, candle_name = detect_confirmation_candle(df, bias)
+            if not candle_confirmed:
+                return {"action": "NONE", "pattern": best_pattern, "fire_price": None,
+                        "order_type": None, "expiry_bars": None, "reason": "broke_but_not_confirmed"}
+            confirmation_label = candle_name
+        else:
+            confirmation_label = "Marubozu"
 
-        # Marubozu confirmed -- resolve this watch (one-shot fire).
+        # Confirmed (either a marubozu close or a qualifying candlestick pattern) -- resolve this watch (one-shot fire).
         watch["state"] = "DONE"
         distance = abs(c - trigger)
 
         if atr and distance <= FAR_ATR_MULTIPLE * atr:
             return {"action": "FIRE_MARKET", "pattern": best_pattern, "fire_price": c,
-                    "order_type": "MARKET", "expiry_bars": None, "reason": "marubozu_confirmed_near_trigger"}
+                    "order_type": "MARKET", "expiry_bars": None,
+                    "reason": f"{confirmation_label}_confirmed_near_trigger"}
 
         extreme = h if bias == "BUY" else l
         _, _, entry_anchor = fib_discount_premium_zone(trigger, extreme, bias)
         return {"action": "FIRE_LIMIT", "pattern": best_pattern, "fire_price": entry_anchor,
                 "order_type": "LIMIT", "expiry_bars": FIB_WAIT_BARS,
-                "reason": "marubozu_confirmed_stretched_fib_pullback"}
+                "reason": f"{confirmation_label}_confirmed_stretched_fib_pullback"}
