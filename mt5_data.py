@@ -159,6 +159,43 @@ def get_open_positions(magic_number=None):
     return out
 
 
+def get_pattern_win_rates(magic_number, days=30):
+    """
+    Groups closed trades by pattern name (parsed from each deal's comment,
+    which the EA tags as "PCP:<PatternName>" when it fires). Returns a dict:
+    {pattern_name: {"trades": N, "wins": N, "pnl": X, "win_rate": pct}},
+    sorted by trade count descending. Only meaningful once there's real
+    trade history -- returns {} if none yet or MT5 isn't reachable.
+    """
+    if not is_mt5_ready():
+        return {}
+    date_to = datetime.now()
+    date_from = date_to - timedelta(days=days)
+    deals = mt5.history_deals_get(date_from, date_to)
+    if deals is None:
+        return {}
+
+    stats = {}
+    for d in deals:
+        if d.magic != magic_number or d.entry != 1:  # entry==1 -> closing deal
+            continue
+        comment = d.comment or ""
+        if comment.startswith("PCP:"):
+            pattern_name = comment[4:]
+        else:
+            pattern_name = "Unknown"
+        s = stats.setdefault(pattern_name, {"trades": 0, "wins": 0, "pnl": 0.0})
+        s["trades"] += 1
+        s["pnl"] += (d.profit + d.swap + d.commission)
+        if d.profit > 0:
+            s["wins"] += 1
+
+    for name, s in stats.items():
+        s["win_rate"] = (s["wins"] / s["trades"] * 100.0) if s["trades"] > 0 else None
+
+    return dict(sorted(stats.items(), key=lambda kv: kv[1]["trades"], reverse=True))
+
+
 def shutdown():
     if MT5_AVAILABLE:
         try:
