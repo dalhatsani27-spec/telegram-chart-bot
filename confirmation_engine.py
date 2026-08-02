@@ -71,6 +71,35 @@ def fib_discount_premium_zone(trigger_price, extreme_price, bias):
     return zone_low, zone_high, entry
 
 
+def check_current_confirmation(df, trigger_price, bias):
+    """
+    One-off check of the LATEST candle against a trigger -- used by the
+    Telegram informational display, which doesn't need the stateful
+    bars_watched/stale-timeout tracking the live polling engine uses. Just
+    answers: "as of right now, is this confirmed, and by what?"
+
+    Returns (confirmed: bool, confirmation_type: str or None).
+    """
+    if len(df) < 3:
+        return False, None
+    o = float(df['Open'].iloc[-1]); h = float(df['High'].iloc[-1])
+    l = float(df['Low'].iloc[-1]);  c = float(df['Close'].iloc[-1])
+    atr = float(df['ATR'].iloc[-1]) if 'ATR' in df.columns else None
+
+    broke = (c > trigger_price) if bias == "BUY" else (c < trigger_price)
+    if not broke:
+        return False, None
+
+    if is_marubozu(o, h, l, c, atr):
+        return True, "Marubozu"
+
+    candle_confirmed, candle_name = detect_confirmation_candle(df, bias)
+    if candle_confirmed:
+        return True, candle_name
+
+    return False, None
+
+
 class ConfirmationEngine:
     """Holds per (symbol, timeframe) watch state across successive polls."""
 
