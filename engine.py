@@ -11,6 +11,7 @@ import time
 from patterns import scan_all_patterns
 from confirmation_engine import ConfirmationEngine
 from trade_setup import build_trade_setup
+from volume_profile import compute_volume_profile
 import trade_state as ts
 import mt5_data
 
@@ -27,11 +28,20 @@ def register_notifiers(auto_fired=None, approval_request=None, manual_ticket=Non
     if manual_ticket: _notify_callbacks["manual_ticket"] = manual_ticket
 
 
-def poll(symbol, tf, magic_number=None):
+def poll(symbol, tf, magic_number=None, pushed_df=None):
     """
-    Main entry point called on every EA poll (once per new bar). Returns a
-    dict describing what, if anything, the EA should do right now, plus
-    dashboard info (mode, lot_mode) so the EA's on-chart panel stays synced.
+    Main entry point. Called two ways:
+      - By the EA's poll request (pushed_df = the candles it read straight
+        from its own MT5 terminal -- free, accurate, avoids a redundant
+        fetch). Also marks this symbol's EA heartbeat as alive.
+      - By the background watchlist scanner when no EA has been seen
+        recently for a symbol (pushed_df = None -> falls back through
+        mt5_data.fetch_candles, which itself falls back to Twelve Data
+        when MT5 isn't available, e.g. running in Termux while away).
+
+    Regardless of Mode, if no EA has checked in recently for this symbol,
+    a confirmed signal is automatically routed as a manual Copy Trade
+    ticket instead of trying to command an executor that isn't there.
     """
     mode = ts.state.get_mode()
     response = {"mode": mode, "lot_mode": ts.state.lot_mode, "command": None, "pattern": None}
@@ -39,26 +49,30 @@ def poll(symbol, tf, magic_number=None):
     if mode == ts.MODE_OFF:
         return response
 
-    df = mt5_data.fetch_candles(symbol, tf, count=250)
+    if pushed_df is not None:
+        df = pushed_df
+        ts.state.mark_ea_seen(symbol)
+    else:
+        df = mt5_data.fetch_candles(symbol, tf, count=250)
+
     if df is None or df.empty or len(df) < 41:
         response["error"] = "insufficient_data"
         return response
 
-    # Establish/refresh the watched pattern using everything EXCEPT the newest
-    # candle -- so the newest candle's own breakout move can't retroactively
-    # change what pattern we consider "best" right when we need the watch to
-    # stay locked onto the structure that was already forming.
     established_df = df.iloc[:-1]
-    best, all_patterns = scan_all_patterns(established_df)
+    volume_profile = compute_volume_profile(established_df)
+    best, all_patterns = scan_all_patterns(established_df, volume_profile=volume_profile)
     decision = _confirmation_engine.step(symbol, tf, df, best)
     response["pattern"] = best.name if best else None
     response["reason"] = decision["reason"]
     response["trigger_price"] = best.trigger_price if best else None
     response["bias"] = best.bias if best else None
+    if volume_profile is not None:
+        response["poc_price"] = volume_profile["poc_price"]
+        response["value_area_low"] = volume_profile["value_area_low"]
+        response["value_area_high"] = volume_profile["value_area_high"]
 
     if decision["action"] not in ("FIRE_MARKET", "FIRE_LIMIT"):
-        # even with nothing to fire, hand back a queued command if one is
-        # already waiting (e.g. an approval that was just granted)
         response["command"] = ts.state.pop_command(symbol)
         return response
 
@@ -66,18 +80,23 @@ def poll(symbol, tf, magic_number=None):
     setup["symbol"] = symbol
     setup["timeframe"] = tf
 
-    if mode == ts.MODE_AUTO:
+    ea_available = ts.state.is_ea_available(symbol)
+    effective_mode = mode if ea_available else ts.MODE_COPY_TRADE
+
+    if effective_mode == ts.MODE_AUTO:
         ts.state.queue_command(symbol, setup)
         if _notify_callbacks["auto_fired"]:
             _notify_callbacks["auto_fired"](setup)
 
-    elif mode == ts.MODE_APPROVAL:
+    elif effective_mode == ts.MODE_APPROVAL:
         summary = _format_setup_summary(setup)
         approval_id = ts.state.create_approval_request(symbol, summary, setup)
         if _notify_callbacks["approval_request"]:
             _notify_callbacks["approval_request"](approval_id, setup)
 
-    elif mode == ts.MODE_COPY_TRADE:
+    elif effective_mode == ts.MODE_COPY_TRADE:
+        if not ea_available and mode != ts.MODE_COPY_TRADE:
+            setup["note"] = (setup.get("note", "") + " [Auto-routed to manual ticket: no EA connection detected.]").strip()
         if _notify_callbacks["manual_ticket"]:
             _notify_callbacks["manual_ticket"](setup)
 
