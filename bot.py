@@ -24,6 +24,8 @@ import engine
 import engine_api
 import ai_throttle
 from institutional_analysis import run_topdown_analysis, format_institutional_report
+from amd_analysis import run_amd_analysis, format_amd_report
+from market_structure import structure_trade_permission
 
 # ==========================================
 # 1. FLASK WEB SERVER (local only -- EA talks to 127.0.0.1)
@@ -424,13 +426,15 @@ def push_telegram_photo(photo, caption=""):
     asyncio.run_coroutine_threadsafe(coro, TELEGRAM_LOOP)
 
 def get_home_menu():
+    """Professional institutional-style home interface."""
     keyboard = [
-        [InlineKeyboardButton("📊 Run Institutional Analysis", callback_data="menu_analysis"),
-         InlineKeyboardButton("⚡ Scalper Mode (1m/3m/5m/15m)", callback_data="menu_scalper")],
-        [InlineKeyboardButton("🔍 Pattern Scanner", callback_data="menu_pattern_scanner"),
-         InlineKeyboardButton("🔍 Custom Ticker", callback_data="prompt_custom_ticker")],
-        [InlineKeyboardButton("📱 Mobile Control Panel", callback_data="menu_mobile_panel")],
-        [InlineKeyboardButton("ℹ️ Help", callback_data="menu_help")],
+        [InlineKeyboardButton("🏛  INSTITUTIONAL TOP-DOWN", callback_data="menu_analysis")],
+        [InlineKeyboardButton("🕯  AMD (1H Power of Three)", callback_data="menu_amd")],
+        [InlineKeyboardButton("⚡  SCALPER MODE", callback_data="menu_scalper"),
+         InlineKeyboardButton("🔍  PATTERN SCANNER", callback_data="menu_pattern_scanner")],
+        [InlineKeyboardButton("🎯  CUSTOM TICKER", callback_data="prompt_custom_ticker")],
+        [InlineKeyboardButton("📱  CONTROL PANEL", callback_data="menu_mobile_panel")],
+        [InlineKeyboardButton("ℹ️  HELP & GUIDE", callback_data="menu_help")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -483,12 +487,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global primary_chat_id
     primary_chat_id = update.effective_chat.id
     user_languages[primary_chat_id] = "English"
-    await update.message.reply_text(
-        "INSTITUTIONAL TRADING CO-PILOT\n---------------------------------------\n"
-        "Full pattern-recognition engine + marubozu/Fib confirmation, MT5 EA execution, "
-        "and this mobile control panel.\n\nMaster switch is OFF by default -- turn it on "
-        "from the Mobile Control Panel when you're ready to trade.",
-        reply_markup=get_home_menu())
+    welcome = (
+        "══════════════════════════════════\n"
+        "  INSTITUTIONAL PRICE-ACTION ENGINE\n"
+        "══════════════════════════════════\n\n"
+        "Top-Down Analysis  •  Trendline Families\n"
+        "200 EMA Regime  •  VWAP  •  Volume Profile\n"
+        "Pattern Confirmation  •  MT5 Execution\n\n"
+        "──────────────────────────────\n"
+        "Master switch is OFF by default.\n"
+        "Enable trading from the Control Panel\n"
+        "when you are ready.\n"
+        "──────────────────────────────"
+    )
+    await update.message.reply_text(welcome, reply_markup=get_home_menu())
 
 # When no EA has checked in recently for the watched symbol (you're away
 # from the PC), this loop keeps scanning it so Copy Trade tickets keep
@@ -512,24 +524,98 @@ async def background_watchlist_scanner():
             pass
         await asyncio.sleep(WATCHLIST_SCAN_INTERVAL_SECONDS)
 
+async def send_amd_analysis(context, chat_id, symbol):
+    """AMD (Accumulation-Manipulation-Distribution) — primary chart is 1H."""
+    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        analysis = run_amd_analysis(symbol)
+        report = format_amd_report(analysis)
+
+        # Visual: use 1H chart for AMD (as designed)
+        try:
+            setup = build_display_setup(symbol, "1h")
+            setup["selected_tf"] = f"1H AMD | Bias: {analysis.get('amd_bias', 'n/a')}"
+            # Align trade box with AMD bias when possible
+            amd_bias = analysis.get("amd_bias")
+            if amd_bias in ("BUY", "SELL") and setup.get("direction") in ("BUY", "SELL"):
+                if setup["direction"] != amd_bias:
+                    setup["direction"] = "NO_SIGNAL"
+                    setup["sl"] = setup["tp1"] = setup["tp2"] = None
+                    setup["is_valid"] = False
+                    setup["trendline_status"] = f"Pattern fights AMD bias ({amd_bias}) — structure only"
+            chart_img = generate_execution_chart(setup)
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=chart_img,
+                caption=f"{symbol} | AMD (1H) | Phase: {analysis.get('phase', 'n/a')} | {ts_str}"
+            )
+        except Exception:
+            pass
+
+        if len(report) > 4000:
+            mid = len(report) // 2
+            await context.bot.send_message(chat_id=chat_id, text=report[:mid])
+            await context.bot.send_message(chat_id=chat_id, text=report[mid:])
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=report)
+
+        await context.bot.send_message(
+            chat_id=chat_id, text="Choose next action:", reply_markup=get_home_menu()
+        )
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"AMD analysis failed for '{symbol}': {str(e)}",
+            reply_markup=get_home_menu()
+        )
+
+
 async def send_institutional_topdown(context, chat_id, symbol):
     """Professional multi-timeframe Institutional Analysis (Top-Down)."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         analysis = run_topdown_analysis(symbol)
         report = format_institutional_report(analysis)
+        overall_bias = analysis.get("overall_bias", "NEUTRAL")
 
-        # Also generate a 30m chart for visual context (execution timeframe)
+        # Chart: 30M context + BOS/CHoCH/MSS permission (not simple counter-trend suppress)
         try:
             setup = build_display_setup(symbol, "30min")
+            ltf_direction = setup.get("direction")
+            frames = analysis.get("frames") or []
+            ltf_frame = frames[-1] if frames else None
+            struct = (ltf_frame or {}).get("structure") or {}
+
+            allowed, reason, pref = structure_trade_permission(overall_bias, struct)
+
+            if ltf_direction in ("BUY", "SELL"):
+                if allowed and (pref == "NEUTRAL" or pref == ltf_direction):
+                    setup["rationale"] = (
+                        (setup.get("rationale") or "") + f" Structure OK: {reason}"
+                    ).strip()
+                elif struct.get("last_event") == "MSS" and pref == ltf_direction:
+                    # MSS unlocks reversal even vs pure HTF EMA bias
+                    setup["rationale"] = (
+                        (setup.get("rationale") or "") + f" MSS unlock: {reason}"
+                    ).strip()
+                else:
+                    # No permission — structure only, no trade box
+                    setup["direction"] = "NO_SIGNAL"
+                    setup["sl"] = None
+                    setup["tp1"] = None
+                    setup["tp2"] = None
+                    setup["is_valid"] = False
+                    setup["action_type"] = "STRUCTURE_WAIT"
+                    setup["trendline_status"] = reason
+                    setup["pattern_name"] = f"{setup.get('pattern_name', 'Structure')} [Wait]"
+                    setup["confidence"] = min(float(setup.get("confidence", 50)), 55.0)
+
+            setup["selected_tf"] = f"30M | HTF: {overall_bias} | Struct: {struct.get('last_event') or 'n/a'}"
             chart_img = generate_execution_chart(setup)
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=chart_img,
-                caption=f"{symbol} | Institutional Top-Down | {ts_str}"
-            )
+            caption = f"{symbol} | Institutional | Bias: {overall_bias} | {ts_str}"
+            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=caption)
         except Exception:
-            pass  # chart is secondary; report is the main deliverable
+            pass
 
         # Split long reports if needed (Telegram limit ~4096)
         if len(report) > 4000:
@@ -609,7 +695,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     lang = user_languages.get(chat_id, "English")
 
     if data == "menu_home":
-        await query.edit_message_text("Main Menu:", reply_markup=get_home_menu())
+        await query.edit_message_text(
+            "══════════════════════════════════\n"
+            "  INSTITUTIONAL PRICE-ACTION ENGINE\n"
+            "══════════════════════════════════\n"
+            "Select a command:",
+            reply_markup=get_home_menu()
+        )
 
     # ---------------- Mobile Control Panel ----------------
     elif data == "menu_mobile_panel":
@@ -749,6 +841,25 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         _, symbol = data.split("|", 1)
         await query.edit_message_text(f"Running Institutional Top-Down for {symbol}...")
         await send_institutional_topdown(context, chat_id, symbol)
+
+    elif data == "menu_amd":
+        extra = [InlineKeyboardButton("🔍 Custom Ticker", callback_data="prompt_custom_ticker_amd")]
+        await query.edit_message_text(
+            "AMD (Accumulation → Manipulation → Distribution)\nPrimary chart: 1 HOUR",
+            reply_markup=get_category_keyboard("cat_amd", "menu_home", extra_row=extra)
+        )
+    elif data.startswith("cat_amd|"):
+        _, cat = data.split("|", 1)
+        await query.edit_message_text(f"{cat}:", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_amd", "menu_amd"))
+    elif data.startswith("run_amd|"):
+        _, symbol = data.split("|", 1)
+        await query.edit_message_text(f"Running AMD (1H) analysis for {symbol}...")
+        await send_amd_analysis(context, chat_id, symbol)
+    elif data == "prompt_custom_ticker_amd":
+        await query.edit_message_text(
+            "Type any ticker for AMD analysis (e.g. XAUUSD, EURUSD).",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_amd")]])
+        )
 
     elif data == "menu_scalper":
         kb = [[InlineKeyboardButton("1️⃣ 1 Minute", callback_data="tf_scalp|1min"), InlineKeyboardButton("3️⃣ 3 Minute", callback_data="tf_scalp|3min")],
