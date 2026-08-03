@@ -249,107 +249,53 @@ def run_amd_analysis(symbol):
 
 
 def format_amd_report(analysis):
+    """SHORT AMD summary — chart shows zones."""
     if "error" in analysis:
         return analysis["error"]
 
     symbol = analysis["symbol"]
     lines = []
-    lines.append("══════════════════════════════════")
-    lines.append("  AMD ANALYSIS (ICT Power of Three)")
-    lines.append(f"  {symbol}  |  Primary: 1 HOUR")
-    lines.append("══════════════════════════════════")
-    lines.append("")
-    lines.append(f"AMD Bias     : {analysis['amd_bias']}")
-    lines.append(f"Phase        : {analysis['phase']}")
-    lines.append(f"Phase note   : {analysis['phase_note']}")
-    lines.append(f"Session now  : {analysis['last_session']}")
-    lines.append("")
+    lines.append(f"🕯 AMD {symbol}  |  1H  |  Bias: {analysis['amd_bias']}")
+    lines.append(f"Phase: {analysis['phase']}  |  Session: {analysis['last_session']}")
+    if analysis.get("phase_note"):
+        lines.append(f"  {analysis['phase_note']}")
 
-    if analysis.get("htf_note"):
-        lines.append("── 4H CONTEXT ──")
-        lines.append(f"  {analysis['htf_note']}")
-        lines.append("")
-
-    lines.append("── 1H STRUCTURE ──")
     st = analysis.get("structure_1h") or {}
-    lines.append(f"  {st.get('note', 'n/a')}")
-    if st.get("structure_high"):
-        lines.append(f"  Struct High : {st['structure_high']:.5f}")
-    if st.get("structure_low"):
-        lines.append(f"  Struct Low  : {st['structure_low']:.5f}")
-    lines.append("")
+    if st.get("note"):
+        lines.append(f"Struct: {st['note']}")
 
     rng = analysis.get("range")
     if rng:
-        lines.append("── 1H RANGE (Accumulation box) ──")
-        lines.append(f"  High : {rng['high']:.5f}")
-        lines.append(f"  Low  : {rng['low']:.5f}")
-        lines.append(f"  Mid  : {rng['mid']:.5f}")
-        lines.append(f"  Compressed: {'Yes' if rng.get('compressed') else 'No'}")
-        lines.append("")
+        lines.append(
+            f"Range: {rng['low']:.5f} – {rng['high']:.5f}"
+            f"{' (compressed)' if rng.get('compressed') else ''}"
+        )
 
     manip = analysis.get("manipulation")
     if manip:
-        lines.append("── MANIPULATION ──")
-        lines.append(f"  Side : {manip['side']}")
-        lines.append(f"  Hint : {manip['direction_hint']}")
-        lines.append(f"  {manip['note']}")
-        lines.append("")
+        lines.append(f"Manip: {manip['side']} → hint {manip['direction_hint']}")
 
-    lines.append("── SMC ZONES (1H) ──")
-    zone_lines = summarise_smc_zones(
-        analysis.get("fvgs") or [],
-        analysis.get("order_blocks") or [],
-        inducements=analysis.get("inducements") or [],
-    )
-    if zone_lines:
-        lines.extend(zone_lines)
-    else:
-        lines.append("  No fresh FVG / OB / IDM")
-    lines.append("")
-    active_idm = [z for z in (analysis.get("inducements") or [])
-                  if not z.get("mitigated") and not z.get("swept")]
-    if active_idm:
-        lines.append("── UNMITIGATED INDUCEMENT ──")
-        for z in active_idm[:3]:
-            lines.append(f"  {z['bias']}: {z['bottom']:.5f} – {z['top']:.5f}")
-            lines.append(f"    {z.get('note', '')}")
-        lines.append("")
+    n_fvg = len(analysis.get("fvgs") or [])
+    n_ob = len(analysis.get("order_blocks") or [])
+    n_idm = len(analysis.get("inducements") or [])
+    unmit = sum(1 for z in (analysis.get("inducements") or []) if not z.get("mitigated"))
+    lines.append(f"Zones: {n_fvg} FVG · {n_ob} OB · {n_idm} IDM ({unmit} unmitigated)")
 
     pairs = pair_idm_with_extreme_ob(
         analysis.get("inducements") or [], analysis.get("order_blocks") or []
     )
     if pairs:
-        lines.append("── OB + IDM SEQUENCE (whiteboard model) ──")
-        for p in pairs:
-            idm, ob = p["idm"], p["ob"]
-            idm_st = "MITIGATED" if idm.get("mitigated") else "UNMITIGATED"
-            ob_st = "MITIGATED" if ob.get("mitigated") else "UNMITIGATED"
-            lines.append(f"  {p['direction']}: IDM [{idm_st}] → OB [{ob_st}]")
-            lines.append(
-                f"  IDM {idm['bottom']:.5f}–{idm['top']:.5f} | "
-                f"OB {ob['bottom']:.5f}–{ob['top']:.5f}"
-            )
-            lines.append(f"  {p['sequence']}")
-        lines.append("")
+        p = pairs[0]
+        lines.append(f"Setup: {p['direction']} IDM→OB (see chart)")
+    else:
+        lines.append("Setup: no clean IDM→OB pair")
 
     vp = analysis.get("volume_profile")
     if vp:
-        lines.append("── VOLUME PROFILE (1H) ──")
-        lines.append(f"  POC     : {vp['poc_price']:.5f}")
-        lines.append(f"  VA      : {vp['value_area_low']:.5f} – {vp['value_area_high']:.5f}")
-        lines.append("")
+        lines.append(f"POC {vp['poc_price']:.5f} | VA {vp['value_area_low']:.5f}–{vp['value_area_high']:.5f}")
 
     if analysis.get("entry_notes"):
-        lines.append("── ENTRY REFINEMENT (30M / 15M) ──")
-        for n in analysis["entry_notes"]:
-            lines.append(f"  {n}")
-        lines.append("")
+        lines.append("Entry: " + " · ".join(analysis["entry_notes"][:2]))
 
-    lines.append("══════════════════════════════════")
-    lines.append("Model: IDM → extreme OB → confirmation → expansion")
-    lines.append("Zones: MITIGATED or UNMITIGATED")
-    lines.append("Sessions UTC: Asian 00-08 | London 07-16 | NY 12-21")
-    lines.append("AMD on 1H → entry refine 15M/30M")
-    lines.append("══════════════════════════════════")
+    lines.append("📷 Chart = FVG/OB/IDM/range (full story)")
     return "\n".join(lines)
