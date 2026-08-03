@@ -4,14 +4,14 @@ institutional_analysis.py
 True Top-Down Institutional Analysis.
 
 Priority stack:
-  1. 200 EMA on HTF          → Who is ruling the market (bulls / bears)
-  2. Trendline Families      → Primary structure + measured projections
-  3. VWAP                    → Dynamic support / resistance
-  4. Volume Profile          → POC + Value Area (high-probability zones)
-  5. Chart Patterns          → Confluence only (Double Top/Bottom, Flags, etc.)
+  1. 200 EMA on HTF          → Who is ruling the market
+  2. Trendline Families      → Primary structure + projections
+  3. BOS / CHoCH / MSS       → Structure permission
+  4. VWAP / Volume Profile   → Dynamic levels
+  5. FVG / OB / IDM          → SMC zones (drawn on chart)
+  6. Chart Patterns          → Confluence only
 
-Designed for the Telegram "Run Institutional Analysis" button.
-Produces a clean multi-timeframe bias + key levels + projection targets.
+Reports are SHORT — the chart carries the visual story.
 """
 
 import numpy as np
@@ -19,66 +19,57 @@ import pandas as pd
 from patterns import scan_all_patterns, find_pivots, _atr, Pattern
 from volume_profile import compute_volume_profile
 from market_structure import analyse_structure, structure_trade_permission
-from smc_zones import detect_fvgs, detect_order_blocks, detect_inducement_zones, pair_idm_with_extreme_ob, summarise_smc_zones
+from smc_zones import (
+    detect_fvgs, detect_order_blocks, detect_inducement_zones,
+    pair_idm_with_extreme_ob, summarise_smc_zones,
+)
 import mt5_data
 
-# Timeframe ladder for top-down (highest → lowest)
 TOPDOWN_LADDER = [
-    ("4h",   "4 Hour"),
-    ("1h",   "1 Hour"),
+    ("4h", "4 Hour"),
+    ("1h", "1 Hour"),
     ("30min", "30 Minute"),
 ]
-
-# Fallback if 4h data is thin
 ALT_LADDER = [
-    ("1h",   "1 Hour"),
+    ("1h", "1 Hour"),
     ("30min", "30 Minute"),
     ("15min", "15 Minute"),
 ]
 
 
 def _ema200_bias(df):
-    """Returns ('BUY'|'SELL'|'NEUTRAL', description, distance_pct)."""
-    if df is None or df.empty or 'EMA200' not in df.columns:
-        return "NEUTRAL", "EMA200 unavailable", 0.0
-    close = float(df['Close'].iloc[-1])
-    ema200 = float(df['EMA200'].iloc[-1])
+    if df is None or df.empty or "EMA200" not in df.columns:
+        return "NEUTRAL", "EMA200 n/a", 0.0
+    close = float(df["Close"].iloc[-1])
+    ema200 = float(df["EMA200"].iloc[-1])
     if ema200 <= 0:
-        return "NEUTRAL", "EMA200 unavailable", 0.0
+        return "NEUTRAL", "EMA200 n/a", 0.0
     dist = (close - ema200) / ema200 * 100.0
     if close > ema200 * 1.001:
-        return "BUY", f"Price above 200 EMA (+{dist:.2f}%) — bulls in control", dist
+        return "BUY", f"Above 200 EMA (+{dist:.2f}%)", dist
     if close < ema200 * 0.999:
-        return "SELL", f"Price below 200 EMA ({dist:.2f}%) — bears in control", dist
-    return "NEUTRAL", f"Price at 200 EMA ({dist:+.2f}%) — equilibrium", dist
+        return "SELL", f"Below 200 EMA ({dist:.2f}%)", dist
+    return "NEUTRAL", f"At 200 EMA ({dist:+.2f}%)", dist
 
 
 def _vwap_context(df):
-    """Returns dict with vwap, position, and note."""
-    if df is None or df.empty or 'VWAP' not in df.columns:
+    if df is None or df.empty or "VWAP" not in df.columns:
         return None
-    close = float(df['Close'].iloc[-1])
-    vwap = float(df['VWAP'].iloc[-1])
+    close = float(df["Close"].iloc[-1])
+    vwap = float(df["VWAP"].iloc[-1])
     if vwap <= 0:
         return None
     dist_pct = (close - vwap) / vwap * 100.0
     if close > vwap * 1.0005:
-        pos = "ABOVE"
-        note = f"Price above VWAP (+{dist_pct:.2f}%) — dynamic support"
+        pos, note = "ABOVE", f"Above VWAP (+{dist_pct:.2f}%)"
     elif close < vwap * 0.9995:
-        pos = "BELOW"
-        note = f"Price below VWAP ({dist_pct:.2f}%) — dynamic resistance"
+        pos, note = "BELOW", f"Below VWAP ({dist_pct:.2f}%)"
     else:
-        pos = "AT"
-        note = f"Price at VWAP ({dist_pct:+.2f}%) — balance zone"
+        pos, note = "AT", f"At VWAP ({dist_pct:+.2f}%)"
     return {"vwap": vwap, "position": pos, "distance_pct": dist_pct, "note": note}
 
 
 def _fit_trendline_family(df, lookback=80):
-    """
-    Build a simple trendline family from recent pivot highs and lows.
-    Returns upper/lower lines + channel height for measured-move projections.
-    """
     if df is None or len(df) < 30:
         return None
     ph, pl = find_pivots(df, left=4, right=4)
@@ -89,8 +80,8 @@ def _fit_trendline_family(df, lookback=80):
     if len(recent_ph) < 2 or len(recent_pl) < 2:
         return None
 
-    upper_pts = [(p, float(df['High'].iloc[p])) for p in recent_ph]
-    lower_pts = [(p, float(df['Low'].iloc[p])) for p in recent_pl]
+    upper_pts = [(p, float(df["High"].iloc[p])) for p in recent_ph]
+    lower_pts = [(p, float(df["Low"].iloc[p])) for p in recent_pl]
 
     def _fit(pts):
         xs = np.array([p[0] for p in pts], dtype=float)
@@ -107,59 +98,39 @@ def _fit_trendline_family(df, lookback=80):
     lower_now = lo_slope * x_now + lo_int
     if upper_now <= lower_now:
         return None
-
     height = upper_now - lower_now
-    close = float(df['Close'].iloc[-1])
-    mid = (upper_now + lower_now) / 2.0
+    close = float(df["Close"].iloc[-1])
     pos = (close - lower_now) / height if height > 0 else 0.5
-
-    # Simple regime
-    avg_price = float(df['Close'].tail(lookback).mean()) or 1.0
+    avg_price = float(df["Close"].tail(lookback).mean()) or 1.0
     up_norm = (up_slope * lookback) / avg_price
     lo_norm = (lo_slope * lookback) / avg_price
     FLAT = 0.004
-
     if abs(up_norm) < FLAT and lo_norm > FLAT:
-        family = "Ascending Channel"
-        bias = "BUY"
+        family, bias = "Ascending Channel", "BUY"
     elif up_norm < -FLAT and abs(lo_norm) < FLAT:
-        family = "Descending Channel"
-        bias = "SELL"
+        family, bias = "Descending Channel", "SELL"
     elif up_norm > FLAT and lo_norm > FLAT:
-        family = "Rising Channel / Parallel"
-        bias = "BUY"
+        family, bias = "Rising Channel", "BUY"
     elif up_norm < -FLAT and lo_norm < -FLAT:
-        family = "Falling Channel / Parallel"
-        bias = "SELL"
+        family, bias = "Falling Channel", "SELL"
     else:
-        family = "Range / Contracting"
-        bias = "NEUTRAL"
-
-    # Measured move projections from channel height
-    proj_up = upper_now + height
-    proj_down = lower_now - height
-
+        family, bias = "Range / Contract", "NEUTRAL"
     return {
-        "family": family,
-        "bias": bias,
-        "upper": float(upper_now),
-        "lower": float(lower_now),
-        "mid": float(mid),
+        "family": family, "bias": bias,
+        "upper": float(upper_now), "lower": float(lower_now),
+        "mid": float((upper_now + lower_now) / 2),
         "height": float(height),
-        "position": float(np.clip(pos, 0.0, 1.0)),
-        "proj_up": float(proj_up),
-        "proj_down": float(proj_down),
-        "upper_pts": upper_pts,
-        "lower_pts": lower_pts,
+        "position": float(np.clip(pos, 0, 1)),
+        "proj_up": float(upper_now + height),
+        "proj_down": float(lower_now - height),
+        "upper_pts": upper_pts, "lower_pts": lower_pts,
     }
 
 
 def _analyse_single_tf(symbol, tf_code, tf_label):
-    """Full single-timeframe institutional snapshot."""
     df = mt5_data.fetch_candles(symbol, tf_code, count=250)
     if df is None or df.empty or len(df) < 40:
         return None
-
     ema_bias, ema_note, ema_dist = _ema200_bias(df)
     vwap = _vwap_context(df)
     trend = _fit_trendline_family(df)
@@ -169,97 +140,55 @@ def _analyse_single_tf(symbol, tf_code, tf_label):
     fvgs = detect_fvgs(df, min_gap_atr=0.15, max_zones=5)
     obs = detect_order_blocks(df, structure=structure, max_zones=4)
     idms = detect_inducement_zones(df, max_zones=4)
-
     return {
-        "tf": tf_code,
-        "tf_label": tf_label,
-        "df": df,
-        "close": float(df['Close'].iloc[-1]),
-        "ema200_bias": ema_bias,
-        "ema200_note": ema_note,
-        "ema200_dist": ema_dist,
-        "vwap": vwap,
-        "trendline": trend,
-        "volume_profile": vp,
-        "best_pattern": best,
-        "all_patterns": all_pats[:3] if all_pats else [],
-        "structure": structure,
-        "fvgs": fvgs,
-        "order_blocks": obs,
-        "inducements": idms,
+        "tf": tf_code, "tf_label": tf_label, "df": df,
+        "close": float(df["Close"].iloc[-1]),
+        "ema200_bias": ema_bias, "ema200_note": ema_note, "ema200_dist": ema_dist,
+        "vwap": vwap, "trendline": trend, "volume_profile": vp,
+        "best_pattern": best, "all_patterns": all_pats[:3] if all_pats else [],
+        "structure": structure, "fvgs": fvgs, "order_blocks": obs, "inducements": idms,
     }
 
 
 def run_topdown_analysis(symbol):
-    """
-    Main entry point for Institutional Top-Down Analysis.
-    Returns a structured dict ready for professional Telegram display.
-    """
     symbol = symbol.strip().upper()
     frames = []
     for tf_code, tf_label in TOPDOWN_LADDER:
         snap = _analyse_single_tf(symbol, tf_code, tf_label)
         if snap:
             frames.append(snap)
-
     if len(frames) < 2:
-        # fallback ladder
         frames = []
         for tf_code, tf_label in ALT_LADDER:
             snap = _analyse_single_tf(symbol, tf_code, tf_label)
             if snap:
                 frames.append(snap)
-
     if not frames:
-        return {"error": f"Unable to retrieve sufficient data for {symbol}."}
+        return {"error": f"No data for {symbol}."}
 
-    # Highest TF drives overall regime
     htf = frames[0]
     overall_bias = htf["ema200_bias"]
     if htf.get("trendline") and htf["trendline"]["bias"] != "NEUTRAL":
-        # Trendline family can reinforce or slightly override pure EMA
         if htf["trendline"]["bias"] == overall_bias or overall_bias == "NEUTRAL":
             overall_bias = htf["trendline"]["bias"]
 
-    # Alignment score across frames
     biases = [f["ema200_bias"] for f in frames if f["ema200_bias"] != "NEUTRAL"]
     if not biases:
         alignment = "MIXED"
     else:
-        buy_count = sum(1 for b in biases if b == "BUY")
-        sell_count = sum(1 for b in biases if b == "SELL")
-        if buy_count == len(biases):
-            alignment = "FULLY ALIGNED BULLISH"
-        elif sell_count == len(biases):
-            alignment = "FULLY ALIGNED BEARISH"
-        elif buy_count > sell_count:
+        buy_c = sum(1 for b in biases if b == "BUY")
+        sell_c = sum(1 for b in biases if b == "SELL")
+        if buy_c == len(biases):
+            alignment = "ALIGNED BULLISH"
+        elif sell_c == len(biases):
+            alignment = "ALIGNED BEARISH"
+        elif buy_c > sell_c:
             alignment = "MOSTLY BULLISH"
-        elif sell_count > buy_count:
+        elif sell_c > buy_c:
             alignment = "MOSTLY BEARISH"
         else:
-            alignment = "MIXED / CONFLICTING"
+            alignment = "MIXED"
 
-    # Key levels (collect from all frames)
-    levels = []
-    for f in frames:
-        if f.get("trendline"):
-            t = f["trendline"]
-            levels.append({"tf": f["tf_label"], "type": "Trendline Upper", "price": t["upper"]})
-            levels.append({"tf": f["tf_label"], "type": "Trendline Lower", "price": t["lower"]})
-            levels.append({"tf": f["tf_label"], "type": "Projection Up", "price": t["proj_up"]})
-            levels.append({"tf": f["tf_label"], "type": "Projection Down", "price": t["proj_down"]})
-        if f.get("vwap"):
-            levels.append({"tf": f["tf_label"], "type": "VWAP", "price": f["vwap"]["vwap"]})
-        if f.get("volume_profile"):
-            vp = f["volume_profile"]
-            levels.append({"tf": f["tf_label"], "type": "POC", "price": vp["poc_price"]})
-            levels.append({"tf": f["tf_label"], "type": "VA High", "price": vp["value_area_high"]})
-            levels.append({"tf": f["tf_label"], "type": "VA Low", "price": vp["value_area_low"]})
-        if f.get("best_pattern"):
-            p = f["best_pattern"]
-            levels.append({"tf": f["tf_label"], "type": f"{p.name} Trigger", "price": p.trigger_price})
-
-    # Primary projection from HTF trendline family
     primary_proj = None
     if htf.get("trendline"):
         t = htf["trendline"]
@@ -268,136 +197,92 @@ def run_topdown_analysis(symbol):
         elif overall_bias == "SELL":
             primary_proj = {"direction": "DOWN", "target": t["proj_down"], "invalidation": t["upper"]}
 
+    pairs = pair_idm_with_extreme_ob(htf.get("inducements") or [], htf.get("order_blocks") or [])
+    ltf = frames[-1]
+    allowed, reason, pref = structure_trade_permission(
+        overall_bias, ltf.get("structure") or {}
+    )
+
     return {
         "symbol": symbol,
         "overall_bias": overall_bias,
         "alignment": alignment,
         "htf_regime": htf["ema200_note"],
         "frames": frames,
-        "key_levels": levels,
         "primary_projection": primary_proj,
         "htf_trendline": htf.get("trendline"),
         "htf_vwap": htf.get("vwap"),
         "htf_poc": htf["volume_profile"]["poc_price"] if htf.get("volume_profile") else None,
+        "idm_ob_pairs": pairs,
+        "structure_allowed": allowed,
+        "structure_reason": reason,
+        "structure_prefer": pref,
+        # Chart payload (HTF preferred for institutional map; LTF for entry view)
+        "chart_frame": htf,
     }
 
 
 def format_institutional_report(analysis):
-    """
-    Professional plain-text report for Telegram.
-    Clean hierarchy, easy to read on mobile.
-    """
+    """SHORT summary — chart shows the zones."""
     if "error" in analysis:
         return analysis["error"]
 
     symbol = analysis["symbol"]
     bias = analysis["overall_bias"]
     align = analysis["alignment"]
+    htf = analysis["frames"][0]
     lines = []
 
-    lines.append(f"══════════════════════════════════")
-    lines.append(f"  INSTITUTIONAL TOP-DOWN ANALYSIS")
-    lines.append(f"  {symbol}")
-    lines.append(f"══════════════════════════════════")
-    lines.append("")
-    lines.append(f"Overall Bias : {bias}")
-    lines.append(f"Alignment    : {align}")
-    lines.append(f"HTF Regime   : {analysis['htf_regime']}")
-    lines.append("")
+    lines.append(f"🏛 {symbol}  |  Bias: {bias}  |  {align}")
+    lines.append(f"HTF: {analysis['htf_regime']}")
 
-    # Timeframe breakdown
-    lines.append("── TIMEFRAME STRUCTURE ──")
+    # One-line structure per TF
+    bits = []
     for f in analysis["frames"]:
-        lines.append(f"")
-        lines.append(f"▶ {f['tf_label']}")
-        lines.append(f"  200 EMA : {f['ema200_note']}")
-        if f.get("structure"):
-            lines.append(f"  Structure        : {f['structure']['note']}")
-        if f.get("trendline"):
-            t = f["trendline"]
-            lines.append(f"  Trendline Family : {t['family']} ({t['bias']})")
-            lines.append(f"  Channel          : {t['lower']:.5f} → {t['upper']:.5f}")
-            lines.append(f"  Position in ch.  : {t['position']*100:.0f}%")
-        if f.get("vwap"):
-            lines.append(f"  VWAP             : {f['vwap']['note']}")
-        if f.get("volume_profile"):
-            vp = f["volume_profile"]
-            lines.append(f"  POC              : {vp['poc_price']:.5f}")
-            lines.append(f"  Value Area       : {vp['value_area_low']:.5f} – {vp['value_area_high']:.5f}")
-        if f.get("fvgs") or f.get("order_blocks") or f.get("inducements"):
-            zone_lines = summarise_smc_zones(
-                f.get("fvgs") or [], f.get("order_blocks") or [],
-                max_show=3, inducements=f.get("inducements") or []
-            )
-            for zl in zone_lines:
-                lines.append(zl)
-        if f.get("best_pattern"):
-            p = f["best_pattern"]
-            lines.append(f"  Pattern          : {p.name} ({p.bias}) conf {p.confidence:.0f}%")
-            lines.append(f"  Trigger          : {p.trigger_price:.5f}")
+        ev = (f.get("structure") or {}).get("last_event") or "—"
+        bits.append(f"{f['tf_label']}: {ev}")
+    lines.append("Struct: " + " · ".join(bits))
 
-    lines.append("")
-    lines.append("── PRIMARY PROJECTION ──")
-    proj = analysis.get("primary_projection")
-    if proj:
-        lines.append(f"  Direction     : {proj['direction']}")
-        lines.append(f"  Target        : {proj['target']:.5f}")
-        lines.append(f"  Invalidation  : {proj['invalidation']:.5f}")
-    else:
-        lines.append("  No clear measured projection (range / mixed structure)")
-
-    # High-value limit order zones (POC + VA)
-    lines.append("")
-    lines.append("── HIGH-PROBABILITY ZONES (Limit candidates) ──")
-    htf = analysis["frames"][0]
-    if htf.get("volume_profile"):
-        vp = htf["volume_profile"]
-        lines.append(f"  POC (magnet)     : {vp['poc_price']:.5f}")
-        lines.append(f"  Value Area High  : {vp['value_area_high']:.5f}")
-        lines.append(f"  Value Area Low   : {vp['value_area_low']:.5f}")
+    # Key levels only (not every zone price)
+    keys = []
     if htf.get("vwap"):
-        lines.append(f"  VWAP             : {htf['vwap']['vwap']:.5f}")
+        keys.append(f"VWAP {htf['vwap']['vwap']:.5f}")
+    if analysis.get("htf_poc"):
+        keys.append(f"POC {analysis['htf_poc']:.5f}")
     if htf.get("trendline"):
         t = htf["trendline"]
-        lines.append(f"  Trendline Lower  : {t['lower']:.5f}")
-        lines.append(f"  Trendline Upper  : {t['upper']:.5f}")
+        keys.append(f"Ch {t['lower']:.5f}/{t['upper']:.5f}")
+    if keys:
+        lines.append("Levels: " + " | ".join(keys))
 
-    # OB + IDM sequence (like the whiteboard model)
-    lines.append("")
-    lines.append("── OB + IDM SETUPS (extreme + inducement) ──")
-    htf = analysis["frames"][0]
-    pairs = pair_idm_with_extreme_ob(htf.get("inducements") or [], htf.get("order_blocks") or [])
+    proj = analysis.get("primary_projection")
+    if proj:
+        lines.append(f"Proj: {proj['direction']} → {proj['target']:.5f}  (inv {proj['invalidation']:.5f})")
+
+    # Zone counts (details are on the chart)
+    n_fvg = len(htf.get("fvgs") or [])
+    n_ob = len(htf.get("order_blocks") or [])
+    n_idm = len(htf.get("inducements") or [])
+    unmit_idm = sum(1 for z in (htf.get("inducements") or []) if not z.get("mitigated"))
+    lines.append(f"Zones: {n_fvg} FVG · {n_ob} OB · {n_idm} IDM ({unmit_idm} unmitigated)")
+
+    pairs = analysis.get("idm_ob_pairs") or []
     if pairs:
-        for p in pairs:
-            idm, ob = p["idm"], p["ob"]
-            idm_st = "MITIGATED" if idm.get("mitigated") else "UNMITIGATED"
-            ob_st = "MITIGATED" if ob.get("mitigated") else "UNMITIGATED"
-            lines.append(f"  Direction : {p['direction']}")
-            lines.append(f"  IDM [{idm_st}] : {idm['bottom']:.5f} – {idm['top']:.5f}")
-            lines.append(f"  OB  [{ob_st}]  : {ob['bottom']:.5f} – {ob['top']:.5f}")
-            lines.append(f"  {p['sequence']}")
+        p = pairs[0]
+        lines.append(f"Setup: {p['direction']} — IDM→OB (see chart)")
     else:
-        lines.append("  No clean IDM→extreme OB pair on HTF right now")
+        lines.append("Setup: no clean IDM→OB pair")
 
-    # Structure permission summary (HTF vs LTF)
-    lines.append("")
-    lines.append("── STRUCTURE PERMISSION ──")
-    ltf = analysis["frames"][-1] if analysis["frames"] else None
-    if ltf and ltf.get("structure"):
-        allowed, reason, pref = structure_trade_permission(
-            analysis["overall_bias"], ltf["structure"]
-        )
-        lines.append(f"  Allowed : {'YES' if allowed else 'NO / WAIT'}")
-        lines.append(f"  Prefer  : {pref}")
-        lines.append(f"  Reason  : {reason}")
-    else:
-        lines.append("  Structure data unavailable on LTF")
+    allowed = analysis.get("structure_allowed")
+    lines.append(
+        f"Permission: {'YES' if allowed else 'WAIT'} — {analysis.get('structure_prefer', 'n/a')}"
+    )
+    if analysis.get("structure_reason"):
+        lines.append(f"  {analysis['structure_reason']}")
 
-    lines.append("")
-    lines.append("══════════════════════════════════")
-    lines.append("Model: IDM (internal) → extreme OB → confirmation → expansion")
-    lines.append("Zones marked MITIGATED or UNMITIGATED.")
-    lines.append("BOS/CHoCH/MSS + 200 EMA set permission.")
-    lines.append("══════════════════════════════════")
+    if htf.get("best_pattern"):
+        p = htf["best_pattern"]
+        lines.append(f"Pattern: {p.name} ({p.bias}) {p.confidence:.0f}%")
 
+    lines.append("📷 Chart = full story (FVG/OB/IDM/EMA/structure)")
     return "\n".join(lines)
