@@ -543,8 +543,11 @@ async def send_institutional_topdown(context, chat_id, symbol):
                     "order_blocks": chart_frame.get("order_blocks") or [],
                     "inducements": chart_frame.get("inducements") or [],
                     "structure": chart_frame.get("structure") or {},
-                    "volume_profile": chart_frame.get("volume_profile"),
+                    "volume_profile": chart_frame.get("volume_profile") or analysis.get("volume_profile"),
                     "bos_events": chart_frame.get("bos_events") or [],
+                    "swings": (chart_frame.get("structure") or {}).get("swings") or analysis.get("swings"),
+                    "projections": analysis.get("projections") or [],
+                    "position": analysis.get("position"),
                 }
                 tf_lab = chart_frame.get("tf_label", "1H")
                 chart_img = generate_smc_map(
@@ -695,8 +698,16 @@ async def send_smart_analysis(context, chat_id, symbol):
                 zones = {}
                 if strategy == ts.STRATEGY_SILVER_BULLET:
                     df = analysis.get("df")
-                    zones = {"fvgs": analysis.get("fvgs") or [], "order_blocks": analysis.get("order_blocks") or [],
-                             "structure": analysis.get("structure") or {}}
+                    zones = {
+                        "fvgs": analysis.get("fvgs") or [],
+                        "order_blocks": analysis.get("order_blocks") or [],
+                        "structure": analysis.get("structure") or {},
+                        "volume_profile": analysis.get("volume_profile"),
+                        "bos_events": analysis.get("bos_events") or [],
+                        "swings": analysis.get("swings"),
+                        "projections": result.get("projections") or analysis.get("projections") or [],
+                        "position": result.get("position") or analysis.get("position"),
+                    }
                 else:
                     frames = analysis.get("frames") or []
                     frame = next((f for f in frames if f.get("tf") == "1h"), frames[0] if frames else None)
@@ -707,6 +718,11 @@ async def send_smart_analysis(context, chat_id, symbol):
                             "order_blocks": frame.get("order_blocks") or [],
                             "inducements": frame.get("inducements") or [],
                             "structure": frame.get("structure") or {},
+                            "volume_profile": frame.get("volume_profile") or analysis.get("volume_profile"),
+                            "bos_events": frame.get("bos_events") or [],
+                            "swings": (frame.get("structure") or {}).get("swings") or analysis.get("swings"),
+                            "projections": result.get("projections") or analysis.get("projections") or [],
+                            "position": result.get("position") or analysis.get("position"),
                         }
                 if df is not None:
                     chart_img = generate_smc_map(
@@ -714,11 +730,17 @@ async def send_smart_analysis(context, chat_id, symbol):
                         zones=zones, bias_label=result.get("direction", ""), show_sessions=True,
                     )
                     await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"{symbol} {strategy} | {ts_str}")
-            elif strategy == ts.STRATEGY_TRENDLINE and analysis:
-                g = analysis.get("geometry_data") or {}
-                if g.get("df") is not None:
-                    chart_img = generate_trendline_map(g["df"], symbol, analysis, title_suffix=ts_str)
-                    await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"{symbol} Trendline | {ts_str}")
+            elif strategy == ts.STRATEGY_TRENDLINE:
+                family = result.get("family") or analysis or {}
+                df_tl = family.get("df")
+                if df_tl is not None and not getattr(df_tl, "empty", True):
+                    chart_payload = dict(family)
+                    chart_payload["position"] = result.get("position") or family.get("position")
+                    chart_img = generate_trendline_map(df_tl, symbol, chart_payload, title_suffix=ts_str)
+                    await context.bot.send_photo(
+                        chat_id=chat_id, photo=chart_img,
+                        caption=f"{symbol} Trendline Family | {ts_str}",
+                    )
         except Exception:
             pass
 
