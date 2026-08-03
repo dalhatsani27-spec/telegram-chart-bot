@@ -233,12 +233,27 @@ def build_display_setup(symbol, timeframe):
             trendline_status = "Structure invalidated"
             action_type = "AWAITING_CONFIRMATION"
 
+        # Dual entry style for manual/display use only -- the EA/AUTO pipeline
+        # always trades the confirmation entry (trigger + marubozu/candlestick
+        # confirmation, possibly a Fib pullback). This just shows the earlier,
+        # higher-R:R-but-lower-probability alternative for a human trader who
+        # wants the option, same spirit as splitting "aggressive" vs
+        # "confirmation" entries the way a discretionary trader would.
+        aggressive_entry = aggressive_label = aggressive_sl = None
+        if best.key_points:
+            latest_kp = max(best.key_points, key=lambda p: p[0])
+            aggressive_entry = float(latest_kp[1])
+            aggressive_label = latest_kp[2]
+            buf = atr * 0.3
+            aggressive_sl = aggressive_entry - buf if direction == "BUY" else aggressive_entry + buf
+
         return {
             "symbol": symbol, "selected_tf": tf_label, "direction": direction if is_valid else "NO_SIGNAL",
             "action_type": action_type,
             "rationale": rationale, "confidence": float(np.clip(best.confidence, 40, 97)),
             "trendline_status": trendline_status,
             "is_valid": is_valid, "pattern_name": best.name,
+            "aggressive_entry": aggressive_entry, "aggressive_entry_label": aggressive_label, "aggressive_sl": aggressive_sl,
             "geometry_data": {"df": df, "mode": "pattern", "resistance_level": resistance_level, "support_level": support_level,
                               "invalidation_threshold": structural_sl, "trigger_line": best.trigger_line,
                               "key_points": best.key_points, "trigger_price": trigger, "category": best.category,
@@ -506,9 +521,18 @@ async def send_full_analysis(context, chat_id, symbol, timeframe):
         trade_block = (f"- Price: {fmt.format(setup['current_market_price'])}\n"
                        f"- SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
                        if setup['sl'] is not None else f"- No trade levels yet: {setup['rationale']}\n")
+        entry_styles_block = ""
+        if setup.get('aggressive_entry') is not None and setup['sl'] is not None:
+            entry_styles_block = (
+                f"\nENTRY STYLES (for manual trades -- the EA/AUTO pipeline only ever takes Confirmation):\n"
+                f"- Aggressive: {fmt.format(setup['aggressive_entry'])} (at {setup['aggressive_entry_label']}) "
+                f"| SL {fmt.format(setup['aggressive_sl'])} -- smaller size, best R:R, lower probability\n"
+                f"- Confirmation: close beyond {fmt.format(setup['geometry_data']['trigger_price'])} "
+                f"-- higher probability, standard size (this is what the EA waits for)\n"
+            )
         summary = (f"SUMMARY ({symbol} | {setup['selected_tf']}):\n- Pattern: {setup['pattern_name']}\n"
                    f"- Confidence: {setup['confidence']:.1f}%\n- Status: {setup['trendline_status']}\n"
-                   f"- Signal: {setup['direction']} [{setup['action_type']}]\n" + trade_block)
+                   f"- Signal: {setup['direction']} [{setup['action_type']}]\n" + trade_block + entry_styles_block)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🤖 AI Commentary", callback_data=f"ai_commentary|{symbol}|{timeframe}")]])
         await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"{symbol} ({setup['selected_tf']}) | {ts_str}")
         await context.bot.send_message(chat_id=chat_id, text=summary)
