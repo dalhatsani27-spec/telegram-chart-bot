@@ -26,6 +26,14 @@ import ai_throttle
 from institutional_analysis import run_topdown_analysis, format_institutional_report
 from amd_analysis import run_amd_analysis, format_amd_report
 from market_structure import structure_trade_permission
+from chart_engine import (
+    generate_smc_map,
+    generate_amd_map,
+    generate_trendline_map,
+    generate_ticket_chart,
+)
+from silver_bullet import run_silver_bullet_analysis, format_silver_bullet_report
+from strategy_engine import run_strategy_for_symbol, format_trade_ticket
 
 # ==========================================
 # 1. FLASK WEB SERVER (local only -- EA talks to 127.0.0.1)
@@ -287,228 +295,16 @@ def build_display_setup(symbol, timeframe):
         }
 
 # ==========================================
-# 4. CHART RENDERER
+# 4. CHART RENDERER  (moved to chart_engine.py)
 # ==========================================
-def _draw_zone_rect(ax, chart_len, top, bottom, color, alpha, label=None, label_x_frac=0.02):
-    """Draw a horizontal zone band across the visible chart."""
-    try:
-        y0, y1 = min(top, bottom), max(top, bottom)
-        ax.axhspan(y0, y1, facecolor=color, alpha=alpha, zorder=2, edgecolor=color, linewidth=0.6)
-        if label:
-            ax.text(
-                chart_len * label_x_frac, (y0 + y1) / 2, label,
-                fontsize=7, color="#ffffff", va="center", ha="left",
-                bbox=dict(boxstyle="round,pad=0.15", facecolor=color, alpha=0.85),
-                zorder=7,
-            )
-    except Exception:
-        pass
+# Old generate_smc_chart / generate_execution_chart removed.
+# New institutional maps:
+#   generate_smc_map()       – SMC zones + sessions
+#   generate_amd_map()       – AMD 5-phase + session separators
+#   generate_trendline_map() – Trendline / HH-HL style
+#   generate_ticket_chart()  – Mobile Manual Trade ticket
+# Imported from chart_engine at top of file.
 
-
-def generate_smc_chart(df, symbol, title_suffix, zones_payload, bias_label=""):
-    """
-    Chart that tells the full SMC story visually:
-      - Candles + EMA20/50/200
-      - FVG / IFVG bands
-      - Order Blocks / Breakers
-      - Inducement (IDM)
-      - Structure high/low, VWAP, POC
-    """
-    img_buf = io.BytesIO()
-    if df is None or df.empty or len(df) < 20:
-        raise ValueError("no chart data")
-
-    chart_len = min(100, len(df))
-    chart_df = df.tail(chart_len).copy()
-    offset = len(df) - chart_len
-
-    mc = mpf.make_marketcolors(up="#089981", down="#f23645", edge="inherit", wick="inherit")
-    style = mpf.make_mpf_style(
-        marketcolors=mc, gridstyle=":", gridcolor="#2a2e39",
-        y_on_right=True, facecolor="#131722", figcolor="#131722",
-    )
-    addplots = []
-    if "EMA200" in chart_df.columns:
-        addplots.append(mpf.make_addplot(chart_df["EMA200"], color="#ffd600", width=1.4))
-    if "EMA50" in chart_df.columns:
-        addplots.append(mpf.make_addplot(chart_df["EMA50"], color="#2962ff", width=1.2))
-    if "EMA20" in chart_df.columns:
-        addplots.append(mpf.make_addplot(chart_df["EMA20"], color="#ab47bc", width=1.0))
-    if "VWAP" in chart_df.columns:
-        addplots.append(mpf.make_addplot(chart_df["VWAP"], color="#26c6da", width=1.1, linestyle="--"))
-
-    price_min = float(chart_df["Low"].min())
-    price_max = float(chart_df["High"].max())
-    padding = (price_max - price_min) * 0.12 or 0.001
-    fig, axlist = mpf.plot(
-        chart_df, type="candle", style=style, volume=False,
-        addplot=addplots if addplots else None, returnfig=True,
-        figsize=(12, 7), ylim=(price_min - padding, price_max + padding),
-    )
-    ax = axlist[0]
-
-    fvgs = zones_payload.get("fvgs") or []
-    obs = zones_payload.get("order_blocks") or []
-    idms = zones_payload.get("inducements") or []
-    structure = zones_payload.get("structure") or {}
-    vp = zones_payload.get("volume_profile")
-    trend = zones_payload.get("trendline")
-
-    # FVG / IFVG
-    for z in fvgs[:6]:
-        mitigated = z.get("mitigated")
-        if z.get("bias") == "BULLISH":
-            color = "#78909c" if mitigated else "#00c853"  # grey if mitigated else green
-        else:
-            color = "#78909c" if mitigated else "#ff1744"
-        label = None
-        if not mitigated:
-            label = "IFVG" if z.get("type") == "IFVG" else "FVG"
-        _draw_zone_rect(ax, chart_len, z["top"], z["bottom"], color, 0.18 if not mitigated else 0.08, label)
-
-    # Order Blocks / Breakers
-    for z in obs[:5]:
-        mitigated = z.get("mitigated")
-        if z.get("bias") == "BULLISH":
-            color = "#5c6bc0" if mitigated else "#1e88e5"
-        else:
-            color = "#8d6e63" if mitigated else "#6d4c41"
-        label = "BRK" if mitigated or z.get("type") == "BREAKER" else "OB"
-        if mitigated:
-            label = "BRK"
-        _draw_zone_rect(ax, chart_len, z["top"], z["bottom"], color, 0.22 if not mitigated else 0.1, label, 0.15)
-
-    # Inducement
-    for z in idms[:5]:
-        mitigated = z.get("mitigated") or z.get("swept")
-        color = "#9e9e9e" if mitigated else "#ff9100"
-        label = "IDM✗" if mitigated else "IDM"
-        _draw_zone_rect(ax, chart_len, z["top"], z["bottom"], color, 0.2 if not mitigated else 0.08, label, 0.28)
-
-    # Structure levels
-    if structure.get("structure_high"):
-        ax.axhline(structure["structure_high"], color="#ea80fc", linestyle="--", linewidth=1.0, alpha=0.7)
-        ax.text(chart_len * 0.7, structure["structure_high"], "SH", fontsize=7, color="#ea80fc", va="bottom")
-    if structure.get("structure_low"):
-        ax.axhline(structure["structure_low"], color="#ea80fc", linestyle="--", linewidth=1.0, alpha=0.7)
-        ax.text(chart_len * 0.7, structure["structure_low"], "SL", fontsize=7, color="#ea80fc", va="top")
-
-    # Trendline channel edges
-    if trend:
-        ax.axhline(trend["upper"], color="#00e676", linestyle="-", linewidth=1.0, alpha=0.5)
-        ax.axhline(trend["lower"], color="#00e676", linestyle="-", linewidth=1.0, alpha=0.5)
-
-    # POC
-    if vp and vp.get("poc_price"):
-        ax.axhline(vp["poc_price"], color="#ff9800", linestyle=":", linewidth=1.2, alpha=0.8)
-        ax.text(chart_len * 0.85, vp["poc_price"], "POC", fontsize=7, color="#ff9800", va="bottom")
-
-    # Legend strip
-    legend = "EMA200 yellow · VWAP cyan · FVG green/red · OB blue/brown · IDM orange · SH/SL purple"
-    ax.set_title(
-        f"{symbol} SMC Map | {title_suffix} | Bias: {bias_label}\n{legend}",
-        color="#e0e0e0", fontsize=9, fontweight="bold", pad=10,
-    )
-    fig.savefig(img_buf, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())
-    img_buf.seek(0)
-    plt.close(fig)
-    return img_buf
-
-
-def generate_execution_chart(setup):
-    img_buf = io.BytesIO()
-    g = setup['geometry_data']
-    full_df = g['df']
-    chart_len = min(90, len(full_df))
-    chart_df = full_df.tail(chart_len).copy()
-    offset = len(full_df) - chart_len
-
-    mc = mpf.make_marketcolors(up='#089981', down='#f23645', edge='inherit', wick='inherit')
-    style = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', gridcolor='#2a2e39', y_on_right=True, facecolor='#131722', figcolor='#131722')
-
-    addplots = []
-    if 'EMA50' in chart_df.columns: addplots.append(mpf.make_addplot(chart_df['EMA50'], color='#2962ff', width=1.3))
-    if 'EMA20' in chart_df.columns: addplots.append(mpf.make_addplot(chart_df['EMA20'], color='#ab47bc', width=1.0))
-    if 'EMA200' in chart_df.columns: addplots.append(mpf.make_addplot(chart_df['EMA200'], color='#ffd600', width=1.2))
-
-    if g.get("mode") == "channel":
-        n = len(chart_df)
-        addplots.append(mpf.make_addplot(pd.Series(g['upper_line'][-n:], index=chart_df.index), color='#00e676', width=2.0))
-        addplots.append(mpf.make_addplot(pd.Series(g['middle_line'][-n:], index=chart_df.index), color='#ff9800', width=1.5, linestyle='--'))
-        addplots.append(mpf.make_addplot(pd.Series(g['lower_line'][-n:], index=chart_df.index), color='#00e676', width=2.0))
-
-    price_min = chart_df['Low'].min(); price_max = chart_df['High'].max()
-    padding = (price_max - price_min) * 0.15 or 0.001
-    fig, axlist = mpf.plot(chart_df, type='candle', style=style, volume=False, addplot=addplots if addplots else None,
-                           returnfig=True, figsize=(12, 7), ylim=(price_min - padding, price_max + padding))
-    ax = axlist[0]
-
-    if g.get("mode") == "pattern":
-        trigger_line = g.get("trigger_line") or []
-        if len(trigger_line) >= 2:
-            xs = [pt[0] - offset for pt in trigger_line]; ys = [pt[1] for pt in trigger_line]
-            if xs[-1] != xs[0]:
-                slope = (ys[-1] - ys[0]) / (xs[-1] - xs[0])
-                extended_x = chart_len - 1
-                xs.append(extended_x); ys.append(ys[-1] + slope * (extended_x - xs[-2]))
-            xs_clipped = [max(0, min(chart_len - 1, x)) for x in xs]
-            ax.plot(xs_clipped, ys, color='#ffeb3b', linewidth=2.0, linestyle='--', zorder=5)
-        for (px, py, label) in (g.get("key_points") or []):
-            cx = px - offset
-            if 0 <= cx <= chart_len - 1:
-                ax.scatter([cx], [py], color='#ffffff', edgecolor='#000000', s=45, zorder=6)
-                ax.annotate(label, (cx, py), textcoords="offset points", xytext=(0, 10), fontsize=7, color='#ffffff', ha='center', zorder=6)
-        if g.get("trigger_price") is not None:
-            ax.axhline(g['trigger_price'], color='#ffeb3b', linestyle=':', linewidth=1.0, alpha=0.6)
-
-    ax.axhline(g['resistance_level'], color='#ffb300', linestyle='-', linewidth=1.0, alpha=0.5)
-    ax.axhline(g['support_level'], color='#ffb300', linestyle='-', linewidth=1.0, alpha=0.5)
-
-    # --- Volume Profile sidebar (Point of Control + Value Area) ---
-    vp = g.get("volume_profile")
-    if vp is not None:
-        try:
-            vp_ax = ax.inset_axes([1.0, 0, 0.12, 1], transform=ax.transAxes, sharey=ax)
-            bin_edges = vp["bin_edges"]; bin_volumes = vp["bin_volumes"]
-            centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-            heights = (bin_edges[1] - bin_edges[0])
-            max_vol = bin_volumes.max() or 1.0
-            colors = ['#ff9800' if abs(c - vp["poc_price"]) <= heights else
-                     ('#546e7a' if (vp["value_area_low"] <= c <= vp["value_area_high"]) else '#37474f')
-                     for c in centers]
-            vp_ax.barh(centers, bin_volumes / max_vol, height=heights, color=colors, alpha=0.85)
-            vp_ax.axis('off')
-        except Exception:
-            pass  # visual-only feature -- never let it break the trade chart itself
-
-    # --- Long/Short position box (TradingView-style entry->TP / entry->SL) ---
-    if setup['sl'] is not None and setup['tp1'] is not None:
-        entry_p = setup['entry']; sl_p = setup['sl']; tp_p = setup['tp1']
-        box_x0 = max(0, chart_len - 12); box_x1 = chart_len - 1
-        risk = abs(entry_p - sl_p); reward = abs(tp_p - entry_p)
-        rr = (reward / risk) if risk > 0 else 0
-        ax.add_patch(plt.Rectangle((box_x0, min(entry_p, tp_p)), box_x1 - box_x0, abs(tp_p - entry_p),
-                                   color='#089981', alpha=0.25, zorder=3))
-        ax.add_patch(plt.Rectangle((box_x0, min(entry_p, sl_p)), box_x1 - box_x0, abs(sl_p - entry_p),
-                                   color='#f23645', alpha=0.25, zorder=3))
-        ax.annotate(f"R:R 1:{rr:.1f}", (box_x0, max(entry_p, tp_p)), fontsize=8, color='#ffffff',
-                   textcoords="offset points", xytext=(0, 4))
-        for lvl, label, clr in [(tp_p, "TP1", '#089981'), (setup.get('tp2'), "TP2", '#00e676'), (sl_p, "SL", '#f23645')]:
-            if lvl is not None:
-                ax.axhline(lvl, color=clr, linestyle=':', linewidth=1.0, alpha=0.7)
-
-    if setup['sl'] is not None:
-        ax.axhline(setup['entry'], color='#00e676', linestyle='--', linewidth=1.2)
-
-    validity_tag = "NO SIGNAL" if setup['direction'] == "NO_SIGNAL" else ("VALID" if setup['is_valid'] else "INVALID")
-    status_color = "#ffb300" if setup['direction'] == "NO_SIGNAL" else ("#00e676" if setup['is_valid'] else "#f23645")
-    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ax.set_title(f"{setup['symbol']} Price-Action Map [{validity_tag}] | TF: {setup['selected_tf']}\n"
-                f"Pattern: {setup['pattern_name']} | Confidence: {setup['confidence']:.1f}% | {ts_str}",
-                color=status_color, fontsize=9, fontweight='bold', pad=12)
-    fig.savefig(img_buf, dpi=200, bbox_inches='tight', facecolor=fig.get_facecolor())
-    img_buf.seek(0); plt.close(fig)
-    return img_buf
 
 def generate_memorandum(asset_symbol, setup):
     g = setup["geometry_data"]
@@ -554,36 +350,71 @@ def push_telegram_photo(photo, caption=""):
 
 def get_home_menu():
     """Professional institutional-style home interface."""
+    strat_label = ts.state.strategy_label()
     keyboard = [
-        [InlineKeyboardButton("🏛  INSTITUTIONAL TOP-DOWN", callback_data="menu_analysis")],
-        [InlineKeyboardButton("🕯  AMD (1H Power of Three)", callback_data="menu_amd")],
-        [InlineKeyboardButton("⚡  SCALPER MODE", callback_data="menu_scalper"),
-         InlineKeyboardButton("🔍  PATTERN SCANNER", callback_data="menu_pattern_scanner")],
-        [InlineKeyboardButton("🎯  CUSTOM TICKER", callback_data="prompt_custom_ticker")],
+        [InlineKeyboardButton(f"🧠 STRATEGY: {strat_label}", callback_data="menu_strategy")],
+        [InlineKeyboardButton("🏛  SMC (Top-Down)", callback_data="menu_analysis"),
+         InlineKeyboardButton("🕯  AMD Cycle", callback_data="menu_amd")],
+        [InlineKeyboardButton("⚡  Silver Bullet", callback_data="menu_silver_bullet"),
+         InlineKeyboardButton("📐  Trendline", callback_data="menu_trendline")],
+        [InlineKeyboardButton("🔍  Pattern Scanner", callback_data="menu_pattern_scanner"),
+         InlineKeyboardButton("🎯  Custom Ticker", callback_data="prompt_custom_ticker")],
         [InlineKeyboardButton("📱  CONTROL PANEL", callback_data="menu_mobile_panel")],
         [InlineKeyboardButton("ℹ️  HELP & GUIDE", callback_data="menu_help")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
+
+def get_strategy_menu():
+    mode = ts.state.get_strategy_mode()
+    selected = ts.state.get_selected_strategy()
+    mode_label = "🟢 SINGLE" if mode == ts.STRATEGY_MODE_SINGLE else "🟣 HYBRID"
+    keyboard = [
+        [InlineKeyboardButton(f"Mode: {mode_label} (tap to switch)", callback_data="toggle_strategy_mode")],
+        [InlineKeyboardButton(
+            f"{'✅' if selected == ts.STRATEGY_SMC else '⚪'} SMC",
+            callback_data="set_strategy|SMC"),
+         InlineKeyboardButton(
+            f"{'✅' if selected == ts.STRATEGY_AMD else '⚪'} AMD",
+            callback_data="set_strategy|AMD")],
+        [InlineKeyboardButton(
+            f"{'✅' if selected == ts.STRATEGY_SILVER_BULLET else '⚪'} Silver Bullet",
+            callback_data="set_strategy|SILVER_BULLET"),
+         InlineKeyboardButton(
+            f"{'✅' if selected == ts.STRATEGY_TRENDLINE else '⚪'} Trendline",
+            callback_data="set_strategy|TRENDLINE")],
+        [InlineKeyboardButton("« Back", callback_data="menu_home")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def get_mobile_panel_menu():
     mode = ts.state.get_mode()
     master_label = "🟢 Master: ON" if mode != ts.MODE_OFF else "🔴 Master: OFF"
-    trade_mode_label = f"Manual Trade Mode: {'AUTO' if mode == ts.MODE_AUTO else 'APPROVAL'}"
+    if mode == ts.MODE_AUTO:
+        trade_mode_label = "Trade Mode: AUTO (EA executes)"
+    elif mode == ts.MODE_APPROVAL:
+        trade_mode_label = "Trade Mode: APPROVAL"
+    elif mode == ts.MODE_COPY_TRADE:
+        trade_mode_label = "Trade Mode: MOBILE MANUAL (tickets only)"
+    else:
+        trade_mode_label = "Trade Mode: OFF"
     copy_active = (mode == ts.MODE_COPY_TRADE)
-    copy_label = "🟢 Copy Trade (Away Mode): ON" if copy_active else "⚪ Copy Trade (Away Mode): OFF"
+    copy_label = "🟢 Mobile Manual Tickets: ON" if copy_active else "⚪ Mobile Manual Tickets: OFF"
     lot_label = f"Lot Mode: {ts.state.lot_mode}"
     watched = ts.state.get_watched_symbol()
     watch_label = f"🎯 Watching: {watched} (tap to change)" if watched else "🎯 Select Asset to Watch"
+    strat_label = ts.state.strategy_label()
 
     keyboard = [
         [InlineKeyboardButton(master_label, callback_data="toggle_master")],
         [InlineKeyboardButton(trade_mode_label, callback_data="toggle_trade_mode")],
         [InlineKeyboardButton(copy_label, callback_data="toggle_copy_trade")],
+        [InlineKeyboardButton(f"🧠 {strat_label}", callback_data="menu_strategy")],
         [InlineKeyboardButton(lot_label, callback_data="toggle_lot_mode")],
         [InlineKeyboardButton(watch_label, callback_data="menu_watch_asset")],
         [InlineKeyboardButton("💰 Account & PnL", callback_data="show_account_pnl"),
          InlineKeyboardButton("📈 Open Positions", callback_data="show_open_positions")],
-        [InlineKeyboardButton("📊 Pattern Win Rates", callback_data="show_pattern_stats")],
         [InlineKeyboardButton("« Back", callback_data="menu_home")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -652,7 +483,7 @@ async def background_watchlist_scanner():
         await asyncio.sleep(WATCHLIST_SCAN_INTERVAL_SECONDS)
 
 async def send_amd_analysis(context, chat_id, symbol):
-    """AMD — short text + full SMC chart on 1H."""
+    """AMD — 5-phase cycle map with TradingView-style session separators."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         analysis = run_amd_analysis(symbol)
@@ -660,31 +491,20 @@ async def send_amd_analysis(context, chat_id, symbol):
 
         try:
             df_1h = analysis.get("df_1h")
-            zones = {
-                "fvgs": analysis.get("fvgs") or [],
-                "order_blocks": analysis.get("order_blocks") or [],
-                "inducements": analysis.get("inducements") or [],
-                "structure": analysis.get("structure_1h") or {},
-                "volume_profile": analysis.get("volume_profile"),
-                "trendline": None,
-            }
-            # Draw range as extra structure if present
-            if analysis.get("range"):
-                zones.setdefault("structure", {})
-                zones["structure"]["structure_high"] = analysis["range"]["high"]
-                zones["structure"]["structure_low"] = analysis["range"]["low"]
-
-            chart_img = generate_smc_chart(
-                df_1h, symbol,
-                f"AMD 1H | {analysis.get('phase', '')} | {ts_str}",
-                zones,
-                bias_label=analysis.get("amd_bias", ""),
-            )
-            await context.bot.send_photo(
-                chat_id=chat_id, photo=chart_img,
-                caption=f"{symbol} AMD Map | {analysis.get('phase', 'n/a')} | {ts_str}"
-            )
-        except Exception:
+            if df_1h is not None and not df_1h.empty:
+                chart_img = generate_amd_map(
+                    df_1h,
+                    symbol,
+                    analysis,
+                    title_suffix=f"1H | {ts_str}",
+                )
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=chart_img,
+                    caption=f"{symbol} AMD Cycle Map | Phase: {analysis.get('phase', 'n/a')} | {ts_str}",
+                )
+        except Exception as chart_err:
+            # Fallback: still send text even if chart fails
             pass
 
         await context.bot.send_message(chat_id=chat_id, text=report)
@@ -700,7 +520,7 @@ async def send_amd_analysis(context, chat_id, symbol):
 
 
 async def send_institutional_topdown(context, chat_id, symbol):
-    """Short summary text + full SMC chart (zones tell the story)."""
+    """SMC Top-Down — zones, structure, liquidity mapped like the educational charts."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         analysis = run_topdown_analysis(symbol)
@@ -708,7 +528,6 @@ async def send_institutional_topdown(context, chat_id, symbol):
         overall_bias = analysis.get("overall_bias", "NEUTRAL")
 
         try:
-            # Prefer 1H frame for institutional map (balance of detail + structure)
             frames = analysis.get("frames") or []
             chart_frame = None
             for f in frames:
@@ -725,18 +544,21 @@ async def send_institutional_topdown(context, chat_id, symbol):
                     "inducements": chart_frame.get("inducements") or [],
                     "structure": chart_frame.get("structure") or {},
                     "volume_profile": chart_frame.get("volume_profile"),
-                    "trendline": chart_frame.get("trendline"),
+                    "bos_events": chart_frame.get("bos_events") or [],
                 }
                 tf_lab = chart_frame.get("tf_label", "1H")
-                chart_img = generate_smc_chart(
-                    chart_frame["df"], symbol,
-                    f"Institutional {tf_lab} | {ts_str}",
-                    zones,
+                chart_img = generate_smc_map(
+                    chart_frame["df"],
+                    symbol,
+                    title_suffix=f"Institutional {tf_lab} | {ts_str}",
+                    zones=zones,
                     bias_label=overall_bias,
+                    show_sessions=True,
                 )
                 await context.bot.send_photo(
-                    chat_id=chat_id, photo=chart_img,
-                    caption=f"{symbol} SMC Map | Bias: {overall_bias} | {ts_str}"
+                    chat_id=chat_id,
+                    photo=chart_img,
+                    caption=f"{symbol} SMC Map | Bias: {overall_bias} | {ts_str}",
                 )
         except Exception:
             pass
@@ -760,7 +582,13 @@ async def send_full_analysis(context, chat_id, symbol, timeframe):
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         setup = build_display_setup(symbol, timeframe)
-        chart_img = generate_execution_chart(setup)
+        # Use new trendline / execution style map
+        chart_img = generate_trendline_map(
+            setup["geometry_data"]["df"],
+            symbol,
+            setup,
+            title_suffix=f"{timeframe} | {ts_str}",
+        )
         memo_text = generate_memorandum(symbol, setup)
         fmt = f"{{:.{_decimals_for(symbol)}f}}"
         trade_block = (f"- Price: {fmt.format(setup['current_market_price'])}\n"
@@ -786,17 +614,150 @@ async def send_full_analysis(context, chat_id, symbol, timeframe):
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"Failed to analyze '{symbol}': {str(e)}", reply_markup=get_home_menu())
 
+
+async def send_silver_bullet_analysis(context, chat_id, symbol):
+    """ICT Silver Bullet analysis + optional ticket in Mobile Manual mode."""
+    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        analysis = run_silver_bullet_analysis(symbol)
+        report = format_silver_bullet_report(analysis)
+
+        # Chart: reuse SMC map with FVGs + structure
+        try:
+            df = analysis.get("df")
+            if df is not None and not df.empty:
+                zones = {
+                    "fvgs": analysis.get("fvgs") or [],
+                    "order_blocks": analysis.get("order_blocks") or [],
+                    "structure": analysis.get("structure") or {},
+                }
+                chart_img = generate_smc_map(
+                    df, symbol,
+                    title_suffix=f"Silver Bullet | {ts_str}",
+                    zones=zones,
+                    bias_label=analysis.get("direction", ""),
+                    show_sessions=True,
+                )
+                await context.bot.send_photo(
+                    chat_id=chat_id, photo=chart_img,
+                    caption=f"{symbol} Silver Bullet | {ts_str}",
+                )
+        except Exception:
+            pass
+
+        await context.bot.send_message(chat_id=chat_id, text=report)
+
+        # Mobile Manual ticket when in COPY_TRADE mode and setup is valid
+        if ts.state.get_mode() == ts.MODE_COPY_TRADE and analysis.get("valid"):
+            from silver_bullet import build_silver_bullet_ticket
+            ticket = build_silver_bullet_ticket(analysis)
+            if ticket:
+                ticket_text = format_trade_ticket(
+                    {
+                        "direction": ticket["direction"],
+                        "strategy": "ICT Silver Bullet",
+                        "score": analysis.get("score", 0),
+                        "reasons": analysis.get("reasons") or [],
+                        "ticket": ticket,
+                    },
+                    symbol,
+                )
+                await context.bot.send_message(chat_id=chat_id, text=ticket_text)
+
+        await context.bot.send_message(chat_id=chat_id, text="Choose next action:", reply_markup=get_home_menu())
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Silver Bullet analysis failed for '{symbol}': {str(e)}",
+            reply_markup=get_home_menu(),
+        )
+
+
+async def send_smart_analysis(context, chat_id, symbol):
+    """
+    Runs Single or Hybrid strategy engine and returns analysis + ticket
+    (ticket only when Mobile Manual / COPY_TRADE is active).
+    """
+    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        result = run_strategy_for_symbol(symbol)
+        strategy = result.get("strategy", "")
+        report = result.get("report") or "No report"
+
+        # Chart by strategy
+        try:
+            analysis = result.get("analysis") or {}
+            if strategy == ts.STRATEGY_AMD and analysis.get("df_1h") is not None:
+                chart_img = generate_amd_map(analysis["df_1h"], symbol, analysis, title_suffix=ts_str)
+                await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"{symbol} AMD | {ts_str}")
+            elif strategy in (ts.STRATEGY_SMC, ts.STRATEGY_SILVER_BULLET):
+                df = None
+                zones = {}
+                if strategy == ts.STRATEGY_SILVER_BULLET:
+                    df = analysis.get("df")
+                    zones = {"fvgs": analysis.get("fvgs") or [], "order_blocks": analysis.get("order_blocks") or [],
+                             "structure": analysis.get("structure") or {}}
+                else:
+                    frames = analysis.get("frames") or []
+                    frame = next((f for f in frames if f.get("tf") == "1h"), frames[0] if frames else None)
+                    if frame:
+                        df = frame.get("df")
+                        zones = {
+                            "fvgs": frame.get("fvgs") or [],
+                            "order_blocks": frame.get("order_blocks") or [],
+                            "inducements": frame.get("inducements") or [],
+                            "structure": frame.get("structure") or {},
+                        }
+                if df is not None:
+                    chart_img = generate_smc_map(
+                        df, symbol, title_suffix=f"{strategy} | {ts_str}",
+                        zones=zones, bias_label=result.get("direction", ""), show_sessions=True,
+                    )
+                    await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"{symbol} {strategy} | {ts_str}")
+            elif strategy == ts.STRATEGY_TRENDLINE and analysis:
+                g = analysis.get("geometry_data") or {}
+                if g.get("df") is not None:
+                    chart_img = generate_trendline_map(g["df"], symbol, analysis, title_suffix=ts_str)
+                    await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"{symbol} Trendline | {ts_str}")
+        except Exception:
+            pass
+
+        header = (
+            f"Strategy: {strategy}\n"
+            f"Mode: {ts.state.strategy_label()}\n"
+            f"Direction: {result.get('direction')} | Score: {result.get('score', 0)}/100\n"
+        )
+        if result.get("chosen_reason"):
+            header += f"Why: {result['chosen_reason']}\n"
+        await context.bot.send_message(chat_id=chat_id, text=header + "\n" + report)
+
+        # Mobile Manual ticket
+        if ts.state.get_mode() == ts.MODE_COPY_TRADE and result.get("valid"):
+            ticket_text = format_trade_ticket(result, symbol)
+            await context.bot.send_message(chat_id=chat_id, text=ticket_text)
+
+        await context.bot.send_message(chat_id=chat_id, text="Choose next action:", reply_markup=get_home_menu())
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Smart analysis failed for '{symbol}': {str(e)}",
+            reply_markup=get_home_menu(),
+        )
+
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global primary_chat_id
     chat_id = update.effective_chat.id
     primary_chat_id = chat_id
     symbol = update.message.text.strip().upper()
-    status_msg = await update.message.reply_text(f"Scanning {symbol}...")
+    status_msg = await update.message.reply_text(
+        f"Scanning {symbol} with {ts.state.strategy_label()}..."
+    )
     try:
         await status_msg.delete()
     except Exception:
         pass
-    await send_institutional_topdown(context, chat_id, symbol)
+    await send_smart_analysis(context, chat_id, symbol)
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global primary_chat_id
@@ -812,8 +773,45 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             "══════════════════════════════════\n"
             "  INSTITUTIONAL PRICE-ACTION ENGINE\n"
             "══════════════════════════════════\n"
+            f"Strategy: {ts.state.strategy_label()}\n"
             "Select a command:",
             reply_markup=get_home_menu()
+        )
+
+    # ---------------- Strategy Selector ----------------
+    elif data == "menu_strategy":
+        await query.edit_message_text(
+            "🧠 STRATEGY SELECTOR\n\n"
+            "SINGLE = run only the selected strategy\n"
+            "HYBRID = scan all, pick best confluence + explain why\n\n"
+            f"Current: {ts.state.strategy_label()}",
+            reply_markup=get_strategy_menu(),
+        )
+
+    elif data == "toggle_strategy_mode":
+        if ts.state.get_strategy_mode() == ts.STRATEGY_MODE_SINGLE:
+            ts.state.set_strategy_mode(ts.STRATEGY_MODE_HYBRID)
+        else:
+            ts.state.set_strategy_mode(ts.STRATEGY_MODE_SINGLE)
+        await query.edit_message_text(
+            f"Mode switched → {ts.state.strategy_label()}",
+            reply_markup=get_strategy_menu(),
+        )
+
+    elif data.startswith("set_strategy|"):
+        name = data.split("|", 1)[1]
+        mapping = {
+            "SMC": ts.STRATEGY_SMC,
+            "AMD": ts.STRATEGY_AMD,
+            "SILVER_BULLET": ts.STRATEGY_SILVER_BULLET,
+            "TRENDLINE": ts.STRATEGY_TRENDLINE,
+        }
+        if name in mapping:
+            ts.state.set_selected_strategy(mapping[name])
+            ts.state.set_strategy_mode(ts.STRATEGY_MODE_SINGLE)
+        await query.edit_message_text(
+            f"Strategy set → {ts.state.strategy_label()}",
+            reply_markup=get_strategy_menu(),
         )
 
     # ---------------- Mobile Control Panel ----------------
@@ -952,13 +950,15 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(f"{cat}:", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_an", "menu_analysis"))
     elif data.startswith("run_an|"):
         _, symbol = data.split("|", 1)
-        await query.edit_message_text(f"Running Institutional Top-Down for {symbol}...")
+        ts.state.set_selected_strategy(ts.STRATEGY_SMC)
+        ts.state.set_strategy_mode(ts.STRATEGY_MODE_SINGLE)
+        await query.edit_message_text(f"Running SMC Top-Down for {symbol}...")
         await send_institutional_topdown(context, chat_id, symbol)
 
     elif data == "menu_amd":
         extra = [InlineKeyboardButton("🔍 Custom Ticker", callback_data="prompt_custom_ticker_amd")]
         await query.edit_message_text(
-            "AMD (Accumulation → Manipulation → Distribution)\nPrimary chart: 1 HOUR",
+            "AMD (5-Phase Cycle)\nAccumulation → Manipulation → Displacement → Reversion → Continuation\nPrimary: 1 HOUR + session separators",
             reply_markup=get_category_keyboard("cat_amd", "menu_home", extra_row=extra)
         )
     elif data.startswith("cat_amd|"):
@@ -966,6 +966,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(f"{cat}:", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_amd", "menu_amd"))
     elif data.startswith("run_amd|"):
         _, symbol = data.split("|", 1)
+        ts.state.set_selected_strategy(ts.STRATEGY_AMD)
+        ts.state.set_strategy_mode(ts.STRATEGY_MODE_SINGLE)
         await query.edit_message_text(f"Running AMD (1H) analysis for {symbol}...")
         await send_amd_analysis(context, chat_id, symbol)
     elif data == "prompt_custom_ticker_amd":
@@ -973,6 +975,56 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             "Type any ticker for AMD analysis (e.g. XAUUSD, EURUSD).",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_amd")]])
         )
+
+    # ---------------- ICT Silver Bullet ----------------
+    elif data == "menu_silver_bullet":
+        extra = [InlineKeyboardButton("🔍 Custom Ticker", callback_data="prompt_custom_ticker_sb")]
+        await query.edit_message_text(
+            "⚡ ICT SILVER BULLET\nWindows (NY): 03:00–04:00 | 10:00–11:00 | 14:00–15:00\nLiquidity sweep → Displacement → FVG entry",
+            reply_markup=get_category_keyboard("cat_sb", "menu_home", extra_row=extra)
+        )
+    elif data.startswith("cat_sb|"):
+        _, cat = data.split("|", 1)
+        await query.edit_message_text(f"{cat}:", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_sb", "menu_silver_bullet"))
+    elif data.startswith("run_sb|"):
+        _, symbol = data.split("|", 1)
+        ts.state.set_selected_strategy(ts.STRATEGY_SILVER_BULLET)
+        ts.state.set_strategy_mode(ts.STRATEGY_MODE_SINGLE)
+        await query.edit_message_text(f"Running Silver Bullet analysis for {symbol}...")
+        await send_silver_bullet_analysis(context, chat_id, symbol)
+    elif data == "prompt_custom_ticker_sb":
+        await query.edit_message_text(
+            "Type any ticker for Silver Bullet (e.g. EURUSD, NAS100).",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_silver_bullet")]])
+        )
+
+    # ---------------- Trendline Strategy ----------------
+    elif data == "menu_trendline":
+        extra = [InlineKeyboardButton("🔍 Custom Ticker", callback_data="prompt_custom_ticker_tl")]
+        await query.edit_message_text(
+            "📐 TRENDLINE STRATEGY\nValid trendlines, HH/HL structure, BOS, entry on retest/break",
+            reply_markup=get_category_keyboard("cat_tl", "menu_home", extra_row=extra)
+        )
+    elif data.startswith("cat_tl|"):
+        _, cat = data.split("|", 1)
+        await query.edit_message_text(f"{cat}:", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_tl", "menu_trendline"))
+    elif data.startswith("run_tl|"):
+        _, symbol = data.split("|", 1)
+        ts.state.set_selected_strategy(ts.STRATEGY_TRENDLINE)
+        ts.state.set_strategy_mode(ts.STRATEGY_MODE_SINGLE)
+        await query.edit_message_text(f"Running Trendline analysis for {symbol}...")
+        await send_smart_analysis(context, chat_id, symbol)
+    elif data == "prompt_custom_ticker_tl":
+        await query.edit_message_text(
+            "Type any ticker for Trendline analysis.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_trendline")]])
+        )
+
+    # ---------------- Smart Strategy Run (uses selected / hybrid) ----------------
+    elif data.startswith("run_smart|"):
+        _, symbol = data.split("|", 1)
+        await query.edit_message_text(f"Running {ts.state.strategy_label()} analysis for {symbol}...")
+        await send_smart_analysis(context, chat_id, symbol)
 
     elif data == "menu_scalper":
         kb = [[InlineKeyboardButton("1️⃣ 1 Minute", callback_data="tf_scalp|1min"), InlineKeyboardButton("3️⃣ 3 Minute", callback_data="tf_scalp|3min")],
