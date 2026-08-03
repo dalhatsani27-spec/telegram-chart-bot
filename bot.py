@@ -23,6 +23,7 @@ import trade_state as ts
 import engine
 import engine_api
 import ai_throttle
+from institutional_analysis import run_topdown_analysis, format_institutional_report
 
 # ==========================================
 # 1. FLASK WEB SERVER (local only -- EA talks to 127.0.0.1)
@@ -511,7 +512,52 @@ async def background_watchlist_scanner():
             pass
         await asyncio.sleep(WATCHLIST_SCAN_INTERVAL_SECONDS)
 
+async def send_institutional_topdown(context, chat_id, symbol):
+    """Professional multi-timeframe Institutional Analysis (Top-Down)."""
+    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        analysis = run_topdown_analysis(symbol)
+        report = format_institutional_report(analysis)
+
+        # Also generate a 30m chart for visual context (execution timeframe)
+        try:
+            setup = build_display_setup(symbol, "30min")
+            chart_img = generate_execution_chart(setup)
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=chart_img,
+                caption=f"{symbol} | Institutional Top-Down | {ts_str}"
+            )
+        except Exception:
+            pass  # chart is secondary; report is the main deliverable
+
+        # Split long reports if needed (Telegram limit ~4096)
+        if len(report) > 4000:
+            mid = report.find("── PRIMARY PROJECTION ──")
+            if mid > 0:
+                await context.bot.send_message(chat_id=chat_id, text=report[:mid].strip())
+                await context.bot.send_message(chat_id=chat_id, text=report[mid:].strip())
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=report[:4000])
+                await context.bot.send_message(chat_id=chat_id, text=report[4000:])
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=report)
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Choose next action:",
+            reply_markup=get_home_menu()
+        )
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Institutional analysis failed for '{symbol}': {str(e)}",
+            reply_markup=get_home_menu()
+        )
+
+
 async def send_full_analysis(context, chat_id, symbol, timeframe):
+    """Single-timeframe analysis (used by Scalper Mode & Pattern Scanner)."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         setup = build_display_setup(symbol, timeframe)
@@ -551,7 +597,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await status_msg.delete()
     except Exception:
         pass
-    await send_full_analysis(context, chat_id, symbol, "30min")
+    await send_institutional_topdown(context, chat_id, symbol)
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global primary_chat_id
@@ -701,8 +747,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(f"{cat}:", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_an", "menu_analysis"))
     elif data.startswith("run_an|"):
         _, symbol = data.split("|", 1)
-        await query.edit_message_text(f"Running analysis for {symbol}...")
-        await send_full_analysis(context, chat_id, symbol, "30min")
+        await query.edit_message_text(f"Running Institutional Top-Down for {symbol}...")
+        await send_institutional_topdown(context, chat_id, symbol)
 
     elif data == "menu_scalper":
         kb = [[InlineKeyboardButton("1️⃣ 1 Minute", callback_data="tf_scalp|1min"), InlineKeyboardButton("3️⃣ 3 Minute", callback_data="tf_scalp|3min")],
