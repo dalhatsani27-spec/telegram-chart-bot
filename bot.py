@@ -289,6 +289,132 @@ def build_display_setup(symbol, timeframe):
 # ==========================================
 # 4. CHART RENDERER
 # ==========================================
+def _draw_zone_rect(ax, chart_len, top, bottom, color, alpha, label=None, label_x_frac=0.02):
+    """Draw a horizontal zone band across the visible chart."""
+    try:
+        y0, y1 = min(top, bottom), max(top, bottom)
+        ax.axhspan(y0, y1, facecolor=color, alpha=alpha, zorder=2, edgecolor=color, linewidth=0.6)
+        if label:
+            ax.text(
+                chart_len * label_x_frac, (y0 + y1) / 2, label,
+                fontsize=7, color="#ffffff", va="center", ha="left",
+                bbox=dict(boxstyle="round,pad=0.15", facecolor=color, alpha=0.85),
+                zorder=7,
+            )
+    except Exception:
+        pass
+
+
+def generate_smc_chart(df, symbol, title_suffix, zones_payload, bias_label=""):
+    """
+    Chart that tells the full SMC story visually:
+      - Candles + EMA20/50/200
+      - FVG / IFVG bands
+      - Order Blocks / Breakers
+      - Inducement (IDM)
+      - Structure high/low, VWAP, POC
+    """
+    img_buf = io.BytesIO()
+    if df is None or df.empty or len(df) < 20:
+        raise ValueError("no chart data")
+
+    chart_len = min(100, len(df))
+    chart_df = df.tail(chart_len).copy()
+    offset = len(df) - chart_len
+
+    mc = mpf.make_marketcolors(up="#089981", down="#f23645", edge="inherit", wick="inherit")
+    style = mpf.make_mpf_style(
+        marketcolors=mc, gridstyle=":", gridcolor="#2a2e39",
+        y_on_right=True, facecolor="#131722", figcolor="#131722",
+    )
+    addplots = []
+    if "EMA200" in chart_df.columns:
+        addplots.append(mpf.make_addplot(chart_df["EMA200"], color="#ffd600", width=1.4))
+    if "EMA50" in chart_df.columns:
+        addplots.append(mpf.make_addplot(chart_df["EMA50"], color="#2962ff", width=1.2))
+    if "EMA20" in chart_df.columns:
+        addplots.append(mpf.make_addplot(chart_df["EMA20"], color="#ab47bc", width=1.0))
+    if "VWAP" in chart_df.columns:
+        addplots.append(mpf.make_addplot(chart_df["VWAP"], color="#26c6da", width=1.1, linestyle="--"))
+
+    price_min = float(chart_df["Low"].min())
+    price_max = float(chart_df["High"].max())
+    padding = (price_max - price_min) * 0.12 or 0.001
+    fig, axlist = mpf.plot(
+        chart_df, type="candle", style=style, volume=False,
+        addplot=addplots if addplots else None, returnfig=True,
+        figsize=(12, 7), ylim=(price_min - padding, price_max + padding),
+    )
+    ax = axlist[0]
+
+    fvgs = zones_payload.get("fvgs") or []
+    obs = zones_payload.get("order_blocks") or []
+    idms = zones_payload.get("inducements") or []
+    structure = zones_payload.get("structure") or {}
+    vp = zones_payload.get("volume_profile")
+    trend = zones_payload.get("trendline")
+
+    # FVG / IFVG
+    for z in fvgs[:6]:
+        mitigated = z.get("mitigated")
+        if z.get("bias") == "BULLISH":
+            color = "#78909c" if mitigated else "#00c853"  # grey if mitigated else green
+        else:
+            color = "#78909c" if mitigated else "#ff1744"
+        label = None
+        if not mitigated:
+            label = "IFVG" if z.get("type") == "IFVG" else "FVG"
+        _draw_zone_rect(ax, chart_len, z["top"], z["bottom"], color, 0.18 if not mitigated else 0.08, label)
+
+    # Order Blocks / Breakers
+    for z in obs[:5]:
+        mitigated = z.get("mitigated")
+        if z.get("bias") == "BULLISH":
+            color = "#5c6bc0" if mitigated else "#1e88e5"
+        else:
+            color = "#8d6e63" if mitigated else "#6d4c41"
+        label = "BRK" if mitigated or z.get("type") == "BREAKER" else "OB"
+        if mitigated:
+            label = "BRK"
+        _draw_zone_rect(ax, chart_len, z["top"], z["bottom"], color, 0.22 if not mitigated else 0.1, label, 0.15)
+
+    # Inducement
+    for z in idms[:5]:
+        mitigated = z.get("mitigated") or z.get("swept")
+        color = "#9e9e9e" if mitigated else "#ff9100"
+        label = "IDM✗" if mitigated else "IDM"
+        _draw_zone_rect(ax, chart_len, z["top"], z["bottom"], color, 0.2 if not mitigated else 0.08, label, 0.28)
+
+    # Structure levels
+    if structure.get("structure_high"):
+        ax.axhline(structure["structure_high"], color="#ea80fc", linestyle="--", linewidth=1.0, alpha=0.7)
+        ax.text(chart_len * 0.7, structure["structure_high"], "SH", fontsize=7, color="#ea80fc", va="bottom")
+    if structure.get("structure_low"):
+        ax.axhline(structure["structure_low"], color="#ea80fc", linestyle="--", linewidth=1.0, alpha=0.7)
+        ax.text(chart_len * 0.7, structure["structure_low"], "SL", fontsize=7, color="#ea80fc", va="top")
+
+    # Trendline channel edges
+    if trend:
+        ax.axhline(trend["upper"], color="#00e676", linestyle="-", linewidth=1.0, alpha=0.5)
+        ax.axhline(trend["lower"], color="#00e676", linestyle="-", linewidth=1.0, alpha=0.5)
+
+    # POC
+    if vp and vp.get("poc_price"):
+        ax.axhline(vp["poc_price"], color="#ff9800", linestyle=":", linewidth=1.2, alpha=0.8)
+        ax.text(chart_len * 0.85, vp["poc_price"], "POC", fontsize=7, color="#ff9800", va="bottom")
+
+    # Legend strip
+    legend = "EMA200 yellow · VWAP cyan · FVG green/red · OB blue/brown · IDM orange · SH/SL purple"
+    ax.set_title(
+        f"{symbol} SMC Map | {title_suffix} | Bias: {bias_label}\n{legend}",
+        color="#e0e0e0", fontsize=9, fontweight="bold", pad=10,
+    )
+    fig.savefig(img_buf, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())
+    img_buf.seek(0)
+    plt.close(fig)
+    return img_buf
+
+
 def generate_execution_chart(setup):
     img_buf = io.BytesIO()
     g = setup['geometry_data']
@@ -303,6 +429,7 @@ def generate_execution_chart(setup):
     addplots = []
     if 'EMA50' in chart_df.columns: addplots.append(mpf.make_addplot(chart_df['EMA50'], color='#2962ff', width=1.3))
     if 'EMA20' in chart_df.columns: addplots.append(mpf.make_addplot(chart_df['EMA20'], color='#ab47bc', width=1.0))
+    if 'EMA200' in chart_df.columns: addplots.append(mpf.make_addplot(chart_df['EMA200'], color='#ffd600', width=1.2))
 
     if g.get("mode") == "channel":
         n = len(chart_df)
@@ -525,40 +652,42 @@ async def background_watchlist_scanner():
         await asyncio.sleep(WATCHLIST_SCAN_INTERVAL_SECONDS)
 
 async def send_amd_analysis(context, chat_id, symbol):
-    """AMD (Accumulation-Manipulation-Distribution) — primary chart is 1H."""
+    """AMD — short text + full SMC chart on 1H."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         analysis = run_amd_analysis(symbol)
         report = format_amd_report(analysis)
 
-        # Visual: use 1H chart for AMD (as designed)
         try:
-            setup = build_display_setup(symbol, "1h")
-            setup["selected_tf"] = f"1H AMD | Bias: {analysis.get('amd_bias', 'n/a')}"
-            # Align trade box with AMD bias when possible
-            amd_bias = analysis.get("amd_bias")
-            if amd_bias in ("BUY", "SELL") and setup.get("direction") in ("BUY", "SELL"):
-                if setup["direction"] != amd_bias:
-                    setup["direction"] = "NO_SIGNAL"
-                    setup["sl"] = setup["tp1"] = setup["tp2"] = None
-                    setup["is_valid"] = False
-                    setup["trendline_status"] = f"Pattern fights AMD bias ({amd_bias}) — structure only"
-            chart_img = generate_execution_chart(setup)
+            df_1h = analysis.get("df_1h")
+            zones = {
+                "fvgs": analysis.get("fvgs") or [],
+                "order_blocks": analysis.get("order_blocks") or [],
+                "inducements": analysis.get("inducements") or [],
+                "structure": analysis.get("structure_1h") or {},
+                "volume_profile": analysis.get("volume_profile"),
+                "trendline": None,
+            }
+            # Draw range as extra structure if present
+            if analysis.get("range"):
+                zones.setdefault("structure", {})
+                zones["structure"]["structure_high"] = analysis["range"]["high"]
+                zones["structure"]["structure_low"] = analysis["range"]["low"]
+
+            chart_img = generate_smc_chart(
+                df_1h, symbol,
+                f"AMD 1H | {analysis.get('phase', '')} | {ts_str}",
+                zones,
+                bias_label=analysis.get("amd_bias", ""),
+            )
             await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=chart_img,
-                caption=f"{symbol} | AMD (1H) | Phase: {analysis.get('phase', 'n/a')} | {ts_str}"
+                chat_id=chat_id, photo=chart_img,
+                caption=f"{symbol} AMD Map | {analysis.get('phase', 'n/a')} | {ts_str}"
             )
         except Exception:
             pass
 
-        if len(report) > 4000:
-            mid = len(report) // 2
-            await context.bot.send_message(chat_id=chat_id, text=report[:mid])
-            await context.bot.send_message(chat_id=chat_id, text=report[mid:])
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=report)
-
+        await context.bot.send_message(chat_id=chat_id, text=report)
         await context.bot.send_message(
             chat_id=chat_id, text="Choose next action:", reply_markup=get_home_menu()
         )
@@ -571,64 +700,48 @@ async def send_amd_analysis(context, chat_id, symbol):
 
 
 async def send_institutional_topdown(context, chat_id, symbol):
-    """Professional multi-timeframe Institutional Analysis (Top-Down)."""
+    """Short summary text + full SMC chart (zones tell the story)."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         analysis = run_topdown_analysis(symbol)
         report = format_institutional_report(analysis)
         overall_bias = analysis.get("overall_bias", "NEUTRAL")
 
-        # Chart: 30M context + BOS/CHoCH/MSS permission (not simple counter-trend suppress)
         try:
-            setup = build_display_setup(symbol, "30min")
-            ltf_direction = setup.get("direction")
+            # Prefer 1H frame for institutional map (balance of detail + structure)
             frames = analysis.get("frames") or []
-            ltf_frame = frames[-1] if frames else None
-            struct = (ltf_frame or {}).get("structure") or {}
+            chart_frame = None
+            for f in frames:
+                if f.get("tf") == "1h":
+                    chart_frame = f
+                    break
+            if chart_frame is None:
+                chart_frame = analysis.get("chart_frame") or (frames[0] if frames else None)
 
-            allowed, reason, pref = structure_trade_permission(overall_bias, struct)
-
-            if ltf_direction in ("BUY", "SELL"):
-                if allowed and (pref == "NEUTRAL" or pref == ltf_direction):
-                    setup["rationale"] = (
-                        (setup.get("rationale") or "") + f" Structure OK: {reason}"
-                    ).strip()
-                elif struct.get("last_event") == "MSS" and pref == ltf_direction:
-                    # MSS unlocks reversal even vs pure HTF EMA bias
-                    setup["rationale"] = (
-                        (setup.get("rationale") or "") + f" MSS unlock: {reason}"
-                    ).strip()
-                else:
-                    # No permission — structure only, no trade box
-                    setup["direction"] = "NO_SIGNAL"
-                    setup["sl"] = None
-                    setup["tp1"] = None
-                    setup["tp2"] = None
-                    setup["is_valid"] = False
-                    setup["action_type"] = "STRUCTURE_WAIT"
-                    setup["trendline_status"] = reason
-                    setup["pattern_name"] = f"{setup.get('pattern_name', 'Structure')} [Wait]"
-                    setup["confidence"] = min(float(setup.get("confidence", 50)), 55.0)
-
-            setup["selected_tf"] = f"30M | HTF: {overall_bias} | Struct: {struct.get('last_event') or 'n/a'}"
-            chart_img = generate_execution_chart(setup)
-            caption = f"{symbol} | Institutional | Bias: {overall_bias} | {ts_str}"
-            await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=caption)
+            if chart_frame and chart_frame.get("df") is not None:
+                zones = {
+                    "fvgs": chart_frame.get("fvgs") or [],
+                    "order_blocks": chart_frame.get("order_blocks") or [],
+                    "inducements": chart_frame.get("inducements") or [],
+                    "structure": chart_frame.get("structure") or {},
+                    "volume_profile": chart_frame.get("volume_profile"),
+                    "trendline": chart_frame.get("trendline"),
+                }
+                tf_lab = chart_frame.get("tf_label", "1H")
+                chart_img = generate_smc_chart(
+                    chart_frame["df"], symbol,
+                    f"Institutional {tf_lab} | {ts_str}",
+                    zones,
+                    bias_label=overall_bias,
+                )
+                await context.bot.send_photo(
+                    chat_id=chat_id, photo=chart_img,
+                    caption=f"{symbol} SMC Map | Bias: {overall_bias} | {ts_str}"
+                )
         except Exception:
             pass
 
-        # Split long reports if needed (Telegram limit ~4096)
-        if len(report) > 4000:
-            mid = report.find("── PRIMARY PROJECTION ──")
-            if mid > 0:
-                await context.bot.send_message(chat_id=chat_id, text=report[:mid].strip())
-                await context.bot.send_message(chat_id=chat_id, text=report[mid:].strip())
-            else:
-                await context.bot.send_message(chat_id=chat_id, text=report[:4000])
-                await context.bot.send_message(chat_id=chat_id, text=report[4000:])
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=report)
-
+        await context.bot.send_message(chat_id=chat_id, text=report)
         await context.bot.send_message(
             chat_id=chat_id,
             text="Choose next action:",
