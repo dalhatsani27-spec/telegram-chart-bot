@@ -18,6 +18,8 @@ import numpy as np
 import pandas as pd
 from patterns import scan_all_patterns, find_pivots, _atr, Pattern
 from volume_profile import compute_volume_profile
+from market_structure import analyse_structure, structure_trade_permission
+from smc_zones import detect_fvgs, detect_order_blocks, detect_inducement_zones, pair_idm_with_extreme_ob, summarise_smc_zones
 import mt5_data
 
 # Timeframe ladder for top-down (highest → lowest)
@@ -163,6 +165,10 @@ def _analyse_single_tf(symbol, tf_code, tf_label):
     trend = _fit_trendline_family(df)
     vp = compute_volume_profile(df.iloc[:-1])
     best, all_pats = scan_all_patterns(df.iloc[:-1], volume_profile=vp)
+    structure = analyse_structure(df, left=3, right=3, lookback=70)
+    fvgs = detect_fvgs(df, min_gap_atr=0.15, max_zones=5)
+    obs = detect_order_blocks(df, structure=structure, max_zones=4)
+    idms = detect_inducement_zones(df, max_zones=4)
 
     return {
         "tf": tf_code,
@@ -177,6 +183,10 @@ def _analyse_single_tf(symbol, tf_code, tf_label):
         "volume_profile": vp,
         "best_pattern": best,
         "all_patterns": all_pats[:3] if all_pats else [],
+        "structure": structure,
+        "fvgs": fvgs,
+        "order_blocks": obs,
+        "inducements": idms,
     }
 
 
@@ -301,6 +311,8 @@ def format_institutional_report(analysis):
         lines.append(f"")
         lines.append(f"▶ {f['tf_label']}")
         lines.append(f"  200 EMA : {f['ema200_note']}")
+        if f.get("structure"):
+            lines.append(f"  Structure        : {f['structure']['note']}")
         if f.get("trendline"):
             t = f["trendline"]
             lines.append(f"  Trendline Family : {t['family']} ({t['bias']})")
@@ -312,6 +324,13 @@ def format_institutional_report(analysis):
             vp = f["volume_profile"]
             lines.append(f"  POC              : {vp['poc_price']:.5f}")
             lines.append(f"  Value Area       : {vp['value_area_low']:.5f} – {vp['value_area_high']:.5f}")
+        if f.get("fvgs") or f.get("order_blocks") or f.get("inducements"):
+            zone_lines = summarise_smc_zones(
+                f.get("fvgs") or [], f.get("order_blocks") or [],
+                max_show=3, inducements=f.get("inducements") or []
+            )
+            for zl in zone_lines:
+                lines.append(zl)
         if f.get("best_pattern"):
             p = f["best_pattern"]
             lines.append(f"  Pattern          : {p.name} ({p.bias}) conf {p.confidence:.0f}%")
@@ -343,10 +362,42 @@ def format_institutional_report(analysis):
         lines.append(f"  Trendline Lower  : {t['lower']:.5f}")
         lines.append(f"  Trendline Upper  : {t['upper']:.5f}")
 
+    # OB + IDM sequence (like the whiteboard model)
+    lines.append("")
+    lines.append("── OB + IDM SETUPS (extreme + inducement) ──")
+    htf = analysis["frames"][0]
+    pairs = pair_idm_with_extreme_ob(htf.get("inducements") or [], htf.get("order_blocks") or [])
+    if pairs:
+        for p in pairs:
+            idm, ob = p["idm"], p["ob"]
+            idm_st = "MITIGATED" if idm.get("mitigated") else "UNMITIGATED"
+            ob_st = "MITIGATED" if ob.get("mitigated") else "UNMITIGATED"
+            lines.append(f"  Direction : {p['direction']}")
+            lines.append(f"  IDM [{idm_st}] : {idm['bottom']:.5f} – {idm['top']:.5f}")
+            lines.append(f"  OB  [{ob_st}]  : {ob['bottom']:.5f} – {ob['top']:.5f}")
+            lines.append(f"  {p['sequence']}")
+    else:
+        lines.append("  No clean IDM→extreme OB pair on HTF right now")
+
+    # Structure permission summary (HTF vs LTF)
+    lines.append("")
+    lines.append("── STRUCTURE PERMISSION ──")
+    ltf = analysis["frames"][-1] if analysis["frames"] else None
+    if ltf and ltf.get("structure"):
+        allowed, reason, pref = structure_trade_permission(
+            analysis["overall_bias"], ltf["structure"]
+        )
+        lines.append(f"  Allowed : {'YES' if allowed else 'NO / WAIT'}")
+        lines.append(f"  Prefer  : {pref}")
+        lines.append(f"  Reason  : {reason}")
+    else:
+        lines.append("  Structure data unavailable on LTF")
+
     lines.append("")
     lines.append("══════════════════════════════════")
-    lines.append("Trendline family + 200 EMA drive bias.")
-    lines.append("POC / VWAP / Channel edges = preferred limit zones.")
+    lines.append("Model: IDM (internal) → extreme OB → confirmation → expansion")
+    lines.append("Zones marked MITIGATED or UNMITIGATED.")
+    lines.append("BOS/CHoCH/MSS + 200 EMA set permission.")
     lines.append("══════════════════════════════════")
 
     return "\n".join(lines)
