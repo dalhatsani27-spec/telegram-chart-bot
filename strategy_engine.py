@@ -129,11 +129,17 @@ def _score_silver_bullet(analysis: Dict) -> Dict[str, Any]:
     }
 
 
-def _score_trendline(symbol: str, timeframe: str = "15min") -> Dict[str, Any]:
-    """Lightweight trendline / structure score using market structure."""
+def _score_trendline(symbol: str, timeframe: str = "1h") -> Dict[str, Any]:
+    """Full trendline family score with projections + position container."""
     try:
-        from market_structure import analyse_structure
-        df = mt5_data.fetch_candles(symbol, timeframe, count=150)
+        from trendline_family import (
+            build_trendline_family,
+            build_position_container,
+            format_trendline_report,
+        )
+        df = mt5_data.fetch_candles(symbol, timeframe, count=200)
+        if df is None or df.empty or len(df) < 40:
+            df = mt5_data.fetch_candles(symbol, "15min", count=200)
         if df is None or df.empty or len(df) < 40:
             return {
                 "strategy": ts.STRATEGY_TRENDLINE,
@@ -143,25 +149,30 @@ def _score_trendline(symbol: str, timeframe: str = "15min") -> Dict[str, Any]:
                 "analysis": {},
                 "valid": False,
             }
-        st = analyse_structure(df, left=2, right=2, lookback=50)
-        bias = str(st.get("bias", "NEUTRAL")).upper()
-        direction = "NEUTRAL"
-        score = 40
-        reasons = [st.get("note") or "Structure scan"]
-        if bias in ("BULLISH", "BUY"):
-            direction = "BUY"
-            score += 25
-            reasons.append("Bullish structure / higher lows")
-        elif bias in ("BEARISH", "SELL"):
-            direction = "SELL"
-            score += 25
-            reasons.append("Bearish structure / lower highs")
+        family = build_trendline_family(df, max_lines=4)
+        if family.get("error"):
+            return {
+                "strategy": ts.STRATEGY_TRENDLINE,
+                "direction": "NEUTRAL",
+                "score": 0,
+                "reasons": [family["error"]],
+                "analysis": {},
+                "valid": False,
+            }
+        pos = build_position_container(family)
+        family["position"] = pos
+        direction = family.get("direction", "NEUTRAL")
+        score = int(family.get("strength", 0))
         return {
             "strategy": ts.STRATEGY_TRENDLINE,
             "direction": direction,
-            "score": min(100, score),
-            "reasons": reasons,
-            "analysis": {"structure": st, "df": df, "geometry_data": {"df": df}},
+            "score": score,
+            "reasons": family.get("reasons") or [],
+            "analysis": family,
+            "family": family,
+            "position": pos,
+            "ticket": pos,
+            "report": format_trendline_report(family, symbol),
             "valid": direction in ("BUY", "SELL") and score >= 55,
         }
     except Exception as e:
@@ -175,6 +186,47 @@ def _score_trendline(symbol: str, timeframe: str = "15min") -> Dict[str, Any]:
         }
 
 
+
+def _attach_projections(result: Dict[str, Any], symbol: str) -> Dict[str, Any]:
+    """Add measured-move projections + optional position for any strategy chart."""
+    try:
+        from trendline_family import build_trendline_family, build_position_container
+        analysis = result.get("analysis") or {}
+        df = None
+        if isinstance(analysis, dict):
+            df = analysis.get("df_1h") or analysis.get("df")
+            if df is None:
+                frames = analysis.get("frames") or []
+                if frames:
+                    df = frames[0].get("df")
+        if df is None or getattr(df, "empty", True):
+            return result
+        family = build_trendline_family(df, max_lines=3)
+        projs = family.get("projections") or []
+        # Only keep projections aligned with strategy direction
+        direction = result.get("direction", "NEUTRAL")
+        if direction in ("BUY", "SELL"):
+            projs = [p for p in projs if p.get("side") == direction] or projs
+        result["projections"] = projs
+        if isinstance(analysis, dict):
+            analysis["projections"] = projs
+            analysis["swings"] = family.get("pivots")
+            if not analysis.get("volume_profile"):
+                analysis["volume_profile"] = family.get("volume_profile")
+        # Position if valid setup
+        if result.get("valid") and direction in ("BUY", "SELL"):
+            family["direction"] = direction
+            pos = build_position_container(family)
+            result["position"] = pos
+            if isinstance(analysis, dict):
+                analysis["position"] = pos
+            if not result.get("ticket") and pos:
+                result["ticket"] = pos
+        result["analysis"] = analysis
+    except Exception:
+        pass
+    return result
+
 def run_single_strategy(symbol: str, strategy: Optional[str] = None) -> Dict[str, Any]:
     strategy = strategy or ts.state.get_selected_strategy()
     symbol = symbol.strip().upper()
@@ -183,28 +235,29 @@ def run_single_strategy(symbol: str, strategy: Optional[str] = None) -> Dict[str
         analysis = run_topdown_analysis(symbol)
         result = _score_smc(analysis)
         result["report"] = format_institutional_report(analysis)
-        return result
+        return _attach_projections(result, symbol)
 
     if strategy == ts.STRATEGY_AMD:
         analysis = run_amd_analysis(symbol)
         result = _score_amd(analysis)
         result["report"] = format_amd_report(analysis)
-        return result
+        return _attach_projections(result, symbol)
 
     if strategy == ts.STRATEGY_SILVER_BULLET:
         analysis = run_silver_bullet_analysis(symbol)
         result = _score_silver_bullet(analysis)
         result["report"] = format_silver_bullet_report(analysis)
         result["ticket"] = build_silver_bullet_ticket(analysis)
-        return result
+        return _attach_projections(result, symbol)
 
     if strategy == ts.STRATEGY_TRENDLINE:
         result = _score_trendline(symbol)
-        result["report"] = (
-            f"TRENDLINE {symbol}\n"
-            f"Direction: {result['direction']} | Score: {result['score']}\n"
-            + "\n".join(f"  • {r}" for r in result["reasons"])
-        )
+        if not result.get("report"):
+            result["report"] = (
+                f"TRENDLINE {symbol}\n"
+                f"Direction: {result['direction']} | Score: {result['score']}\n"
+                + "\n".join(f"  • {r}" for r in result.get("reasons") or [])
+            )
         return result
 
     return {
