@@ -209,6 +209,83 @@ def _prepare_ohlc(df: pd.DataFrame, max_bars: int = 120) -> Tuple[pd.DataFrame, 
     return chart_df, chart_len
 
 
+def _draw_swings(ax, swings, offset: int, chart_len: int):
+    """Label ZigZag swings as HH / HL / LH / LL for verification."""
+    if not swings:
+        return
+    vis = []
+    for s in swings:
+        idx = int(s.get("index", -1)) - offset
+        if 0 <= idx < chart_len:
+            vis.append({**s, "vidx": idx})
+    if len(vis) < 2:
+        return
+    # Classify sequential same-type pivots
+    last_high = None
+    last_low = None
+    for s in vis:
+        price = float(s["price"])
+        idx = s["vidx"]
+        if s.get("type") == "high":
+            label = "HH" if last_high is not None and price > last_high else ("LH" if last_high is not None else "H")
+            last_high = price
+            color = "#00e676" if label == "HH" else "#ffab40"
+            ax.scatter([idx], [price], color=color, s=28, zorder=8, edgecolors="#000", linewidths=0.4)
+            ax.annotate(label, (idx, price), textcoords="offset points", xytext=(0, 8),
+                        fontsize=6.5, color=color, ha="center", fontweight="bold", zorder=9)
+        else:
+            label = "LL" if last_low is not None and price < last_low else ("HL" if last_low is not None else "L")
+            last_low = price
+            color = "#ff5252" if label == "LL" else "#80cbc4"
+            ax.scatter([idx], [price], color=color, s=28, zorder=8, edgecolors="#000", linewidths=0.4)
+            ax.annotate(label, (idx, price), textcoords="offset points", xytext=(0, -10),
+                        fontsize=6.5, color=color, ha="center", fontweight="bold", zorder=9)
+    # Connect swings with thin zigzag
+    if len(vis) >= 2:
+        xs = [s["vidx"] for s in vis]
+        ys = [float(s["price"]) for s in vis]
+        ax.plot(xs, ys, color="#90a4ae", linewidth=0.8, alpha=0.55, zorder=3, linestyle="-")
+
+
+def _draw_projections(ax, projections, chart_len: int):
+    for p in (projections or [])[:4]:
+        price = p.get("price")
+        if price is None:
+            continue
+        ax.axhline(price, color="#7e57c2", linestyle="-.", linewidth=1.1, alpha=0.8)
+        ax.text(chart_len * 0.01, price, p.get("label", "P"), fontsize=6.5, color="#ce93d8", va="bottom")
+
+
+def _draw_volume_profile_levels(ax, vp, chart_len: int):
+    if not vp:
+        return
+    if vp.get("poc_price") is not None:
+        ax.axhline(vp["poc_price"], color=COLORS["poc"], linestyle=":", linewidth=1.35, alpha=0.9)
+        ax.text(chart_len * 0.86, vp["poc_price"], "POC", fontsize=7, color=COLORS["poc"], va="bottom")
+    if vp.get("value_area_low") is not None and vp.get("value_area_high") is not None:
+        ax.axhspan(vp["value_area_low"], vp["value_area_high"], facecolor="#ff9800", alpha=0.07, zorder=1)
+        ax.text(chart_len * 0.01, vp["value_area_high"], "VA-H", fontsize=6, color="#ffb74d", va="bottom")
+        ax.text(chart_len * 0.01, vp["value_area_low"], "VA-L", fontsize=6, color="#ffb74d", va="top")
+
+
+def _draw_position_container(ax, pos, chart_len: int):
+    if not pos:
+        return
+    if pos.get("entry") is not None:
+        ax.axhline(pos["entry"], color=COLORS["entry"], linestyle="--", linewidth=1.45)
+        ax.text(chart_len * 0.70, pos["entry"], f"ENTRY {pos.get('side', pos.get('direction', ''))}",
+                fontsize=7, color=COLORS["entry"], fontweight="bold", va="bottom")
+    if pos.get("sl") is not None:
+        ax.axhline(pos["sl"], color=COLORS["sl"], linestyle="-", linewidth=1.35)
+        ax.text(chart_len * 0.70, pos["sl"], "SL", fontsize=7, color=COLORS["sl"], fontweight="bold", va="top")
+    if pos.get("tp1") is not None:
+        ax.axhline(pos["tp1"], color=COLORS["tp"], linestyle=":", linewidth=1.2)
+        ax.text(chart_len * 0.70, pos["tp1"], "TP1", fontsize=7, color=COLORS["tp"], va="bottom")
+    if pos.get("tp2") is not None:
+        ax.axhline(pos["tp2"], color=COLORS["tp"], linestyle=":", linewidth=1.2)
+        ax.text(chart_len * 0.70, pos["tp2"], "TP2", fontsize=7, color=COLORS["tp"], va="bottom")
+
+
 def generate_smc_map(
     df: pd.DataFrame,
     symbol: str,
@@ -224,7 +301,7 @@ def generate_smc_map(
       - Session separators
     """
     zones = zones or {}
-    chart_df, chart_len = _prepare_ohlc(df, max_bars=110)
+    chart_df, chart_len = _prepare_ohlc(df, max_bars=160)
     offset = len(df) - chart_len
 
     mc = mpf.make_marketcolors(up=COLORS["bull"], down=COLORS["bear"], edge="inherit", wick="inherit")
@@ -322,35 +399,59 @@ def generate_smc_map(
         ax.text(chart_len * 0.02, structure["structure_low"], "RANGE LOW / SSL", fontsize=7,
                 color=COLORS["liquidity"], va="top", fontweight="bold")
 
-    # BOS / CHoCH markers
+    # BOS / CHoCH — dotted horizontal line at the broken swing level + label
     for ev in bos_events[:8]:
         idx = int(ev.get("index", 0)) - offset
-        if 0 <= idx < chart_len:
-            price = ev.get("price")
-            kind = str(ev.get("type", "BOS")).upper()
-            color = "#00e676" if "BULL" in kind or kind == "BOS" else "#ff5252"
-            ax.annotate(
-                kind,
-                xy=(idx, price),
-                xytext=(0, 12 if "BULL" in kind or kind == "BOS" else -14),
-                textcoords="offset points",
-                fontsize=7,
-                color=color,
-                fontweight="bold",
-                ha="center",
-                arrowprops=dict(arrowstyle="->", color=color, lw=1.0),
-                zorder=10,
-            )
+        price = ev.get("price")
+        if price is None:
+            continue
+        kind = str(ev.get("type", "BOS")).upper()
+        bias = str(ev.get("bias", "")).upper()
+        color = "#00e676" if bias == "BULLISH" else "#ff5252"
+        x0 = max(0, idx - 2) if idx > 0 else 0
+        ax.plot(
+            [x0, chart_len - 1],
+            [price, price],
+            color=color,
+            linestyle=":",
+            linewidth=1.45,
+            alpha=0.9,
+            zorder=6,
+        )
+        label_x = min(max(idx, 0), chart_len - 1)
+        ax.annotate(
+            kind,
+            xy=(label_x, price),
+            xytext=(4, 10 if bias == "BULLISH" else -12),
+            textcoords="offset points",
+            fontsize=7,
+            color=color,
+            fontweight="bold",
+            ha="left",
+            zorder=10,
+        )
 
-    # POC
-    if vp and vp.get("poc_price"):
-        ax.axhline(vp["poc_price"], color=COLORS["poc"], linestyle=":", linewidth=1.2, alpha=0.85)
-        ax.text(chart_len * 0.88, vp["poc_price"], "POC", fontsize=7, color=COLORS["poc"], va="bottom")
+    # Swings (HH/HL/LH/LL) for verification
+    swings = zones.get("swings") or (structure.get("swings") if structure else None)
+    if not swings:
+        try:
+            from market_structure import zigzag_swings
+            swings = zigzag_swings(df, depth=4, deviation_atr=0.28)
+        except Exception:
+            swings = []
+    _draw_swings(ax, swings, offset, chart_len)
+
+    # Volume profile POC + VA
+    _draw_volume_profile_levels(ax, vp, chart_len)
+
+    # Projections + position container (shared across strategies)
+    _draw_projections(ax, zones.get("projections"), chart_len)
+    _draw_position_container(ax, zones.get("position"), chart_len)
 
     if show_sessions:
         _draw_session_separators(ax, chart_df, chart_len)
 
-    legend = "FVG  |  OB / BRK  |  IDM  |  BSL/SSL  |  Sessions (vertical)"
+    legend = "Swings HH/HL  |  OB→FVG  |  BOS dotted  |  POC/VA  |  Proj  |  Sessions"
     ax.set_title(
         f"{symbol}  SMC MAP  |  {title_suffix}  |  Bias: {bias_label or '—'}\n{legend}",
         color=COLORS["text"],
@@ -385,7 +486,7 @@ def generate_amd_map(
     + FVG / OB zones
     + Clear phase labels
     """
-    chart_df, chart_len = _prepare_ohlc(df, max_bars=120)
+    chart_df, chart_len = _prepare_ohlc(df, max_bars=160)
     offset = len(df) - chart_len
 
     mc = mpf.make_marketcolors(up=COLORS["bull"], down=COLORS["bear"], edge="inherit", wick="inherit")
@@ -401,6 +502,16 @@ def generate_amd_map(
 
     price_min = float(chart_df["Low"].min())
     price_max = float(chart_df["High"].max())
+    for p in (analysis.get("projections") or []):
+        if p.get("price") is not None:
+            price_min = min(price_min, float(p["price"]))
+            price_max = max(price_max, float(p["price"]))
+    pos = analysis.get("position")
+    if pos:
+        for k in ("entry", "sl", "tp1", "tp2"):
+            if pos.get(k) is not None:
+                price_min = min(price_min, float(pos[k]))
+                price_max = max(price_max, float(pos[k]))
     padding = (price_max - price_min) * 0.12 or 0.0005
 
     fig, axlist = mpf.plot(
@@ -492,6 +603,35 @@ def generate_amd_map(
         _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.25 if not mitigated else 0.10,
                    "OB" if not mitigated else "BRK")
 
+    # Swings for verification
+    swings = analysis.get("swings")
+    if not swings:
+        try:
+            from market_structure import zigzag_swings
+            swings = zigzag_swings(df, depth=4, deviation_atr=0.28)
+        except Exception:
+            swings = []
+    _draw_swings(ax, swings, offset, chart_len)
+
+    # BOS events on AMD chart too
+    for ev in (analysis.get("bos_events") or [])[:6]:
+        idx = int(ev.get("index", 0)) - offset
+        price = ev.get("price")
+        if price is None:
+            continue
+        kind = str(ev.get("type", "BOS")).upper()
+        b = str(ev.get("bias", "")).upper()
+        color = "#00e676" if b == "BULLISH" else "#ff5252"
+        x0 = max(0, idx - 2) if idx > 0 else 0
+        ax.plot([x0, chart_len - 1], [price, price], color=color, linestyle=":", linewidth=1.3, alpha=0.85, zorder=6)
+        ax.annotate(kind, xy=(min(max(idx, 0), chart_len - 1), price),
+                    xytext=(4, 9 if b == "BULLISH" else -11), textcoords="offset points",
+                    fontsize=6.5, color=color, fontweight="bold", zorder=10)
+
+    _draw_volume_profile_levels(ax, analysis.get("volume_profile"), chart_len)
+    _draw_projections(ax, analysis.get("projections"), chart_len)
+    _draw_position_container(ax, analysis.get("position"), chart_len)
+
     # Phase label box
     phase_note = analysis.get("phase_note") or mapped_phase
     bias = analysis.get("amd_bias", "NEUTRAL")
@@ -511,8 +651,7 @@ def generate_amd_map(
 
     # Legend
     legend_txt = (
-        "ACCUM (grey) → MANIP (red) → DISPLACE (blue) → REVERT (purple) → CONT (green)   |   "
-        "Vertical lines = Sessions"
+        "Phases · Swings HH/HL · BOS dotted · POC/VA · Proj · Sessions"
     )
     ax.set_title(
         f"{symbol}  AMD CYCLE MAP  |  {title_suffix}\n{legend_txt}",
@@ -536,13 +675,18 @@ def generate_trendline_map(
     title_suffix: str = "",
 ) -> io.BytesIO:
     """
-    Trendline strategy visual map:
-      - Valid trendline(s)
-      - HH / HL / LH / LL labels
-      - BOS markers
-      - Entry / SL / TP boxes when available
+    Full trendline family map:
+      - Multiple uptrend / downtrend lines
+      - Parallel channel
+      - Measured-move projections (P1/P2/P3)
+      - Volume Profile POC + Value Area
+      - Long/Short position container (Entry/SL/TP)
     """
-    chart_df, chart_len = _prepare_ohlc(df, max_bars=100)
+    # Prefer family payload if present
+    family = setup.get("family") or setup.get("analysis") or setup
+    if family.get("df") is not None:
+        df = family["df"]
+    chart_df, chart_len = _prepare_ohlc(df, max_bars=160)
     offset = len(df) - chart_len
 
     mc = mpf.make_marketcolors(up=COLORS["bull"], down=COLORS["bear"], edge="inherit", wick="inherit")
@@ -555,22 +699,34 @@ def generate_trendline_map(
         figcolor=COLORS["bg"],
     )
 
-    g = setup.get("geometry_data") or {}
     addplots = []
-    if g.get("mode") == "channel":
-        n = len(chart_df)
-        for key, color, ls, w in [
-            ("upper_line", COLORS["trendline"], "-", 1.8),
-            ("middle_line", "#ff9800", "--", 1.2),
-            ("lower_line", COLORS["trendline"], "-", 1.8),
-        ]:
-            if key in g and g[key] is not None:
-                series = pd.Series(g[key][-n:], index=chart_df.index)
-                addplots.append(mpf.make_addplot(series, color=color, width=w, linestyle=ls))
+    for key, color, ls, w in [
+        ("upper_line", COLORS["trendline"], "-", 1.7),
+        ("middle_line", "#ff9800", "--", 1.15),
+        ("lower_line", COLORS["trendline"], "-", 1.7),
+    ]:
+        arr = family.get(key)
+        if arr is not None and len(arr) >= chart_len:
+            series = pd.Series(arr[-chart_len:], index=chart_df.index)
+            addplots.append(mpf.make_addplot(series, color=color, width=w, linestyle=ls))
 
+    # Expand ylim for projections / position
     price_min = float(chart_df["Low"].min())
     price_max = float(chart_df["High"].max())
-    padding = (price_max - price_min) * 0.12 or 0.0005
+    for p in (family.get("projections") or []):
+        price_min = min(price_min, float(p["price"]))
+        price_max = max(price_max, float(p["price"]))
+    for key in ("entry", "sl", "tp1", "tp2"):
+        if setup.get(key) is not None:
+            price_min = min(price_min, float(setup[key]))
+            price_max = max(price_max, float(setup[key]))
+    pos = setup.get("position") or family.get("position")
+    if pos:
+        for key in ("entry", "sl", "tp1", "tp2"):
+            if pos.get(key) is not None:
+                price_min = min(price_min, float(pos[key]))
+                price_max = max(price_max, float(pos[key]))
+    padding = (price_max - price_min) * 0.10 or 0.0005
 
     fig, axlist = mpf.plot(
         chart_df,
@@ -579,49 +735,81 @@ def generate_trendline_map(
         volume=False,
         addplot=addplots if addplots else None,
         returnfig=True,
-        figsize=(13, 7.2),
+        figsize=(13.2, 7.4),
         ylim=(price_min - padding, price_max + padding),
     )
     ax = axlist[0]
 
-    # Pattern trigger line
-    if g.get("mode") == "pattern":
-        trigger_line = g.get("trigger_line") or []
-        if len(trigger_line) >= 2:
-            xs = [pt[0] - offset for pt in trigger_line]
-            ys = [pt[1] for pt in trigger_line]
-            if xs[-1] != xs[0]:
-                slope = (ys[-1] - ys[0]) / (xs[-1] - xs[0])
-                xs.append(chart_len - 1)
-                ys.append(ys[-1] + slope * (chart_len - 1 - xs[-2]))
-            xs = [max(0, min(chart_len - 1, x)) for x in xs]
-            ax.plot(xs, ys, color="#ffeb3b", linewidth=2.0, linestyle="--", zorder=5)
+    # Draw individual family lines (extra up/down beyond channel)
+    def _draw_tl(tl, color, lw=1.2, alpha=0.75):
+        x0 = int(tl["x0"]) - offset
+        x1 = chart_len - 1
+        y0 = _line_at(tl, max(0, int(tl["x0"])))
+        # use stored endpoints
+        xs = [max(0, int(tl["x0"]) - offset), chart_len - 1]
+        ys = [
+            _line_at(tl, max(int(tl["x0"]), 0)),
+            float(tl.get("y_end", tl["y1"])),
+        ]
+        if xs[0] < chart_len:
+            ax.plot(xs, ys, color=color, linewidth=lw, alpha=alpha, zorder=4)
 
-        for px, py, label in (g.get("key_points") or []):
-            cx = px - offset
-            if 0 <= cx <= chart_len - 1:
-                ax.scatter([cx], [py], color="#ffffff", edgecolor="#000000", s=50, zorder=6)
-                ax.annotate(label, (cx, py), textcoords="offset points", xytext=(0, 11),
-                            fontsize=7, color="#ffffff", ha="center", zorder=6)
+    def _line_at(tl, x):
+        x0, y0, x1, y1 = tl["x0"], tl["y0"], tl["x1"], tl["y1"]
+        if x1 == x0:
+            return y0
+        return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
 
-    # Entry / SL / TP
-    if setup.get("entry") is not None:
-        ax.axhline(setup["entry"], color=COLORS["entry"], linestyle="--", linewidth=1.4, alpha=0.95)
-        ax.text(chart_len * 0.75, setup["entry"], "ENTRY", fontsize=7, color=COLORS["entry"], va="bottom")
-    if setup.get("sl") is not None:
-        ax.axhline(setup["sl"], color=COLORS["sl"], linestyle="-", linewidth=1.3, alpha=0.9)
-        ax.text(chart_len * 0.75, setup["sl"], "SL", fontsize=7, color=COLORS["sl"], va="top")
-    for i, key in enumerate(("tp1", "tp2"), 1):
-        if setup.get(key) is not None:
-            ax.axhline(setup[key], color=COLORS["tp"], linestyle=":", linewidth=1.2, alpha=0.85)
-            ax.text(chart_len * 0.75, setup[key], f"TP{i}", fontsize=7, color=COLORS["tp"], va="bottom")
+    for tl in (family.get("uptrends") or [])[:3]:
+        _draw_tl(tl, "#26a69a", 1.3)
+    for tl in (family.get("downtrends") or [])[:3]:
+        _draw_tl(tl, "#ef5350", 1.3)
+
+    # Projections
+    for p in (family.get("projections") or []):
+        ax.axhline(p["price"], color="#7e57c2", linestyle="-.", linewidth=1.15, alpha=0.85)
+        ax.text(chart_len * 0.02, p["price"], p["label"], fontsize=7, color="#ce93d8", va="bottom")
+
+    # Volume Profile POC + VA
+    vp = family.get("volume_profile") or setup.get("volume_profile")
+    if vp:
+        if vp.get("poc_price"):
+            ax.axhline(vp["poc_price"], color=COLORS["poc"], linestyle=":", linewidth=1.4, alpha=0.9)
+            ax.text(chart_len * 0.85, vp["poc_price"], "POC", fontsize=7, color=COLORS["poc"], va="bottom")
+        if vp.get("value_area_low") is not None and vp.get("value_area_high") is not None:
+            ax.axhspan(vp["value_area_low"], vp["value_area_high"], facecolor="#ff9800", alpha=0.08, zorder=1)
+            ax.text(chart_len * 0.02, vp["value_area_high"], "VA High", fontsize=6, color="#ffb74d", va="bottom")
+            ax.text(chart_len * 0.02, vp["value_area_low"], "VA Low", fontsize=6, color="#ffb74d", va="top")
+
+    # Position container
+    pos = setup.get("position") or family.get("position")
+    if not pos and setup.get("entry") is not None:
+        pos = {
+            "entry": setup.get("entry"), "sl": setup.get("sl"),
+            "tp1": setup.get("tp1"), "tp2": setup.get("tp2"),
+            "side": setup.get("direction", ""),
+        }
+    if pos:
+        if pos.get("entry") is not None:
+            ax.axhline(pos["entry"], color=COLORS["entry"], linestyle="--", linewidth=1.5)
+            ax.text(chart_len * 0.72, pos["entry"], f"ENTRY ({pos.get('side', '')})", fontsize=7,
+                    color=COLORS["entry"], fontweight="bold", va="bottom")
+        if pos.get("sl") is not None:
+            ax.axhline(pos["sl"], color=COLORS["sl"], linestyle="-", linewidth=1.4)
+            ax.text(chart_len * 0.72, pos["sl"], "SL", fontsize=7, color=COLORS["sl"], fontweight="bold", va="top")
+        if pos.get("tp1") is not None:
+            ax.axhline(pos["tp1"], color=COLORS["tp"], linestyle=":", linewidth=1.25)
+            ax.text(chart_len * 0.72, pos["tp1"], "TP1", fontsize=7, color=COLORS["tp"], va="bottom")
+        if pos.get("tp2") is not None:
+            ax.axhline(pos["tp2"], color=COLORS["tp"], linestyle=":", linewidth=1.25)
+            ax.text(chart_len * 0.72, pos["tp2"], "TP2", fontsize=7, color=COLORS["tp"], va="bottom")
 
     _draw_session_separators(ax, chart_df, chart_len)
 
-    status = setup.get("trendline_status") or setup.get("direction", "")
-    conf = setup.get("confidence", 0)
+    direction = family.get("direction") or setup.get("direction", "")
+    strength = family.get("strength") or setup.get("confidence") or setup.get("score") or 0
     ax.set_title(
-        f"{symbol}  TRENDLINE MAP  |  {title_suffix}  |  {status}  |  Conf: {conf:.0f}%",
+        f"{symbol}  TRENDLINE FAMILY  |  {title_suffix}  |  {direction}  |  Str {strength:.0f}",
         color=COLORS["text"],
         fontsize=9.5,
         fontweight="bold",
