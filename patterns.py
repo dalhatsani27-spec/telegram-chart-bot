@@ -291,6 +291,26 @@ def _fit_trend(points):
     return float(slope), float(intercept)
 
 
+def _touch_quality_score(points, slope, intercept, avg_price):
+    """
+    How tightly the given points actually hug their fitted line, as a
+    confidence bonus (0-8). A triangle/wedge can have the "right" slope
+    pattern by the numbers while price barely respects either boundary --
+    this distinguishes a real, well-defended structure from a coincidental
+    one. Tighter fit (lower deviation relative to price scale) -> higher bonus.
+    """
+    if len(points) < 2 or avg_price <= 0:
+        return 0.0
+    xs = np.array([p[0] for p in points], dtype=float)
+    ys = np.array([p[1] for p in points], dtype=float)
+    fitted = slope * xs + intercept
+    deviations = np.abs(ys - fitted)
+    rms = float(np.sqrt(np.mean(deviations ** 2)))
+    normalized_rms = rms / avg_price
+    bonus = 8.0 - normalized_rms * 3000.0
+    return float(np.clip(bonus, 0.0, 8.0))
+
+
 def detect_triangle_or_wedge(df, ph, pl, lookback=60):
     """
     Uses the last several pivot highs (upper boundary) and pivot lows (lower
@@ -315,6 +335,8 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
     lo_slope, lo_intercept = _fit_trend(lower_pts)
 
     avg_price = float(df['Close'].tail(lookback).mean()) or 1.0
+    touch_quality_bonus = (_touch_quality_score(upper_pts, up_slope, up_intercept, avg_price) +
+                           _touch_quality_score(lower_pts, lo_slope, lo_intercept, avg_price)) / 2.0
     up_norm = (up_slope * lookback) / avg_price
     lo_norm = (lo_slope * lookback) / avg_price
     FLAT = 0.003   # ~0.3% drift over the window counts as "flat"
@@ -336,7 +358,7 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
             trigger_price=float(upper_now),
             trigger_line=line,
             key_points=[(p, y, "Resistance") for p, y in upper_pts] + [(p, y, "Higher Low") for p, y in lower_pts],
-            confidence=65,
+            confidence=65 + touch_quality_bonus,
             note=f"Flat resistance near {upper_now:.5f} with rising higher-lows underneath — "
                  f"buyers stepping in earlier each time. Breakout above the flat top favors continuation up."
         )
@@ -347,7 +369,7 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
             trigger_price=float(lower_now),
             trigger_line=lower_line,
             key_points=[(p, y, "Support") for p, y in lower_pts] + [(p, y, "Lower High") for p, y in upper_pts],
-            confidence=65,
+            confidence=65 + touch_quality_bonus,
             note=f"Flat support near {lower_now:.5f} with falling lower-highs above — "
                  f"sellers stepping in earlier each time. Breakdown below flat support favors continuation down."
         )
@@ -358,7 +380,7 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
             trigger_price=float(lower_now),
             trigger_line=lower_line,
             key_points=[(p, y, "Upper") for p, y in upper_pts] + [(p, y, "Lower") for p, y in lower_pts],
-            confidence=63,
+            confidence=63 + touch_quality_bonus,
             note="Both boundaries rising but converging (upper line losing steam faster) — "
                  "classic exhaustion structure. Break of the rising lower trendline signals reversal down."
         )
@@ -369,7 +391,7 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
             trigger_price=float(upper_now),
             trigger_line=line,
             key_points=[(p, y, "Upper") for p, y in upper_pts] + [(p, y, "Lower") for p, y in lower_pts],
-            confidence=63,
+            confidence=63 + touch_quality_bonus,
             note="Both boundaries falling but converging (lower line losing steam faster) — "
                  "selling pressure fading. Break of the falling upper trendline signals reversal up."
         )
@@ -381,7 +403,7 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
             trigger_price=float(upper_now if bias == "BUY" else lower_now),
             trigger_line=line if bias == "BUY" else lower_line,
             key_points=[(p, y, "Upper") for p, y in upper_pts] + [(p, y, "Lower") for p, y in lower_pts],
-            confidence=55,
+            confidence=55 + touch_quality_bonus,
             note="Converging trendlines with contracting range (coiling price action). "
                  "Direction is set by whichever side breaks first — currently leaning "
                  + ("up." if bias == "BUY" else "down.")
@@ -513,11 +535,18 @@ _PRIORITY = {
 }
 
 
-def scan_all_patterns(df, left=3, right=3):
+def scan_all_patterns(df, left=3, right=3, volume_profile=None):
     """
     Runs every detector against the given OHLC dataframe (must have a
     'Close'-indexed reset-friendly integer position order — pass df as-is,
     positions are derived internally).
+
+    volume_profile: optional dict from volume_profile.compute_volume_profile().
+    When provided, each detected pattern's confidence is adjusted based on
+    whether its trigger/neckline sits at a volume-significant level (Point
+    of Control / Value Area) or in a thin, low-activity gap. This is a
+    post-detection adjustment layered on top -- it never changes whether a
+    pattern is detected, only how much weight its trigger level deserves.
 
     Returns: (best_pattern_or_None, all_detected_list)
     """
@@ -554,6 +583,28 @@ def scan_all_patterns(df, left=3, right=3):
 
     if not detected:
         return None, []
+
+    if volume_profile is not None:
+        from volume_profile import level_volume_bonus
+        for p in detected:
+            bonus = level_volume_bonus(volume_profile, p.trigger_price)
+            p.confidence = float(np.clip(p.confidence + bonus, 0.0, 100.0))
+            if bonus > 0:
+                p.note += " Trigger level sits at a high-volume node (POC/Value Area) -- reinforced."
+            elif bonus < 0:
+                p.note += " Trigger level sits in a thin, low-activity price gap -- treat with extra caution."
+
+    # S/R zone clustering -- self-contained, reuses the pivots already
+    # computed above. A trigger sitting on a level touched many times gets
+    # weighted higher than one sitting on a level nobody's actually tested.
+    from sr_zones import cluster_sr_zones, zone_strength_bonus
+    touch_prices = [df['High'].iloc[i] for i in ph] + [df['Low'].iloc[i] for i in pl]
+    zones = cluster_sr_zones(touch_prices)
+    for p in detected:
+        bonus = zone_strength_bonus(zones, p.trigger_price)
+        if bonus > 0:
+            p.confidence = float(np.clip(p.confidence + bonus, 0.0, 100.0))
+            p.note += f" Trigger aligns with a well-defended S/R zone -- reinforced."
 
     detected.sort(key=lambda p: (_PRIORITY.get(p.name, 40) + p.confidence), reverse=True)
     return detected[0], detected
