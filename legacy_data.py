@@ -90,6 +90,18 @@ def clean_and_normalize_data(df):
     df.dropna(inplace=True)
     df['EMA20'] = df['Close'].ewm(span=min(20, len(df)), adjust=False).mean()
     df['EMA50'] = df['Close'].ewm(span=min(50, len(df)), adjust=False).mean()
+    df['EMA200'] = df['Close'].ewm(span=min(200, len(df)), adjust=False).mean()
+
+    # Approximate VWAP using typical price * volume (tick_volume when available).
+    # Resets conceptually over the full loaded window — useful as dynamic S/R.
+    typical = (df['High'] + df['Low'] + df['Close']) / 3.0
+    if 'Volume' in df.columns and df['Volume'].sum() > 0:
+        vol = df['Volume'].replace(0, np.nan).fillna(1.0)
+    else:
+        vol = pd.Series(1.0, index=df.index)
+    cum_tp_vol = (typical * vol).cumsum()
+    cum_vol = vol.cumsum()
+    df['VWAP'] = cum_tp_vol / cum_vol.replace(0, np.nan)
     return df
 
 
