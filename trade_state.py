@@ -1,17 +1,18 @@
 """
 trade_state.py
 ================
-Owns the system-wide trading Mode (set from Telegram) and the small command
-queue the EA polls. Kept intentionally simple/in-memory: this whole system
-runs as a single local process on one PC, so there's no need for a database.
+Owns the system-wide trading Mode (set from Telegram), strategy selection,
+and the small command queue the EA polls.
 
 Modes:
-  OFF          - nothing happens, ever, regardless of what the engine finds.
-  AUTO         - EA fires immediately on a confirmed signal.
-  APPROVAL     - Telegram sends an Approve/Reject prompt; EA only fires after
-                 you tap Approve.
-  COPY_TRADE   - EA never fires. Telegram sends you a manual trade ticket
-                 (entry, order type, SL, TP1, TP2) to place yourself.
+  OFF          - nothing happens
+  AUTO         - EA fires immediately on confirmed signal
+  APPROVAL     - Telegram Approve/Reject first
+  COPY_TRADE   - Mobile Manual: only send trade tickets (no EA execution)
+
+Strategy Modes:
+  SINGLE       - run only the selected strategy
+  HYBRID       - scan all enabled strategies, pick best confluence, explain why
 """
 
 import time
@@ -23,19 +24,46 @@ MODE_APPROVAL = "APPROVAL"
 MODE_COPY_TRADE = "COPY_TRADE"
 VALID_MODES = {MODE_OFF, MODE_AUTO, MODE_APPROVAL, MODE_COPY_TRADE}
 
-APPROVAL_EXPIRY_SECONDS = 180  # how long an Approve/Reject prompt stays valid
+STRATEGY_TRENDLINE = "TRENDLINE"
+STRATEGY_SMC = "SMC"
+STRATEGY_AMD = "AMD"
+STRATEGY_SILVER_BULLET = "SILVER_BULLET"
+VALID_STRATEGIES = {
+    STRATEGY_TRENDLINE,
+    STRATEGY_SMC,
+    STRATEGY_AMD,
+    STRATEGY_SILVER_BULLET,
+}
+
+STRATEGY_MODE_SINGLE = "SINGLE"
+STRATEGY_MODE_HYBRID = "HYBRID"
+
+APPROVAL_EXPIRY_SECONDS = 180
 
 
 class TradeStateManager:
     def __init__(self):
         self.mode = MODE_OFF
-        self.lot_mode = "MIN"  # "MIN" or "RISK" -- mirrored from the EA's on-chart toggle / Telegram
-        self.watched_symbol = None  # the single asset the away-mode background scanner focuses on
-        self._commands = {}     # symbol -> command dict, consumed by EA on next poll
-        self._pending_approvals = {}  # approval_id -> dict
-        self._ea_last_seen = {}  # symbol -> timestamp of last successful EA poll
+        self.lot_mode = "MIN"
+        self.watched_symbol = None
 
-    # ---------------- watched symbol (away-mode background scanner) ----------------
+        # Strategy selection
+        self.strategy_mode = STRATEGY_MODE_SINGLE
+        self.selected_strategy = STRATEGY_SMC
+        self.enabled_strategies = {
+            STRATEGY_TRENDLINE: True,
+            STRATEGY_SMC: True,
+            STRATEGY_AMD: True,
+            STRATEGY_SILVER_BULLET: True,
+        }
+        self.min_confluence_score = 65
+        self.prefer_silver_bullet = True
+
+        self._commands = {}
+        self._pending_approvals = {}
+        self._ea_last_seen = {}
+
+    # ---------------- watched symbol ----------------
     def set_watched_symbol(self, symbol):
         self.watched_symbol = symbol.strip().upper() if symbol else None
 
@@ -50,18 +78,12 @@ class TradeStateManager:
         self._ea_last_seen[symbol] = time.time()
 
     def is_ea_available(self, symbol, timeout_seconds=180):
-        """
-        True if this symbol's EA has checked in recently enough to be
-        considered "connected right now". Used to auto-fall-back a
-        confirmed signal to a manual Copy Trade ticket when nobody's
-        actually there to execute it, regardless of what Mode was last set.
-        """
         last = self._ea_last_seen.get(symbol)
         if last is None:
             return False
         return (time.time() - last) <= timeout_seconds
 
-    # ---------------- mode ----------------
+    # ---------------- trading mode ----------------
     def set_mode(self, mode):
         if mode not in VALID_MODES:
             raise ValueError(f"invalid mode: {mode}")
@@ -75,15 +97,47 @@ class TradeStateManager:
             raise ValueError("lot_mode must be MIN or RISK")
         self.lot_mode = lot_mode
 
+    # ---------------- strategy selection ----------------
+    def set_strategy_mode(self, mode):
+        if mode not in (STRATEGY_MODE_SINGLE, STRATEGY_MODE_HYBRID):
+            raise ValueError("strategy_mode must be SINGLE or HYBRID")
+        self.strategy_mode = mode
+
+    def get_strategy_mode(self):
+        return self.strategy_mode
+
+    def set_selected_strategy(self, strategy):
+        if strategy not in VALID_STRATEGIES:
+            raise ValueError(f"invalid strategy: {strategy}")
+        self.selected_strategy = strategy
+
+    def get_selected_strategy(self):
+        return self.selected_strategy
+
+    def set_strategy_enabled(self, strategy, enabled: bool):
+        if strategy not in VALID_STRATEGIES:
+            raise ValueError(f"invalid strategy: {strategy}")
+        self.enabled_strategies[strategy] = bool(enabled)
+
+    def is_strategy_enabled(self, strategy):
+        return bool(self.enabled_strategies.get(strategy, False))
+
+    def get_enabled_strategies(self):
+        return [s for s, on in self.enabled_strategies.items() if on]
+
+    def strategy_label(self):
+        if self.strategy_mode == STRATEGY_MODE_SINGLE:
+            return f"Single → {self.selected_strategy}"
+        enabled = self.get_enabled_strategies()
+        return f"Hybrid ({len(enabled)} active)"
+
     # ---------------- EA command queue ----------------
     def queue_command(self, symbol, command):
-        """command: dict, e.g. {"type":"FIRE_MARKET"/"FIRE_LIMIT", "bias":..., "price":..., "sl":..., "tp1":..., "tp2":..., "expiry_bars":...}"""
         command = dict(command)
         command["queued_at"] = time.time()
         self._commands[symbol] = command
 
     def pop_command(self, symbol):
-        """EA calls this each poll. Returns the command (and clears it) or None."""
         return self._commands.pop(symbol, None)
 
     def peek_command(self, symbol):
@@ -93,8 +147,11 @@ class TradeStateManager:
     def create_approval_request(self, symbol, setup_summary, on_approve_command):
         approval_id = uuid.uuid4().hex[:10]
         self._pending_approvals[approval_id] = {
-            "symbol": symbol, "summary": setup_summary, "command": on_approve_command,
-            "created_at": time.time(), "status": "PENDING",
+            "symbol": symbol,
+            "summary": setup_summary,
+            "command": on_approve_command,
+            "created_at": time.time(),
+            "status": "PENDING",
         }
         return approval_id
 
@@ -112,7 +169,6 @@ class TradeStateManager:
         return req, req["status"].lower()
 
     def expire_stale_approvals(self):
-        """Call periodically (e.g. from the background loop) to auto-expire old prompts."""
         now = time.time()
         expired = []
         for aid, req in list(self._pending_approvals.items()):
@@ -122,5 +178,5 @@ class TradeStateManager:
         return expired
 
 
-# Single process-wide instance -- imported by bot.py and the Flask routes.
+# Single process-wide instance
 state = TradeStateManager()
