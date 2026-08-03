@@ -113,57 +113,87 @@ class Pattern:
 #    Each takes (df, pivot_highs, pivot_lows) and returns a Pattern or None.
 # ----------------------------------------------------------------------------
 
-def detect_double_top(df, ph, pl):
+def detect_double_top(df, ph, pl, min_bars=8, min_depth_atr=1.0, max_peak_diff=0.006):
+    """
+    Stricter Double Top for lower noise (especially on 30m).
+    - Peaks within max_peak_diff (~0.6%)
+    - At least min_bars between the two tops
+    - Trough depth >= min_depth_atr * ATR
+    """
     if len(ph) < 2:
         return None
     i2, i1 = ph[-1], ph[-2]
-    h1, h2 = df['High'].iloc[i1], df['High'].iloc[i2]
-    if abs(_pct(h2, h1)) > 0.006:  # tops must be near-equal (~0.6%)
+    if (i2 - i1) < min_bars:
+        return None
+    h1, h2 = float(df['High'].iloc[i1]), float(df['High'].iloc[i2])
+    if abs(_pct(h2, h1)) > max_peak_diff:
         return None
     between_lows = [p for p in pl if i1 < p < i2]
     if not between_lows:
         return None
     trough_i = min(between_lows, key=lambda p: df['Low'].iloc[p])
     neckline = float(df['Low'].iloc[trough_i])
+    atr = _atr(df) or 1e-9
+    depth = max(h1, h2) - neckline
+    if depth < min_depth_atr * atr:
+        return None
     current = float(df['Close'].iloc[-1])
     if current > max(h1, h2):
-        return None  # already broken upward, not a valid top setup
-    conf = 60 + min(15, (1 - abs(_pct(h2, h1)) * 100) * 10)
+        return None
+    equality_bonus = min(12, (1 - abs(_pct(h2, h1)) * 100) * 8)
+    depth_bonus = min(10, (depth / atr - min_depth_atr) * 4)
+    conf = 58 + equality_bonus + depth_bonus
     return Pattern(
         "Double Top", "reversal", "SELL",
         trigger_price=neckline,
         trigger_line=[(i1, neckline), (i2, neckline)],
         key_points=[(i1, h1, "Top 1"), (i2, h2, "Top 2"), (trough_i, neckline, "Neckline")],
-        confidence=conf,
-        note=f"Two near-equal highs ({h1:.5f} / {h2:.5f}) with neckline at {neckline:.5f}. "
-             f"A daily/session close below the neckline confirms the breakdown."
+        confidence=float(np.clip(conf, 55, 88)),
+        note=(f"Two near-equal highs ({h1:.5f} / {h2:.5f}) separated by {i2 - i1} bars. "
+              f"Neckline {neckline:.5f} (depth {depth / atr:.1f}×ATR). "
+              f"Close below neckline confirms breakdown.")
     )
 
 
-def detect_double_bottom(df, ph, pl):
+def detect_double_bottom(df, ph, pl, min_bars=8, min_depth_atr=1.0, max_peak_diff=0.006):
+    """
+    Stricter Double Bottom for lower noise (especially on 30m).
+    - Bottoms within max_peak_diff (~0.6%)
+    - At least min_bars between the two bottoms
+    - Peak height >= min_depth_atr * ATR
+    """
     if len(pl) < 2:
         return None
     i2, i1 = pl[-1], pl[-2]
-    l1, l2 = df['Low'].iloc[i1], df['Low'].iloc[i2]
-    if abs(_pct(l2, l1)) > 0.006:
+    if (i2 - i1) < min_bars:
+        return None
+    l1, l2 = float(df['Low'].iloc[i1]), float(df['Low'].iloc[i2])
+    if abs(_pct(l2, l1)) > max_peak_diff:
         return None
     between_highs = [p for p in ph if i1 < p < i2]
     if not between_highs:
         return None
     peak_i = max(between_highs, key=lambda p: df['High'].iloc[p])
     neckline = float(df['High'].iloc[peak_i])
+    atr = _atr(df) or 1e-9
+    height = neckline - min(l1, l2)
+    if height < min_depth_atr * atr:
+        return None
     current = float(df['Close'].iloc[-1])
     if current < min(l1, l2):
         return None
-    conf = 60 + min(15, (1 - abs(_pct(l2, l1)) * 100) * 10)
+    equality_bonus = min(12, (1 - abs(_pct(l2, l1)) * 100) * 8)
+    depth_bonus = min(10, (height / atr - min_depth_atr) * 4)
+    conf = 58 + equality_bonus + depth_bonus
     return Pattern(
         "Double Bottom", "reversal", "BUY",
         trigger_price=neckline,
         trigger_line=[(i1, neckline), (i2, neckline)],
         key_points=[(i1, l1, "Bottom 1"), (i2, l2, "Bottom 2"), (peak_i, neckline, "Neckline")],
-        confidence=conf,
-        note=f"Two near-equal lows ({l1:.5f} / {l2:.5f}) with neckline at {neckline:.5f}. "
-             f"A close above the neckline confirms the breakout."
+        confidence=float(np.clip(conf, 55, 88)),
+        note=(f"Two near-equal lows ({l1:.5f} / {l2:.5f}) separated by {i2 - i1} bars. "
+              f"Neckline {neckline:.5f} (height {height / atr:.1f}×ATR). "
+              f"Close above neckline confirms breakout.")
     )
 
 
