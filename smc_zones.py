@@ -129,68 +129,124 @@ def detect_fvgs(df, min_gap_atr=0.15, max_zones=8):
     return combined[:max_zones]
 
 
-def detect_order_blocks(df, structure=None, min_body_atr=0.6, max_zones=6):
+def detect_order_blocks(df, structure=None, min_body_atr=0.45, max_zones=6):
     """
-    Detect Order Blocks near displacement.
+    ICT-correct Order Blocks tied to ZigZag swings + displacement.
 
-    Simplified ICT rule:
-      - Find candles with strong body (>= min_body_atr * ATR)
-      - Bullish OB: bearish candle immediately before a strong bullish impulse
-      - Bearish OB: bullish candle immediately before a strong bearish impulse
-      - Prefer OBs that align with recent BOS/CHoCH if structure is provided
+    Valid sequence on every structural leg:
+      1. Swing high/low (ZigZag)
+      2. Optional liquidity sweep of that swing
+      3. Displacement that breaks structure (BOS/CHoCH)
+      4. OB = last opposing candle BEFORE the displacement
+      5. FVG often forms inside that same displacement (linked by impulse_index)
+
+    Rule: No BOS/CHoCH-quality displacement → no valid OB.
     """
-    if df is None or len(df) < 10:
+    if df is None or len(df) < 20:
         return []
 
+    from market_structure import zigzag_swings
+
     atr = _atr_series(df)
-    o = df['Open'].values
-    h = df['High'].values
-    l = df['Low'].values
-    c = df['Close'].values
+    o = df["Open"].values.astype(float)
+    h = df["High"].values.astype(float)
+    l = df["Low"].values.astype(float)
+    c = df["Close"].values.astype(float)
     n = len(df)
+
+    pivots = zigzag_swings(df, depth=4, deviation_atr=0.30)
+    if len(pivots) < 3:
+        pivots = []  # fall through will return fewer zones
+
     zones = []
 
-    for i in range(1, n - 1):
-        a = float(atr.iloc[i]) if not np.isnan(atr.iloc[i]) else 0.0
-        if a <= 0:
-            continue
-        body = abs(c[i] - o[i])
-        if body < min_body_atr * a:
+    # --- Primary path: OB at origin of leg that breaks a prior swing ---
+    for k in range(1, len(pivots)):
+        cur = pivots[k]
+        prev = pivots[k - 1]
+        # Displacement leg runs from prev pivot toward cur
+        leg_start = prev["index"]
+        leg_end = cur["index"]
+        if leg_end - leg_start < 2:
             continue
 
-        # Strong bullish candle → look for prior bearish candle as bullish OB
-        if c[i] > o[i]:
-            prev = i - 1
-            if c[prev] < o[prev]:  # prior was bearish
-                zones.append({
-                    "type": "OB",
-                    "bias": "BULLISH",
-                    "top": float(max(o[prev], c[prev])),
-                    "bottom": float(min(o[prev], c[prev])),
-                    "wick_top": float(h[prev]),
-                    "wick_bottom": float(l[prev]),
-                    "index": prev,
-                    "impulse_index": i,
-                    "mitigated": False,
-                    "inverted": False,
-                })
+        # Did this leg break a prior swing of the same type? (BOS quality)
+        broken = None
+        for older in reversed(pivots[: k - 1]):
+            if older["type"] == cur["type"]:
+                if cur["type"] == "high" and cur["price"] > older["price"]:
+                    broken = older
+                elif cur["type"] == "low" and cur["price"] < older["price"]:
+                    broken = older
+                break
+        if broken is None:
+            # Still allow strong displacement vs ATR even without prior same-type break
+            leg_range = abs(cur["price"] - prev["price"])
+            a_mid = float(atr.iloc[min(leg_end, n - 1)]) if not np.isnan(atr.iloc[min(leg_end, n - 1)]) else 0
+            if a_mid <= 0 or leg_range < 1.2 * a_mid:
+                continue
 
-        # Strong bearish candle → prior bullish candle as bearish OB
-        if c[i] < o[i]:
-            prev = i - 1
-            if c[prev] > o[prev]:
-                zones.append({
-                    "type": "OB",
-                    "bias": "BEARISH",
-                    "top": float(max(o[prev], c[prev])),
-                    "bottom": float(min(o[prev], c[prev])),
-                    "wick_top": float(h[prev]),
-                    "wick_bottom": float(l[prev]),
-                    "index": prev,
-                    "impulse_index": i,
-                    "mitigated": False,
-                    "inverted": False,
-                })
+        # Find last opposing candle before the impulsive part of the leg
+        # Scan from leg_end backward toward leg_start
+        if cur["type"] == "high":
+            # Bullish displacement → last bearish candle in the leg = bullish OB
+            ob_idx = None
+            for j in range(leg_end - 1, leg_start - 1, -1):
+                if j < 0:
+                    break
+                if c[j] < o[j]:  # bearish candle
+                    a = float(atr.iloc[j]) if not np.isnan(atr.iloc[j]) else 0
+                    body = abs(c[j] - o[j])
+                    if a > 0 and body >= min_body_atr * a * 0.5:
+                        ob_idx = j
+                        break
+            if ob_idx is None:
+                continue
+            zones.append({
+                "type": "OB",
+                "bias": "BULLISH",
+                "top": float(max(o[ob_idx], c[ob_idx])),
+                "bottom": float(min(o[ob_idx], c[ob_idx])),
+                "wick_top": float(h[ob_idx]),
+                "wick_bottom": float(l[ob_idx]),
+                "index": ob_idx,
+                "impulse_index": leg_end,
+                "swing_broken": broken["price"] if broken else None,
+                "bos": broken is not None,
+                "mitigated": False,
+                "inverted": False,
+            })
+        else:
+            # Bearish displacement → last bullish candle = bearish OB
+            ob_idx = None
+            for j in range(leg_end - 1, leg_start - 1, -1):
+                if j < 0:
+                    break
+                if c[j] > o[j]:
+                    a = float(atr.iloc[j]) if not np.isnan(atr.iloc[j]) else 0
+                    body = abs(c[j] - o[j])
+                    if a > 0 and body >= min_body_atr * a * 0.5:
+                        ob_idx = j
+                        break
+            if ob_idx is None:
+                continue
+            zones.append({
+                "type": "OB",
+                "bias": "BEARISH",
+                "top": float(max(o[ob_idx], c[ob_idx])),
+                "bottom": float(min(o[ob_idx], c[ob_idx])),
+                "wick_top": float(h[ob_idx]),
+                "wick_bottom": float(l[ob_idx]),
+                "index": ob_idx,
+                "impulse_index": leg_end,
+                "swing_broken": broken["price"] if broken else None,
+                "bos": broken is not None,
+                "mitigated": False,
+                "inverted": False,
+            })
+
+    # Prefer OBs that actually broke structure
+    zones.sort(key=lambda z: (not z.get("bos", False), -z["index"]))
 
     # Mitigation → Breaker
     for z in zones:
@@ -198,34 +254,95 @@ def detect_order_blocks(df, structure=None, min_body_atr=0.6, max_zones=6):
         if start >= n:
             continue
         if z["bias"] == "BULLISH":
-            # Mitigated when price trades fully through the OB (low below bottom)
-            if lows_min := l[start:].min() if start < n else None:
-                if lows_min < z["bottom"]:
-                    z["mitigated"] = True
-                    z["inverted"] = True
-                    z["type"] = "BREAKER"  # inverted order block
+            if l[start:].min() < z["bottom"]:
+                z["mitigated"] = True
+                z["inverted"] = True
+                z["type"] = "BREAKER"
         else:
-            if highs_max := h[start:].max() if start < n else None:
-                if highs_max > z["top"]:
-                    z["mitigated"] = True
-                    z["inverted"] = True
-                    z["type"] = "BREAKER"
-
-    # Optional: boost zones near structure event
-    if structure and structure.get("event_price") is not None:
-        ep = structure["event_price"]
-        for z in zones:
-            if abs(z["mid"] if "mid" in z else (z["top"] + z["bottom"]) / 2 - ep) / max(ep, 1e-9) < 0.003:
-                z["near_structure"] = True
+            if h[start:].max() > z["top"]:
+                z["mitigated"] = True
+                z["inverted"] = True
+                z["type"] = "BREAKER"
 
     for z in zones:
         z["mid"] = (z["top"] + z["bottom"]) / 2.0
 
+    # Keep unmitigated first, then recent breakers
     active = [z for z in zones if not z["mitigated"]]
-    breakers = [z for z in zones if z.get("inverted")]
-    combined = active + [z for z in breakers if z not in active]
-    combined.sort(key=lambda z: z["index"], reverse=True)
-    return combined[:max_zones]
+    breakers = [z for z in zones if z.get("inverted") and z not in active]
+    combined = active + breakers
+    # Deduplicate near-identical zones
+    cleaned = []
+    for z in combined:
+        if any(abs(z["mid"] - c0["mid"]) / max(abs(z["mid"]), 1e-9) < 0.0008 for c0 in cleaned):
+            continue
+        cleaned.append(z)
+    return cleaned[:max_zones]
+
+
+def build_bos_events(df, max_events=8):
+    """
+    Build BOS / CHoCH events for chart drawing (dotted lines at broken levels).
+    Uses ZigZag pivots.
+    Returns list of {index, price, type: 'BOS'|'CHoCH', bias: 'BULLISH'|'BEARISH'}
+    """
+    if df is None or len(df) < 20:
+        return []
+    from market_structure import zigzag_swings
+
+    pivots = zigzag_swings(df, depth=4, deviation_atr=0.30)
+    if len(pivots) < 4:
+        return []
+
+    events = []
+    bias = "NEUTRAL"
+    for k in range(1, len(pivots)):
+        cur = pivots[k]
+        # Find previous same-type pivot
+        older = None
+        for j in range(k - 1, -1, -1):
+            if pivots[j]["type"] == cur["type"]:
+                older = pivots[j]
+                break
+        if older is None:
+            continue
+
+        if cur["type"] == "high" and cur["price"] > older["price"]:
+            if bias == "BEARISH":
+                events.append({
+                    "index": cur["index"],
+                    "price": older["price"],
+                    "type": "CHoCH",
+                    "bias": "BULLISH",
+                })
+                bias = "BULLISH"
+            else:
+                events.append({
+                    "index": cur["index"],
+                    "price": older["price"],
+                    "type": "BOS",
+                    "bias": "BULLISH",
+                })
+                bias = "BULLISH"
+        elif cur["type"] == "low" and cur["price"] < older["price"]:
+            if bias == "BULLISH":
+                events.append({
+                    "index": cur["index"],
+                    "price": older["price"],
+                    "type": "CHoCH",
+                    "bias": "BEARISH",
+                })
+                bias = "BEARISH"
+            else:
+                events.append({
+                    "index": cur["index"],
+                    "price": older["price"],
+                    "type": "BOS",
+                    "bias": "BEARISH",
+                })
+                bias = "BEARISH"
+
+    return events[-max_events:]
 
 
 def detect_inducement_zones(df, equal_tol=0.0008, max_zones=8):
