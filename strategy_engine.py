@@ -129,7 +129,7 @@ def _score_silver_bullet(analysis: Dict) -> Dict[str, Any]:
     }
 
 
-def _score_trendline(symbol: str, timeframe: str = "1h") -> Dict[str, Any]:
+def _score_trendline(symbol: str, timeframe: str = "30min") -> Dict[str, Any]:
     """Full trendline family score with projections + position container."""
     try:
         from trendline_family import (
@@ -137,9 +137,11 @@ def _score_trendline(symbol: str, timeframe: str = "1h") -> Dict[str, Any]:
             build_position_container,
             format_trendline_report,
         )
-        df = mt5_data.fetch_candles(symbol, timeframe, count=200)
+        df = mt5_data.fetch_candles(symbol, timeframe, count=250)
         if df is None or df.empty or len(df) < 40:
-            df = mt5_data.fetch_candles(symbol, "15min", count=200)
+            df = mt5_data.fetch_candles(symbol, "30min", count=250)
+        if df is None or df.empty or len(df) < 40:
+            df = mt5_data.fetch_candles(symbol, "15min", count=250)
         if df is None or df.empty or len(df) < 40:
             return {
                 "strategy": ts.STRATEGY_TRENDLINE,
