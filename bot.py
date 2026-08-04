@@ -404,6 +404,7 @@ def get_mobile_panel_menu():
     lot_label = f"Lot Mode: {ts.state.lot_mode}"
     watched = ts.state.get_watched_symbol()
     watch_label = f"🎯 Watching: {watched} (tap to change)" if watched else "🎯 Select Asset to Watch"
+    tf_label = f"⏱ Entry Timeframe: {ts.state.watch_timeframe_label()}"
     strat_label = ts.state.strategy_label()
 
     keyboard = [
@@ -413,6 +414,7 @@ def get_mobile_panel_menu():
         [InlineKeyboardButton(f"🧠 {strat_label}", callback_data="menu_strategy")],
         [InlineKeyboardButton(lot_label, callback_data="toggle_lot_mode")],
         [InlineKeyboardButton(watch_label, callback_data="menu_watch_asset")],
+        [InlineKeyboardButton(tf_label, callback_data="menu_watch_tf")],
         [InlineKeyboardButton("💰 Account & PnL", callback_data="show_account_pnl"),
          InlineKeyboardButton("📈 Open Positions", callback_data="show_open_positions")],
         [InlineKeyboardButton("« Back", callback_data="menu_home")],
@@ -463,23 +465,40 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # When no EA has checked in recently for the watched symbol (you're away
 # from the PC), this loop keeps scanning it so Copy Trade tickets keep
 # coming -- throttled to respect the Twelve Data free tier. The symbol
-# itself is chosen from the Mobile Control Panel, not hardcoded -- if none
-# is selected, this loop does nothing until you pick one.
-WATCHLIST_TIMEFRAME = "15min"
+# AND the timeframe are chosen from the Mobile Control Panel, not
+# hardcoded -- if no symbol is selected, this loop does nothing until you
+# pick one. Any error is logged (not swallowed) so a broken scan is visible
+# instead of just silently never producing a ticket.
 WATCHLIST_SCAN_INTERVAL_SECONDS = 300  # 5 minutes -- keeps well under free-tier rate limits
+_last_scan_error_notified = {"symbol": None, "at": 0}
 
 async def background_watchlist_scanner():
     await asyncio.sleep(15)
     while True:
+        symbol = None
         try:
             symbol = ts.state.get_watched_symbol()
+            tf = ts.state.get_watch_timeframe()
             if symbol and ts.state.get_mode() != ts.MODE_OFF and not ts.state.is_ea_available(symbol):
                 try:
-                    engine.poll(symbol, WATCHLIST_TIMEFRAME)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                    result = engine.poll(symbol, tf)
+                    if result and result.get("error"):
+                        print(f"[watchlist_scanner] {symbol} ({tf}) poll returned error: {result['error']}")
+                except Exception as e:
+                    print(f"[watchlist_scanner] poll failed for {symbol} ({tf}): {e!r}")
+                    # Also surface it in Telegram once per 30 min per symbol, so a
+                    # persistently broken scan doesn't just go silent forever.
+                    now = time.time()
+                    if (_last_scan_error_notified["symbol"] != symbol
+                            or now - _last_scan_error_notified["at"] > 1800):
+                        _last_scan_error_notified["symbol"] = symbol
+                        _last_scan_error_notified["at"] = now
+                        push_telegram_message(
+                            f"⚠️ Background scanner error on {symbol} ({tf}): {e}\n"
+                            f"Copy Trade tickets paused for this symbol until it recovers."
+                        )
+        except Exception as e:
+            print(f"[watchlist_scanner] outer loop failure (symbol={symbol}): {e!r}")
         await asyncio.sleep(WATCHLIST_SCAN_INTERVAL_SECONDS)
 
 async def send_amd_analysis(context, chat_id, symbol):
@@ -890,6 +909,36 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         ts.state.clear_watched_symbol()
         await query.edit_message_text("🎯 Watch cleared. Background scanner is idle until you pick a new asset.",
                                        reply_markup=get_mobile_panel_menu())
+
+    # ---------------- Entry timeframe selection (background scanner + on-demand trendline) ----------------
+    elif data == "menu_watch_tf":
+        current = ts.state.get_watch_timeframe()
+        rows = []
+        row = []
+        for tf in ts.WATCH_TIMEFRAMES:
+            label = f"{'✅' if tf == current else '⚪'} {ts.WATCH_TIMEFRAME_LABELS[tf]}"
+            row.append(InlineKeyboardButton(label, callback_data=f"watch_tf_set|{tf}"))
+            if len(row) == 3:
+                rows.append(row); row = []
+        if row:
+            rows.append(row)
+        rows.append([InlineKeyboardButton("« Back", callback_data="menu_mobile_panel")])
+        await query.edit_message_text(
+            f"⏱ Entry Timeframe (currently {ts.state.watch_timeframe_label()})\n\n"
+            "This is the candle timeframe used for:\n"
+            "• The background scanner (Copy Trade tickets while away)\n"
+            "• On-demand Trendline analysis\n\n"
+            "Pick the timeframe your entries should be based on:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    elif data.startswith("watch_tf_set|"):
+        _, tf_code = data.split("|", 1)
+        ts.state.set_watch_timeframe(tf_code)
+        await query.edit_message_text(
+            f"⏱ Entry timeframe set to {ts.state.watch_timeframe_label()}.",
+            reply_markup=get_mobile_panel_menu(),
+        )
 
     elif data == "show_account_pnl":
         acc = mt5_data.get_account_summary()
