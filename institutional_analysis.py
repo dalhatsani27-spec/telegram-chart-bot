@@ -21,7 +21,7 @@ from volume_profile import compute_volume_profile
 from market_structure import analyse_structure, structure_trade_permission
 from smc_zones import (
     detect_fvgs, detect_order_blocks, detect_inducement_zones,
-    pair_idm_with_extreme_ob, summarise_smc_zones,
+    pair_idm_with_extreme_ob, summarise_smc_zones, build_bos_events,
 )
 import mt5_data
 
@@ -140,6 +140,7 @@ def _analyse_single_tf(symbol, tf_code, tf_label):
     fvgs = detect_fvgs(df, min_gap_atr=0.15, max_zones=5)
     obs = detect_order_blocks(df, structure=structure, max_zones=4)
     idms = detect_inducement_zones(df, max_zones=4)
+    bos_events = build_bos_events(df, max_events=8)
     return {
         "tf": tf_code, "tf_label": tf_label, "df": df,
         "close": float(df["Close"].iloc[-1]),
@@ -147,6 +148,7 @@ def _analyse_single_tf(symbol, tf_code, tf_label):
         "vwap": vwap, "trendline": trend, "volume_profile": vp,
         "best_pattern": best, "all_patterns": all_pats[:3] if all_pats else [],
         "structure": structure, "fvgs": fvgs, "order_blocks": obs, "inducements": idms,
+        "bos_events": bos_events,
     }
 
 
