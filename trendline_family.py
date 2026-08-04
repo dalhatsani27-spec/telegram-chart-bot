@@ -110,7 +110,10 @@ def _build_parallel_family(primary: Dict, pivots: List[Dict], n: int, max_member
         y_on_primary = _line_value(primary["x0"], primary["y0"], primary["x1"], primary["y1"], p["index"])
         offset = p["price"] - y_on_primary
         # Skip near-duplicates
-        if any(abs(offset - o) / max(abs(offset), abs(o), 1e-9) < 0.08 for o in seen_offsets):
+        # Require meaningful spacing vs primary (avoid cluttered near-duplicates)
+        if any(abs(offset - o) / max(abs(y_on_primary) * 0.002, abs(o), 1e-9) < 0.35 for o in seen_offsets):
+            continue
+        if abs(offset) < abs(y_on_primary) * 0.0015:  # too tight to primary
             continue
         seen_offsets.append(offset)
         y0 = primary["y0"] + offset
@@ -132,6 +135,57 @@ def _build_parallel_family(primary: Dict, pivots: List[Dict], n: int, max_member
     members.sort(key=lambda m: m["y_end"])
     return members
 
+
+
+def _detect_mw_pattern(pivots, df):
+    """
+    Detect simple M (double top) or W (double bottom) and neckline.
+    M: two swing highs near same price, neckline = swing low between them.
+    W: two swing lows near same price, neckline = swing high between them.
+    """
+    if not pivots or len(pivots) < 3 or df is None or len(df) < 20:
+        return None
+    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
+    tol = max(atr * 0.35, 1e-9)
+    highs = [p for p in pivots if p["type"] == "high"]
+    lows = [p for p in pivots if p["type"] == "low"]
+
+    # Double top (M) — last two significant highs
+    if len(highs) >= 2:
+        for i in range(len(highs) - 1, 0, -1):
+            h2, h1 = highs[i], highs[i - 1]
+            if abs(h2["price"] - h1["price"]) <= tol and h2["index"] > h1["index"]:
+                between = [p for p in lows if h1["index"] < p["index"] < h2["index"]]
+                if between:
+                    neck = min(between, key=lambda p: p["price"])
+                    return {
+                        "pattern": "M",
+                        "name": "Double Top (M)",
+                        "left": h1, "right": h2,
+                        "neckline": neck["price"],
+                        "neck_index": neck["index"],
+                        "bias": "SELL",
+                        "note": f"M pattern — neckline at {neck['price']:.5f}",
+                    }
+
+    # Double bottom (W)
+    if len(lows) >= 2:
+        for i in range(len(lows) - 1, 0, -1):
+            l2, l1 = lows[i], lows[i - 1]
+            if abs(l2["price"] - l1["price"]) <= tol and l2["index"] > l1["index"]:
+                between = [p for p in highs if l1["index"] < p["index"] < l2["index"]]
+                if between:
+                    neck = max(between, key=lambda p: p["price"])
+                    return {
+                        "pattern": "W",
+                        "name": "Double Bottom (W)",
+                        "left": l1, "right": l2,
+                        "neckline": neck["price"],
+                        "neck_index": neck["index"],
+                        "bias": "BUY",
+                        "note": f"W pattern — neckline at {neck['price']:.5f}",
+                    }
+    return None
 
 def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, Any]:
     """
@@ -174,7 +228,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
     family_lines = []
     channel = None
     if primary:
-        family_lines = _build_parallel_family(primary, pivots, n, max_members=max_lines)
+        family_lines = _build_parallel_family(primary, pivots, n, max_members=min(3, max_lines))
         if len(family_lines) >= 2:
             channel = {
                 "lower": family_lines[0],
@@ -224,6 +278,16 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
 
     projections = _measured_move_projections(df, pivots, direction)
     vp = compute_volume_profile(df.iloc[:-1])
+    mw = _detect_mw_pattern(pivots, df)
+    if mw:
+        reasons.append(mw["note"])
+        if direction == "NEUTRAL":
+            direction = mw["bias"]
+            strength = max(strength, 65)
+        elif direction == mw["bias"]:
+            strength = min(100, strength + 12)
+    else:
+        mw = None
 
     # Series for chart (only the parallel family — clean)
     upper_line = np.full(n, np.nan)
@@ -246,7 +310,8 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
         "downtrends": [primary] if family_kind == "descending" and primary else [],
         "channel": channel,
         "projections": projections,
-        "pivots": pivots[-20:],
+        "mw_pattern": mw,
+        "pivots": pivots[-16:],
         "volume_profile": vp,
         "upper_line": upper_line,
         "lower_line": lower_line,
@@ -277,7 +342,43 @@ def _measured_move_projections(df, pivots, direction) -> List[Dict[str, Any]]:
     return projs
 
 
-def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.15) -> Optional[Dict[str, Any]]:
+def _liquidity_targets(pivots, direction: str, entry: float) -> List[float]:
+    """
+    External liquidity pools price is drawn to:
+      BUY  → swing highs above entry (BSL)
+      SELL → swing lows below entry (SSL)
+    Sorted nearest → farthest.
+    """
+    if not pivots:
+        return []
+    targets = []
+    for p in pivots:
+        px = float(p["price"])
+        if direction == "BUY" and p.get("type") == "high" and px > entry:
+            targets.append(px)
+        elif direction == "SELL" and p.get("type") == "low" and px < entry:
+            targets.append(px)
+    if direction == "BUY":
+        targets.sort()  # nearest high first
+    else:
+        targets.sort(reverse=True)  # nearest low first
+    # unique with small tolerance
+    cleaned = []
+    for t in targets:
+        if not cleaned or abs(t - cleaned[-1]) / max(abs(t), 1e-9) > 0.0003:
+            cleaned.append(t)
+    return cleaned
+
+
+def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -> Optional[Dict[str, Any]]:
+    """
+    Position box with DYNAMIC R:R from real liquidity distance.
+
+    Entry  : nearest structure rail / close
+    SL     : beyond invalidation (last opposing swing or rail break)
+    TP1/TP2: nearest / next liquidity pools (swing highs or lows)
+    R:R    : |TP1 - Entry| / |Entry - SL|  (not a fixed multiple)
+    """
     if not family or family.get("error"):
         return None
     df = family.get("df")
@@ -288,37 +389,114 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.15) 
     direction = family.get("direction", "NEUTRAL")
     if direction not in ("BUY", "SELL"):
         return None
-    projs = family.get("projections") or []
-    channel = family.get("channel")
+
+    pivots = family.get("pivots") or []
     lines = family.get("family_lines") or []
+    channel = family.get("channel")
+    mw = family.get("mw_pattern")
+    projs = family.get("projections") or []
+    vp = family.get("volume_profile") or {}
 
     if direction == "BUY":
+        # Entry: support rail or close
         entry = close
         if lines:
-            # Prefer nearest rail below price as limit entry
             below = [m["y_end"] for m in lines if m["y_end"] <= close]
             if below:
                 entry = max(below)
         elif channel and channel.get("lower"):
-            entry = min(close, float(channel["lower"].get("y_end", close)))
-        sl = entry - atr * atr_mult_sl
-        tp1 = projs[0]["price"] if projs else entry + atr * 1.5
-        tp2 = projs[1]["price"] if len(projs) > 1 else entry + atr * 2.8
-        return {"side": "LONG", "direction": "BUY", "entry": entry, "sl": sl,
-                "tp1": tp1, "tp2": tp2, "order_type": "LIMIT" if entry < close - atr * 0.1 else "MARKET"}
-    else:
+            entry = float(channel["lower"].get("y_end", close))
+
+        # SL: below last swing low under entry (structural invalidation)
+        swing_lows = [float(p["price"]) for p in pivots if p.get("type") == "low" and p["price"] < entry]
+        if swing_lows:
+            sl = min(swing_lows[-2:], default=min(swing_lows))  # recent low
+            sl = min(swing_lows) if len(swing_lows) == 1 else sorted(swing_lows)[-1]
+            # use nearest swing low below entry
+            below_entry = [x for x in swing_lows if x < entry]
+            sl = max(below_entry) if below_entry else entry - atr * atr_mult_sl
+            sl = sl - atr * 0.15  # buffer beyond liquidity
+        else:
+            sl = entry - atr * atr_mult_sl
+
+        # Targets = buy-side liquidity (swing highs above) + neckline if W + POC if above
+        liq = _liquidity_targets(pivots, "BUY", entry)
+        if mw and mw.get("pattern") == "W" and mw.get("neckline", 0) > entry:
+            liq = sorted(set(liq + [float(mw["neckline"])]))
+        if vp.get("poc_price") and vp["poc_price"] > entry:
+            liq = sorted(set(liq + [float(vp["poc_price"])]))
+        # fallback measured move only if no swing liquidity
+        if not liq and projs:
+            liq = [float(p["price"]) for p in projs if p["price"] > entry]
+
+        tp1 = liq[0] if liq else entry + atr * 1.5
+        tp2 = liq[1] if len(liq) > 1 else (liq[0] if liq else entry + atr * 2.5)
+
+        risk = abs(entry - sl)
+        reward = abs(tp1 - entry)
+        rr = (reward / risk) if risk > 0 else 0.0
+
+        return {
+            "side": "LONG",
+            "direction": "BUY",
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "rr": round(rr, 2),
+            "risk": risk,
+            "reward": reward,
+            "liquidity_tp1": "swing high / BSL" if liq else "measured move",
+            "order_type": "LIMIT" if entry < close - atr * 0.08 else "MARKET",
+        }
+
+    else:  # SELL
         entry = close
         if lines:
             above = [m["y_end"] for m in lines if m["y_end"] >= close]
             if above:
                 entry = min(above)
         elif channel and channel.get("upper"):
-            entry = max(close, float(channel["upper"].get("y_end", close)))
-        sl = entry + atr * atr_mult_sl
-        tp1 = projs[0]["price"] if projs else entry - atr * 1.5
-        tp2 = projs[1]["price"] if len(projs) > 1 else entry - atr * 2.8
-        return {"side": "SHORT", "direction": "SELL", "entry": entry, "sl": sl,
-                "tp1": tp1, "tp2": tp2, "order_type": "LIMIT" if entry > close + atr * 0.1 else "MARKET"}
+            entry = float(channel["upper"].get("y_end", close))
+
+        swing_highs = [float(p["price"]) for p in pivots if p.get("type") == "high" and p["price"] > entry]
+        if swing_highs:
+            above_entry = [x for x in swing_highs if x > entry]
+            sl = min(above_entry) if above_entry else entry + atr * atr_mult_sl
+            sl = sl + atr * 0.15
+        else:
+            sl = entry + atr * atr_mult_sl
+
+        # Sell-side liquidity (swing lows below) + M neckline + POC
+        liq = _liquidity_targets(pivots, "SELL", entry)
+        if mw and mw.get("pattern") == "M" and mw.get("neckline", 0) < entry:
+            liq_set = list(liq) + [float(mw["neckline"])]
+            liq = sorted(liq_set, reverse=True)
+        if vp.get("poc_price") and vp["poc_price"] < entry:
+            liq = sorted(set(list(liq) + [float(vp["poc_price"])]), reverse=True)
+        if not liq and projs:
+            liq = [float(p["price"]) for p in projs if p["price"] < entry]
+
+        tp1 = liq[0] if liq else entry - atr * 1.5
+        tp2 = liq[1] if len(liq) > 1 else (liq[0] if liq else entry - atr * 2.5)
+
+        risk = abs(sl - entry)
+        reward = abs(entry - tp1)
+        rr = (reward / risk) if risk > 0 else 0.0
+
+        return {
+            "side": "SHORT",
+            "direction": "SELL",
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "rr": round(rr, 2),
+            "risk": risk,
+            "reward": reward,
+            "liquidity_tp1": "swing low / SSL" if liq else "measured move",
+            "order_type": "LIMIT" if entry > close + atr * 0.08 else "MARKET",
+        }
 
 
 def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
@@ -333,6 +511,9 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
         lines.append(f"  • {r}")
     n_rails = len(family.get("family_lines") or [])
     lines.append(f"Parallel rails: {n_rails}")
+    mw = family.get("mw_pattern")
+    if mw:
+        lines.append(f"Pattern: {mw['name']} · neckline {mw['neckline']:.5f}")
     if family.get("channel"):
         w = family["channel"].get("width")
         if w:
@@ -349,4 +530,9 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
             f"Position: {pos['side']}  Entry {pos['entry']:.5f}  SL {pos['sl']:.5f}  "
             f"TP1 {pos['tp1']:.5f}  TP2 {pos['tp2']:.5f}"
         )
+        lines.append(
+            f"R:R 1:{pos.get('rr', 0):.2f}  (risk {pos.get('risk', 0):.5f} → reward {pos.get('reward', 0):.5f})"
+        )
+        if pos.get("liquidity_tp1"):
+            lines.append(f"TP1 liquidity: {pos['liquidity_tp1']}")
     return "\n".join(lines)
