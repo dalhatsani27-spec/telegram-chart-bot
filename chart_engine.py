@@ -283,6 +283,87 @@ def _draw_position_container(ax, pos, chart_len: int):
         ax.text(chart_len * 0.70, pos["tp2"], "TP2", fontsize=7, color=COLORS["tp"], va="bottom")
 
 
+
+def _draw_vp_histogram(ax, vp, chart_len: int, price_min: float, price_max: float):
+    """Volume profile histogram on the right edge (like TradingView fixed-range VP)."""
+    if not vp or vp.get("bin_volumes") is None:
+        return
+    try:
+        edges = vp.get("bin_edges")
+        vols = vp.get("bin_volumes")
+        if edges is None or vols is None:
+            return
+        import numpy as np
+        edges = np.asarray(edges, dtype=float)
+        vols = np.asarray(vols, dtype=float)
+        if len(vols) == 0 or vols.max() <= 0:
+            return
+        max_w = chart_len * 0.14  # max bar width in x-units
+        x_base = chart_len - 0.5
+        for i, v in enumerate(vols):
+            if i + 1 >= len(edges):
+                break
+            y0, y1 = float(edges[i]), float(edges[i + 1])
+            w = (v / vols.max()) * max_w
+            mid = (y0 + y1) / 2.0
+            is_poc = abs(mid - float(vp.get("poc_price", 0))) < (y1 - y0)
+            in_va = False
+            if vp.get("value_area_low") is not None and vp.get("value_area_high") is not None:
+                in_va = vp["value_area_low"] <= mid <= vp["value_area_high"]
+            color = "#ff9800" if is_poc else ("#5c6bc0" if in_va else "#455a64")
+            alpha = 0.85 if is_poc else (0.55 if in_va else 0.35)
+            ax.barh(mid, w, height=(y1 - y0) * 0.9, left=x_base - w,
+                    color=color, alpha=alpha, zorder=2, align="center")
+    except Exception:
+        pass
+
+
+def _draw_tv_position_box(ax, pos, chart_len: int):
+    """
+    TradingView-style long/short container:
+      - shaded risk (entry→SL) and reward (entry→TP) zones
+      - R:R label
+    Projection levels = container edges.
+    """
+    if not pos:
+        return
+    entry = pos.get("entry")
+    sl = pos.get("sl")
+    tp1 = pos.get("tp1")
+    tp2 = pos.get("tp2") or tp1
+    if entry is None or sl is None or tp1 is None:
+        return
+    side = str(pos.get("side") or pos.get("direction") or "").upper()
+    risk = abs(entry - sl)
+    reward = abs(tp1 - entry)
+    rr = float(pos.get("rr")) if pos.get("rr") is not None else ((reward / risk) if risk > 0 else 0.0)
+
+    x0 = chart_len * 0.72
+    x1 = chart_len - 1
+
+    # Risk zone
+    y_lo_r, y_hi_r = min(entry, sl), max(entry, sl)
+    ax.axhspan(y_lo_r, y_hi_r, xmin=0.72, xmax=1.0, facecolor="#ef5350", alpha=0.18, zorder=2)
+    # Reward zone (to TP1)
+    y_lo_p, y_hi_p = min(entry, tp1), max(entry, tp1)
+    ax.axhspan(y_lo_p, y_hi_p, xmin=0.72, xmax=1.0, facecolor="#26a69a", alpha=0.18, zorder=2)
+
+    ax.axhline(entry, color=COLORS["entry"], linestyle="--", linewidth=1.4, xmin=0.72)
+    ax.axhline(sl, color=COLORS["sl"], linestyle="-", linewidth=1.3, xmin=0.72)
+    ax.axhline(tp1, color=COLORS["tp"], linestyle=":", linewidth=1.2, xmin=0.72)
+    if tp2 is not None and tp2 != tp1:
+        ax.axhline(tp2, color=COLORS["tp"], linestyle=":", linewidth=1.0, xmin=0.72, alpha=0.7)
+
+    label = f"{'LONG' if 'LONG' in side or side == 'BUY' else 'SHORT'}  R:R 1:{rr:.1f}"
+    ax.text(x0 + 1, max(y_hi_r, y_hi_p), label, fontsize=8, color="#ffffff",
+            fontweight="bold", va="bottom",
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="#263238", alpha=0.85, edgecolor="#546e7a"),
+            zorder=12)
+    ax.text(x0 + 1, entry, "Entry", fontsize=6.5, color=COLORS["entry"], va="bottom")
+    ax.text(x0 + 1, sl, "SL", fontsize=6.5, color=COLORS["sl"], va="top")
+    ax.text(x0 + 1, tp1, "TP1", fontsize=6.5, color=COLORS["tp"], va="bottom")
+
+
 def generate_smc_map(
     df: pd.DataFrame,
     symbol: str,
@@ -780,7 +861,7 @@ def generate_trendline_map(
             lw = 1.8 if i in (0, len(rails) - 1) else 1.2
             ax.plot(xs, ys, color=rail_color, linewidth=lw, alpha=0.92, zorder=4)
         # Mark the two pivot anchors of the primary rail
-        if i == 0 or (family_kind and i == 0):
+        if i == 0:
             for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
                 if ax_key in tl and ay_key in tl:
                     px = int(tl[ax_key]) - offset
@@ -788,21 +869,26 @@ def generate_trendline_map(
                         ax.scatter([px], [float(tl[ay_key])], s=55, c=rail_color,
                                    edgecolors="#ffffff", linewidths=1.0, zorder=11, marker="D")
 
+    # M/W neckline (double top / double bottom)
+    mw = family.get("mw_pattern")
+    if mw and mw.get("neckline") is not None:
+        ax.axhline(mw["neckline"], color="#ff9800", linestyle="-", linewidth=1.6, alpha=0.95, zorder=5)
+        ax.text(chart_len * 0.02, mw["neckline"], f"NECKLINE ({mw.get('pattern', '')})",
+                fontsize=7.5, color="#ffb74d", fontweight="bold", va="bottom")
+
     # Projections — subtle
     for p in (family.get("projections") or [])[:3]:
         ax.axhline(p["price"], color="#7e57c2", linestyle="-.", linewidth=0.9, alpha=0.65)
         ax.text(chart_len * 0.01, p["price"], p["label"], fontsize=6.5, color="#b39ddb", va="bottom", alpha=0.85)
 
-    # Volume Profile POC only (VA band lighter)
+    # Volume Profile histogram (right side) + POC/VA
     vp = family.get("volume_profile") or setup.get("volume_profile")
-    if vp:
-        if vp.get("poc_price"):
-            ax.axhline(vp["poc_price"], color=COLORS["poc"], linestyle=":", linewidth=1.2, alpha=0.75)
-            ax.text(chart_len * 0.88, vp["poc_price"], "POC", fontsize=6.5, color=COLORS["poc"], va="bottom")
-        if vp.get("value_area_low") is not None and vp.get("value_area_high") is not None:
-            ax.axhspan(vp["value_area_low"], vp["value_area_high"], facecolor="#ff9800", alpha=0.05, zorder=1)
+    _draw_vp_histogram(ax, vp, chart_len, price_min, price_max)
+    if vp and vp.get("poc_price") is not None:
+        ax.axhline(vp["poc_price"], color=COLORS["poc"], linestyle=":", linewidth=1.15, alpha=0.8)
+        ax.text(chart_len * 0.55, vp["poc_price"], "POC", fontsize=6.5, color=COLORS["poc"], va="bottom")
 
-    # Position container
+    # TradingView-style position container (R:R) — projection levels
     pos = setup.get("position") or family.get("position")
     if not pos and setup.get("entry") is not None:
         pos = {
@@ -810,27 +896,14 @@ def generate_trendline_map(
             "tp1": setup.get("tp1"), "tp2": setup.get("tp2"),
             "side": setup.get("direction", ""),
         }
-    if pos:
-        if pos.get("entry") is not None:
-            ax.axhline(pos["entry"], color=COLORS["entry"], linestyle="--", linewidth=1.5)
-            ax.text(chart_len * 0.72, pos["entry"], f"ENTRY ({pos.get('side', '')})", fontsize=7,
-                    color=COLORS["entry"], fontweight="bold", va="bottom")
-        if pos.get("sl") is not None:
-            ax.axhline(pos["sl"], color=COLORS["sl"], linestyle="-", linewidth=1.4)
-            ax.text(chart_len * 0.72, pos["sl"], "SL", fontsize=7, color=COLORS["sl"], fontweight="bold", va="top")
-        if pos.get("tp1") is not None:
-            ax.axhline(pos["tp1"], color=COLORS["tp"], linestyle=":", linewidth=1.25)
-            ax.text(chart_len * 0.72, pos["tp1"], "TP1", fontsize=7, color=COLORS["tp"], va="bottom")
-        if pos.get("tp2") is not None:
-            ax.axhline(pos["tp2"], color=COLORS["tp"], linestyle=":", linewidth=1.25)
-            ax.text(chart_len * 0.72, pos["tp2"], "TP2", fontsize=7, color=COLORS["tp"], va="bottom")
+    _draw_tv_position_box(ax, pos, chart_len)
 
     _draw_session_separators(ax, chart_df, chart_len)
 
     direction = family.get("direction") or setup.get("direction", "")
     strength = family.get("strength") or setup.get("confidence") or setup.get("score") or 0
     ax.set_title(
-        f"{symbol}  TRENDLINE FAMILY  |  {title_suffix}  |  {direction}  |  Str {strength:.0f}",
+        f"{symbol}  TRENDLINE FAMILY  |  TF: 30m  |  {title_suffix}  |  {direction}  |  Str {strength:.0f}",
         color=COLORS["text"],
         fontsize=9.5,
         fontweight="bold",
