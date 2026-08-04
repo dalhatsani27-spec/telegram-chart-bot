@@ -24,7 +24,10 @@ Phase detection (practical rules on 1H):
 import numpy as np
 import pandas as pd
 from market_structure import analyse_structure
-from smc_zones import detect_fvgs, detect_order_blocks, detect_inducement_zones, pair_idm_with_extreme_ob, summarise_smc_zones
+from smc_zones import (
+    detect_fvgs, detect_order_blocks, detect_inducement_zones,
+    pair_idm_with_extreme_ob, summarise_smc_zones, build_bos_events,
+)
 from volume_profile import compute_volume_profile
 import mt5_data
 
@@ -477,6 +480,7 @@ def run_amd_analysis(symbol):
         "fvgs": fvgs,
         "order_blocks": obs,
         "inducements": idms,
+        "bos_events": build_bos_events(df_1h, max_events=8),
         "volume_profile": vp,
         "entry_notes": entry_notes,
         "df_1h": df_1h,
