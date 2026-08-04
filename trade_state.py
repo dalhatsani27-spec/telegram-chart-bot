@@ -40,12 +40,22 @@ STRATEGY_MODE_HYBRID = "HYBRID"
 
 APPROVAL_EXPIRY_SECONDS = 180
 
+# Timeframes selectable from the Mobile Control Panel for the watched-symbol
+# background scanner (Copy Trade / Mobile Manual tickets) and for on-demand
+# Trendline analysis. Internal codes match mt5_data._TF_MAP / legacy_data.
+WATCH_TIMEFRAMES = ["5min", "15min", "30min", "1h", "4h"]
+WATCH_TIMEFRAME_LABELS = {
+    "5min": "M5", "15min": "M15", "30min": "M30", "1h": "H1", "4h": "H4",
+}
+DEFAULT_WATCH_TIMEFRAME = "15min"
+
 
 class TradeStateManager:
     def __init__(self):
         self.mode = MODE_OFF
         self.lot_mode = "MIN"
         self.watched_symbol = None
+        self.watch_timeframe = DEFAULT_WATCH_TIMEFRAME
 
         # Strategy selection
         self.strategy_mode = STRATEGY_MODE_SINGLE
@@ -72,6 +82,18 @@ class TradeStateManager:
 
     def clear_watched_symbol(self):
         self.watched_symbol = None
+
+    # ---------------- watch timeframe ----------------
+    def set_watch_timeframe(self, tf_code):
+        if tf_code not in WATCH_TIMEFRAMES:
+            raise ValueError(f"invalid watch timeframe: {tf_code}")
+        self.watch_timeframe = tf_code
+
+    def get_watch_timeframe(self):
+        return self.watch_timeframe
+
+    def watch_timeframe_label(self):
+        return WATCH_TIMEFRAME_LABELS.get(self.watch_timeframe, self.watch_timeframe)
 
     # ---------------- EA heartbeat ----------------
     def mark_ea_seen(self, symbol):
