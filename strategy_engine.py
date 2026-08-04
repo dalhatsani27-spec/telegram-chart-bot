@@ -137,11 +137,11 @@ def _score_trendline(symbol: str, timeframe: str = "30min") -> Dict[str, Any]:
             build_position_container,
             format_trendline_report,
         )
-        df = mt5_data.fetch_candles(symbol, timeframe, count=250)
+        df = mt5_data.fetch_candles(symbol, timeframe, count=220)
         if df is None or df.empty or len(df) < 40:
-            df = mt5_data.fetch_candles(symbol, "30min", count=250)
+            df = mt5_data.fetch_candles(symbol, "30min", count=220)
         if df is None or df.empty or len(df) < 40:
-            df = mt5_data.fetch_candles(symbol, "15min", count=250)
+            df = mt5_data.fetch_candles(symbol, "15min", count=220)
         if df is None or df.empty or len(df) < 40:
             return {
                 "strategy": ts.STRATEGY_TRENDLINE,
@@ -151,7 +151,7 @@ def _score_trendline(symbol: str, timeframe: str = "30min") -> Dict[str, Any]:
                 "analysis": {},
                 "valid": False,
             }
-        family = build_trendline_family(df, max_lines=4)
+        family = build_trendline_family(df, max_lines=2)
         if family.get("error"):
             return {
                 "strategy": ts.STRATEGY_TRENDLINE,
@@ -163,8 +163,24 @@ def _score_trendline(symbol: str, timeframe: str = "30min") -> Dict[str, Any]:
             }
         pos = build_position_container(family)
         family["position"] = pos
+        # HTF context (details only — final map stays M30)
+        htf_notes = []
+        try:
+            from market_structure import analyse_structure
+            for tf, lab in (("1h", "H1"), ("4h", "H4")):
+                hdf = mt5_data.fetch_candles(symbol, tf, count=120)
+                if hdf is not None and len(hdf) >= 40:
+                    st = analyse_structure(hdf, left=2, right=2, lookback=50)
+                    htf_notes.append(f"{lab}: {st.get('note', st.get('bias', ''))}")
+        except Exception:
+            pass
+        family["htf_notes"] = htf_notes
+        family["timeframe"] = "30min"
         direction = family.get("direction", "NEUTRAL")
         score = int(family.get("strength", 0))
+        report = format_trendline_report(family, symbol)
+        if htf_notes:
+            report += "\nHTF context:\n" + "\n".join(f"  • {n}" for n in htf_notes)
         return {
             "strategy": ts.STRATEGY_TRENDLINE,
             "direction": direction,
@@ -174,7 +190,7 @@ def _score_trendline(symbol: str, timeframe: str = "30min") -> Dict[str, Any]:
             "family": family,
             "position": pos,
             "ticket": pos,
-            "report": format_trendline_report(family, symbol),
+            "report": report,
             "valid": direction in ("BUY", "SELL") and score >= 55,
         }
     except Exception as e:
