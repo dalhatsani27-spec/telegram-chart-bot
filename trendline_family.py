@@ -53,7 +53,16 @@ def _count_touches(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
 
 
 def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
-    """Best 2-point primary line of given kind (support=lows, resistance=highs)."""
+    """Best 2-point primary line of given kind (support=lows, resistance=highs).
+
+    Professional validation standard: a 2-point line is only a *candidate* --
+    it takes a 3rd touch for traders to actually respect it as real structure.
+    We still return 2-touch lines (better than nothing), but tag them
+    "unconfirmed" so downstream scoring/reporting can be honest about it.
+    5+ touches is flagged "crowded": the level has been tested so many times
+    the order flow defending it is likely used up, and the next test is
+    statistically more likely to fail than hold.
+    """
     pts = [p for p in pivots if p["type"] == ("low" if kind == "support" else "high")]
     if len(pts) < 2:
         return None
@@ -71,17 +80,30 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Opt
                 continue
             slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
             touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind)
-            # Prefer more touches + more recent + longer span
-            score = touches * 10 + (b["index"] / max(n, 1)) * 5 + (b["index"] - a["index"]) * 0.05
+            # Prefer more touches + more recent + longer span, but back off once
+            # touches go past the 3-4 "sweet spot" -- a crowded level scores
+            # slightly lower than a freshly-confirmed one at the same touch count.
+            touch_score = touches * 10
+            if touches >= 5:
+                touch_score -= (touches - 4) * 3  # fatigue penalty, doesn't erase the line
+            score = touch_score + (b["index"] / max(n, 1)) * 5 + (b["index"] - a["index"]) * 0.05
             if score > best_score:
                 best_score = score
                 y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
+                if touches < 3:
+                    quality = "unconfirmed"
+                elif touches <= 4:
+                    quality = "confirmed"
+                else:
+                    quality = "crowded"
                 best = {
                     "x0": a["index"], "y0": a["price"],
                     "x1": b["index"], "y1": b["price"],
                     "y_end": y_end,
                     "slope": slope,
                     "touches": touches,
+                    "confirmed": touches >= 3,
+                    "quality": quality,
                     "kind": kind,
                 }
     return best
@@ -187,6 +209,64 @@ def _detect_mw_pattern(pivots, df):
                     }
     return None
 
+def _grade_breakout(df: pd.DataFrame, line: Dict, kind: str, n: int) -> Dict[str, Any]:
+    """
+    Grade how much to trust a close beyond the family rail, instead of
+    treating every cross as an equal, instant signal (the #1 cause of
+    trendline whipsaws per standard breakout-trading practice):
+
+      - penetration_atr : how far beyond the line the close is, in ATR --
+        a close that's barely beyond (wick-through territory) is graded
+        weak even though it technically "broke" the line.
+      - consecutive      : how many bars in a row have closed beyond it --
+        1 bar is a first break, 2+ is starting to look real.
+      - body_ratio       : candle body vs full range on the break bar --
+        a small body with long wicks against the break direction is a
+        classic fakeout signature.
+      - retest_level     : the rail's current price -- where a limit order
+        would sit if waiting for the break-and-retest entry instead of
+        chasing the break at market.
+    """
+    close = df["Close"].values
+    open_ = df["Open"].values
+    high = df["High"].values
+    low = df["Low"].values
+    atr_col = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
+    last = n - 1
+    line_val = _line_value(line["x0"], line["y0"], line["x1"], line["y1"], last)
+    atr = float(atr_col[last]) if atr_col[last] and atr_col[last] > 0 else abs(high[last] - low[last]) or 1e-9
+
+    beyond = (close[last] > line_val) if kind == "resistance_break_up" or kind == "support_break_up" else (close[last] < line_val)
+    penetration_atr = abs(close[last] - line_val) / atr
+
+    rng = max(high[last] - low[last], 1e-9)
+    body_ratio = abs(close[last] - open_[last]) / rng
+
+    consecutive = 0
+    for i in range(last, max(last - 5, -1), -1):
+        lv_i = _line_value(line["x0"], line["y0"], line["x1"], line["y1"], i)
+        beyond_i = (close[i] > lv_i) if kind.endswith("break_up") else (close[i] < lv_i)
+        if beyond_i:
+            consecutive += 1
+        else:
+            break
+
+    if penetration_atr >= 0.35 and body_ratio >= 0.45 and consecutive >= 2:
+        strength = "confirmed"
+    elif penetration_atr >= 0.15 and consecutive >= 1:
+        strength = "developing"
+    else:
+        strength = "weak"
+
+    return {
+        "strength": strength,
+        "penetration_atr": round(penetration_atr, 2),
+        "consecutive_closes": consecutive,
+        "body_ratio": round(body_ratio, 2),
+        "retest_level": line_val,
+    }
+
+
 def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, Any]:
     """
     Build one clean parallel family (ascending OR descending), not both mixed.
@@ -242,39 +322,84 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
     direction = "NEUTRAL"
     strength = 40
     reasons = []
+    breakout_grade = None
 
     if primary and family_lines:
         lower = family_lines[0]["y_end"]
         upper = family_lines[-1]["y_end"]
         mid = (lower + upper) / 2.0
+        touch_note = {
+            "unconfirmed": "⚠️ only 2 touches -- unconfirmed, treat as tentative",
+            "confirmed": f"{primary['touches']} touches -- validated structure",
+            "crowded": f"{primary['touches']} touches -- crowded level, order flow may be depleted",
+        }.get(primary.get("quality"), f"{primary['touches']} touches")
+
         if family_kind == "ascending":
             if close >= lower:
                 direction = "BUY"
                 strength = 55 + min(25, primary["touches"] * 7)
-                reasons.append(f"Ascending family · {primary['touches']} touches on primary")
+                reasons.append(f"Ascending family · {touch_note}")
+                if primary.get("quality") == "unconfirmed":
+                    strength -= 12
+                elif primary.get("quality") == "crowded":
+                    strength -= 6
                 if close > mid:
                     reasons.append("Price in upper half of channel — bullish control")
                     strength += 10
                 else:
                     reasons.append("Price near support rail — watch bounce / break")
             else:
+                brk = _grade_breakout(df, primary, "support_break_down", n)
                 direction = "SELL"
-                strength = 60
-                reasons.append("Price broke below ascending family — structure failure")
+                if brk["strength"] == "confirmed":
+                    strength = 68
+                    reasons.append(f"Confirmed break below ascending support — "
+                                    f"{brk['penetration_atr']} ATR beyond, {brk['consecutive_closes']} closes, "
+                                    f"body {brk['body_ratio']}")
+                elif brk["strength"] == "developing":
+                    strength = 52
+                    reasons.append(f"Developing break below support ({brk['consecutive_closes']} close(s), "
+                                    f"{brk['penetration_atr']} ATR) — not yet confirmed, watch for retest "
+                                    f"at {brk['retest_level']:.5f}")
+                else:
+                    strength = 38
+                    reasons.append(f"Weak/wick break below support ({brk['penetration_atr']} ATR, "
+                                    f"body {brk['body_ratio']}) — likely noise, high fakeout risk")
+                reasons.append(touch_note)
+                breakout_grade = brk
         else:  # descending
             if close <= upper:
                 direction = "SELL"
                 strength = 55 + min(25, primary["touches"] * 7)
-                reasons.append(f"Descending family · {primary['touches']} touches on primary")
+                reasons.append(f"Descending family · {touch_note}")
+                if primary.get("quality") == "unconfirmed":
+                    strength -= 12
+                elif primary.get("quality") == "crowded":
+                    strength -= 6
                 if close < mid:
                     reasons.append("Price in lower half of channel — bearish control")
                     strength += 10
                 else:
                     reasons.append("Price near resistance rail — watch reject / break")
             else:
+                brk = _grade_breakout(df, primary, "resistance_break_up", n)
                 direction = "BUY"
-                strength = 60
-                reasons.append("Price broke above descending family — structure failure")
+                if brk["strength"] == "confirmed":
+                    strength = 68
+                    reasons.append(f"Confirmed break above descending resistance — "
+                                    f"{brk['penetration_atr']} ATR beyond, {brk['consecutive_closes']} closes, "
+                                    f"body {brk['body_ratio']}")
+                elif brk["strength"] == "developing":
+                    strength = 52
+                    reasons.append(f"Developing break above resistance ({brk['consecutive_closes']} close(s), "
+                                    f"{brk['penetration_atr']} ATR) — not yet confirmed, watch for retest "
+                                    f"at {brk['retest_level']:.5f}")
+                else:
+                    strength = 38
+                    reasons.append(f"Weak/wick break above resistance ({brk['penetration_atr']} ATR, "
+                                    f"body {brk['body_ratio']}) — likely noise, high fakeout risk")
+                reasons.append(touch_note)
+                breakout_grade = brk
 
     projections = _measured_move_projections(df, pivots, direction)
     vp = compute_volume_profile(df.iloc[:-1])
@@ -302,7 +427,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
 
     return {
         "direction": direction,
-        "strength": min(100, int(strength)),
+        "strength": max(0, min(100, int(strength))),
         "reasons": reasons,
         "family_kind": family_kind,
         "family_lines": family_lines,  # the clean parallel set
@@ -318,6 +443,9 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
         "middle_line": mid_line,
         "df": df,
         "mode": "channel" if channel else "lines",
+        "breakout_grade": breakout_grade,
+        "primary_quality": primary.get("quality") if primary else None,
+        "primary_touches": primary.get("touches") if primary else 0,
     }
 
 
@@ -396,6 +524,7 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
     mw = family.get("mw_pattern")
     projs = family.get("projections") or []
     vp = family.get("volume_profile") or {}
+    brk = family.get("breakout_grade")
 
     if direction == "BUY":
         # Entry: support rail or close
@@ -432,6 +561,18 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
         tp1 = liq[0] if liq else entry + atr * 1.5
         tp2 = liq[1] if len(liq) > 1 else (liq[0] if liq else entry + atr * 2.5)
 
+        order_type = "LIMIT" if entry < close - atr * 0.08 else "MARKET"
+        entry_note = None
+        # A breakout that isn't confirmed yet (weak/developing) shouldn't be
+        # chased at market -- route the entry to the break-and-retest zone
+        # instead, per standard breakout-trading practice.
+        if brk and brk["strength"] != "confirmed":
+            entry = brk["retest_level"]
+            order_type = "LIMIT"
+            entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
+                          f"broken rail at {entry:.5f} instead of chasing at market")
+            sl = min(sl, entry - atr * 0.5)
+
         risk = abs(entry - sl)
         reward = abs(tp1 - entry)
         rr = (reward / risk) if risk > 0 else 0.0
@@ -447,7 +588,9 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             "risk": risk,
             "reward": reward,
             "liquidity_tp1": "swing high / BSL" if liq else "measured move",
-            "order_type": "LIMIT" if entry < close - atr * 0.08 else "MARKET",
+            "order_type": order_type,
+            "entry_note": entry_note,
+            "breakout_grade": brk,
         }
 
     else:  # SELL
@@ -480,6 +623,15 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
         tp1 = liq[0] if liq else entry - atr * 1.5
         tp2 = liq[1] if len(liq) > 1 else (liq[0] if liq else entry - atr * 2.5)
 
+        order_type = "LIMIT" if entry > close + atr * 0.08 else "MARKET"
+        entry_note = None
+        if brk and brk["strength"] != "confirmed":
+            entry = brk["retest_level"]
+            order_type = "LIMIT"
+            entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
+                          f"broken rail at {entry:.5f} instead of chasing at market")
+            sl = max(sl, entry + atr * 0.5)
+
         risk = abs(sl - entry)
         reward = abs(entry - tp1)
         rr = (reward / risk) if risk > 0 else 0.0
@@ -495,18 +647,28 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             "risk": risk,
             "reward": reward,
             "liquidity_tp1": "swing low / SSL" if liq else "measured move",
-            "order_type": "LIMIT" if entry > close + atr * 0.08 else "MARKET",
+            "order_type": order_type,
+            "entry_note": entry_note,
+            "breakout_grade": brk,
         }
 
 
 def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
     if family.get("error"):
         return family["error"]
+    quality = family.get("primary_quality")
+    quality_tag = {
+        "unconfirmed": "⚠️ UNCONFIRMED (2 touches)",
+        "confirmed": "✅ CONFIRMED",
+        "crowded": "⚠️ CROWDED (5+ touches)",
+    }.get(quality, "")
     lines = [
         f"📐 TRENDLINE FAMILY  |  {symbol}",
         f"Family: {family.get('family_kind', '—').upper()}  |  "
         f"Direction: {family.get('direction')}  |  Strength: {family.get('strength', 0)}/100",
     ]
+    if quality_tag:
+        lines.append(f"Trendline validation: {quality_tag} · {family.get('primary_touches', 0)} touches")
     for r in family.get("reasons") or []:
         lines.append(f"  • {r}")
     n_rails = len(family.get("family_lines") or [])
@@ -524,6 +686,15 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
     vp = family.get("volume_profile")
     if vp:
         lines.append(f"POC {vp['poc_price']:.5f} | VA {vp['value_area_low']:.5f}–{vp['value_area_high']:.5f}")
+    brk = family.get("breakout_grade")
+    if brk:
+        grade_tag = {"confirmed": "✅ CONFIRMED", "developing": "🟡 DEVELOPING",
+                     "weak": "🔴 WEAK / LIKELY FAKEOUT"}.get(brk["strength"], brk["strength"])
+        lines.append(
+            f"Breakout grade: {grade_tag} · {brk['penetration_atr']} ATR beyond · "
+            f"{brk['consecutive_closes']} consecutive close(s) · body {brk['body_ratio']}"
+        )
+        lines.append(f"Retest zone: {brk['retest_level']:.5f}")
     pos = build_position_container(family)
     if pos:
         lines.append(
@@ -535,4 +706,6 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
         )
         if pos.get("liquidity_tp1"):
             lines.append(f"TP1 liquidity: {pos['liquidity_tp1']}")
+        if pos.get("entry_note"):
+            lines.append(f"⚠️ {pos['entry_note']}")
     return "\n".join(lines)
