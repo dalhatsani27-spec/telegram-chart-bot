@@ -49,13 +49,53 @@ def _score_smc(analysis: Dict) -> Dict[str, Any]:
         if n_ob:
             score += 10
             reasons.append(f"{n_ob} Order Block(s) present")
+
+    # Multi-timeframe alignment -- a pro doesn't size the same into "MIXED"
+    # HTF/LTF bias as into "ALIGNED". This was computed by institutional_analysis
+    # but never fed into the score before.
+    alignment = analysis.get("alignment", "MIXED")
+    if alignment.startswith("ALIGNED"):
+        score += 15
+        reasons.append(f"Timeframes aligned ({alignment})")
+    elif alignment.startswith("MOSTLY"):
+        score += 5
+        reasons.append(f"Timeframes mostly aligned ({alignment})")
+    elif alignment == "MIXED":
+        score -= 10
+        reasons.append("Timeframes MIXED — conflicting bias across the ladder")
+
+    # Structure permission (BOS/CHoCH/MSS) -- this is the actual SMC entry
+    # gate: a CHoCH alone is only a warning to wait, not a green light. The
+    # score used to ignore this entirely and could still call a setup valid
+    # while the structure engine explicitly said "WAIT".
+    allowed = analysis.get("structure_allowed")
+    structure_reason = analysis.get("structure_reason", "")
+    if allowed:
+        score += 15
+        reasons.append(f"Structure permission granted — {structure_reason}")
+    else:
+        score -= 20
+        reasons.append(f"Structure permission WITHHELD — {structure_reason}")
+
+    # IDM -> OB pairing is the actual ICT/SMC trade trigger (liquidity grab
+    # into an order block), not just "zones exist somewhere on the chart".
+    pairs = analysis.get("idm_ob_pairs") or []
+    matching_pair = next((p for p in pairs if p.get("direction") == direction), None)
+    if matching_pair:
+        score += 10
+        reasons.append("Clean IDM→OB pair aligned with direction")
+    elif pairs:
+        reasons.append("IDM→OB pair exists but doesn't match current direction")
+
     return {
         "strategy": ts.STRATEGY_SMC,
         "direction": direction,
-        "score": min(100, score),
+        "score": max(0, min(100, score)),
         "reasons": reasons,
         "analysis": analysis,
-        "valid": direction in ("BUY", "SELL") and score >= 55,
+        # Valid now requires structure permission, not just a score threshold --
+        # matches how the analysis itself is supposed to gate entries.
+        "valid": direction in ("BUY", "SELL") and score >= 55 and bool(allowed),
     }
 
 
@@ -129,8 +169,12 @@ def _score_silver_bullet(analysis: Dict) -> Dict[str, Any]:
     }
 
 
-def _score_trendline(symbol: str, timeframe: str = "30min") -> Dict[str, Any]:
+def _score_trendline(symbol: str, timeframe: str = None) -> Dict[str, Any]:
     """Full trendline family score with projections + position container."""
+    # Default to the user's chosen Entry Timeframe (Mobile Control Panel)
+    # instead of a hardcoded value, so on-demand Trendline calls match
+    # whatever the background scanner is also using.
+    timeframe = timeframe or ts.state.get_watch_timeframe()
     try:
         from trendline_family import (
             build_trendline_family,
@@ -175,7 +219,7 @@ def _score_trendline(symbol: str, timeframe: str = "30min") -> Dict[str, Any]:
         except Exception:
             pass
         family["htf_notes"] = htf_notes
-        family["timeframe"] = "30min"
+        family["timeframe"] = timeframe
         direction = family.get("direction", "NEUTRAL")
         score = int(family.get("strength", 0))
         report = format_trendline_report(family, symbol)
