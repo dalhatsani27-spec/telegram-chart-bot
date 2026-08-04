@@ -123,6 +123,40 @@ def _fvg_inside_window(fvgs: List[Dict], df: pd.DataFrame, window: Dict) -> List
     return [z for z in fvgs if int(z.get("index", 0)) >= cutoff]
 
 
+def _detect_displacement(df: pd.DataFrame, sweep: Optional[Dict], lookback: int = 12) -> Optional[Dict]:
+    """
+    Displacement = a strong, wide-bodied momentum candle moving away from the
+    sweep, in the direction of the anticipated reversal. Required step 2 of
+    the ICT Silver Bullet sequence (sweep -> displacement -> FVG -> retrace),
+    but until now the score never actually checked for it -- alignment alone
+    could pass without a real displacement leg ever happening.
+    """
+    if df is None or len(df) < lookback + 2 or sweep is None:
+        return None
+    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
+    if atr <= 0:
+        return None
+    recent = df.iloc[-lookback:]
+    want_dir = sweep["direction_hint"]  # BUY after SSL sweep, SELL after BSL sweep
+    best = None
+    for i in range(len(recent)):
+        row = recent.iloc[i]
+        body = row["Close"] - row["Open"]
+        body_ratio = abs(body) / atr
+        candle_dir = "BUY" if body > 0 else "SELL"
+        if candle_dir != want_dir:
+            continue
+        if body_ratio >= 1.3 and (best is None or body_ratio > best["body_ratio_atr"]):
+            best = {
+                "index": recent.index[i],
+                "body_ratio_atr": round(float(body_ratio), 2),
+                "direction": candle_dir,
+            }
+    if best:
+        best["note"] = f"Displacement candle ({best['body_ratio_atr']}x ATR body) confirms {best['direction']}"
+    return best
+
+
 def run_silver_bullet_analysis(symbol: str, timeframe: str = "5min") -> Dict[str, Any]:
     """
     Full Silver Bullet package on the given timeframe (default M5).
@@ -140,6 +174,7 @@ def run_silver_bullet_analysis(symbol: str, timeframe: str = "5min") -> Dict[str
     fvgs = detect_fvgs(df, min_gap_atr=0.10, max_zones=8)
     obs = detect_order_blocks(df, structure=structure, max_zones=5)
     sweep = _detect_liquidity_sweep(df)
+    displacement = _detect_displacement(df, sweep)
 
     inside = window is not None
     window_fvgs = _fvg_inside_window(fvgs, df, window) if inside else []
@@ -156,31 +191,50 @@ def run_silver_bullet_analysis(symbol: str, timeframe: str = "5min") -> Dict[str
         reasons.append(f"Outside SB window — next: {next_name} in ~{mins_left} min")
 
     if sweep:
-        score += 25
+        score += 20
         reasons.append(sweep["note"])
         direction = sweep["direction_hint"]
+    else:
+        reasons.append("No liquidity sweep detected — sequence step 1 missing")
+
+    if displacement:
+        score += 20
+        reasons.append(displacement["note"])
+    elif sweep:
+        reasons.append("No displacement candle after the sweep — sequence step 2 missing, likely too early")
 
     if window_fvgs:
-        score += 25
+        score += 15
         z = window_fvgs[0]
         reasons.append(f"FVG present inside window ({z.get('bias', '')})")
         if direction == "NEUTRAL":
             direction = "BUY" if str(z.get("bias", "")).upper() in ("BULLISH", "BUY") else "SELL"
     elif fvgs and inside:
-        score += 10
+        score += 8
         reasons.append("FVG exists but may be outside strict window bars")
 
+    mss_confirmed = False
     if structure and structure.get("bias"):
+        event = structure.get("last_event")
+        event_bias = structure.get("event_bias")
+        if event == "MSS" and event_bias:
+            mss_dir = "BUY" if event_bias == "BULLISH" else "SELL"
+            if mss_dir == direction:
+                mss_confirmed = True
+                score += 15
+                reasons.append(f"MSS confirms {event_bias} shift — full sequence intact")
         if structure["bias"] == "BULLISH" and direction == "BUY":
-            score += 15
+            score += 10
             reasons.append("Structure aligned bullish")
         elif structure["bias"] == "BEARISH" and direction == "SELL":
-            score += 15
+            score += 10
             reasons.append("Structure aligned bearish")
         else:
             reasons.append(f"Structure: {structure.get('note', structure.get('bias'))}")
 
-    valid = inside and score >= 55 and direction in ("BUY", "SELL")
+    # Full ICT sequence requires the sweep -> displacement chain, not just a
+    # score threshold reached through alignment alone.
+    valid = inside and score >= 55 and direction in ("BUY", "SELL") and sweep is not None and displacement is not None
 
     return {
         "symbol": symbol,
@@ -191,6 +245,8 @@ def run_silver_bullet_analysis(symbol: str, timeframe: str = "5min") -> Dict[str
         "next_window": next_name,
         "minutes_to_next": mins_left,
         "sweep": sweep,
+        "displacement": displacement,
+        "mss_confirmed": mss_confirmed,
         "fvgs": fvgs,
         "window_fvgs": window_fvgs,
         "order_blocks": obs,
