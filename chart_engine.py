@@ -133,31 +133,28 @@ def _draw_zone(
         )
 
 
-def _draw_session_separators(ax, chart_df: pd.DataFrame, chart_len: int):
+def _draw_session_separators(ax, chart_df: pd.DataFrame, chart_len: int, minimal: bool = True):
     """
-    Draw vertical session separators exactly like TradingView.
-    Marks the open of Asian, London and New York sessions.
+    Session separators. minimal=True (default): thin low-alpha lines, no labels
+    so they don't fight the analysis. minimal=False: TradingView-style with labels.
     """
     if chart_df is None or chart_df.empty:
         return
 
     idx = _to_naive_utc(chart_df.index)
-    session_starts = {"Asian": 0, "London": 7, "NewYork": 12}
-    colors = {
-        "Asian": "#546e7a",
-        "London": "#5c6bc0",
-        "NewYork": "#26a69a",
-    }
+    # Only London + New York opens — skip Asian to cut clutter
+    session_starts = {"London": 7, "NewYork": 12} if minimal else {"Asian": 0, "London": 7, "NewYork": 12}
+    colors = {"Asian": "#546e7a", "London": "#5c6bc0", "NewYork": "#26a69a"}
     labels_drawn = set()
+    lw = 0.6 if minimal else 1.1
+    alpha = 0.35 if minimal else 0.85
 
     for i, ts in enumerate(idx):
-        h = ts.hour
-        m = ts.minute
-        # Only mark the first bar of each session hour
+        h, m = ts.hour, ts.minute
         for name, start_h in session_starts.items():
             if h == start_h and m == 0:
-                ax.axvline(i, color=colors[name], linestyle="--", linewidth=1.1, alpha=0.85, zorder=1)
-                if name not in labels_drawn:
+                ax.axvline(i, color=colors[name], linestyle=":", linewidth=lw, alpha=alpha, zorder=1)
+                if not minimal and name not in labels_drawn:
                     ax.text(
                         i + 0.3,
                         ax.get_ylim()[1] * 0.995 if ax.get_ylim()[1] else chart_df["High"].max(),
@@ -167,7 +164,7 @@ def _draw_session_separators(ax, chart_df: pd.DataFrame, chart_len: int):
                         rotation=90,
                         va="top",
                         ha="left",
-                        alpha=0.95,
+                        alpha=0.9,
                         zorder=9,
                     )
                     labels_drawn.add(name)
@@ -740,46 +737,70 @@ def generate_trendline_map(
     )
     ax = axlist[0]
 
-    # Draw individual family lines (extra up/down beyond channel)
-    def _draw_tl(tl, color, lw=1.2, alpha=0.75):
-        x0 = int(tl["x0"]) - offset
-        x1 = chart_len - 1
-        y0 = _line_at(tl, max(0, int(tl["x0"])))
-        # use stored endpoints
-        xs = [max(0, int(tl["x0"]) - offset), chart_len - 1]
-        ys = [
-            _line_at(tl, max(int(tl["x0"]), 0)),
-            float(tl.get("y_end", tl["y1"])),
-        ]
-        if xs[0] < chart_len:
-            ax.plot(xs, ys, color=color, linewidth=lw, alpha=alpha, zorder=4)
+    # --- ALWAYS map pivot points (structure anchors) ---
+    pivots = family.get("pivots") or []
+    if not pivots:
+        try:
+            from market_structure import zigzag_swings
+            pivots = zigzag_swings(df, depth=4, deviation_atr=0.28)
+        except Exception:
+            pivots = []
+    # Full HH/HL/LH/LL labeling + zigzag skeleton
+    _draw_swings(ax, pivots, offset, chart_len)
+    # Emphasize every visible pivot with a clear marker
+    for s in pivots:
+        idx = int(s.get("index", -1)) - offset
+        if not (0 <= idx < chart_len):
+            continue
+        price = float(s["price"])
+        is_high = s.get("type") == "high"
+        color = "#ffeb3b" if is_high else "#00e5ff"
+        ax.scatter([idx], [price], s=42, c=color, edgecolors="#000000", linewidths=0.6, zorder=10)
 
+    # Clean parallel family only (MT5-style rails — anchored on pivots)
     def _line_at(tl, x):
         x0, y0, x1, y1 = tl["x0"], tl["y0"], tl["x1"], tl["y1"]
         if x1 == x0:
             return y0
         return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
 
-    for tl in (family.get("uptrends") or [])[:3]:
-        _draw_tl(tl, "#26a69a", 1.3)
-    for tl in (family.get("downtrends") or [])[:3]:
-        _draw_tl(tl, "#ef5350", 1.3)
+    family_kind = family.get("family_kind", "")
+    rail_color = "#26a69a" if family_kind == "ascending" else "#ef5350"
+    rails = family.get("family_lines") or []
+    if not rails:
+        if family.get("channel"):
+            rails = [family["channel"].get("lower"), family["channel"].get("upper")]
+            rails = [r for r in rails if r]
+    for i, tl in enumerate(rails[:5]):
+        if not tl:
+            continue
+        xs = [max(0, int(tl["x0"]) - offset), chart_len - 1]
+        ys = [_line_at(tl, max(int(tl["x0"]), 0)), float(tl.get("y_end", tl.get("y1", 0)))]
+        if xs[0] < chart_len:
+            lw = 1.8 if i in (0, len(rails) - 1) else 1.2
+            ax.plot(xs, ys, color=rail_color, linewidth=lw, alpha=0.92, zorder=4)
+        # Mark the two pivot anchors of the primary rail
+        if i == 0 or (family_kind and i == 0):
+            for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
+                if ax_key in tl and ay_key in tl:
+                    px = int(tl[ax_key]) - offset
+                    if 0 <= px < chart_len:
+                        ax.scatter([px], [float(tl[ay_key])], s=55, c=rail_color,
+                                   edgecolors="#ffffff", linewidths=1.0, zorder=11, marker="D")
 
-    # Projections
-    for p in (family.get("projections") or []):
-        ax.axhline(p["price"], color="#7e57c2", linestyle="-.", linewidth=1.15, alpha=0.85)
-        ax.text(chart_len * 0.02, p["price"], p["label"], fontsize=7, color="#ce93d8", va="bottom")
+    # Projections — subtle
+    for p in (family.get("projections") or [])[:3]:
+        ax.axhline(p["price"], color="#7e57c2", linestyle="-.", linewidth=0.9, alpha=0.65)
+        ax.text(chart_len * 0.01, p["price"], p["label"], fontsize=6.5, color="#b39ddb", va="bottom", alpha=0.85)
 
-    # Volume Profile POC + VA
+    # Volume Profile POC only (VA band lighter)
     vp = family.get("volume_profile") or setup.get("volume_profile")
     if vp:
         if vp.get("poc_price"):
-            ax.axhline(vp["poc_price"], color=COLORS["poc"], linestyle=":", linewidth=1.4, alpha=0.9)
-            ax.text(chart_len * 0.85, vp["poc_price"], "POC", fontsize=7, color=COLORS["poc"], va="bottom")
+            ax.axhline(vp["poc_price"], color=COLORS["poc"], linestyle=":", linewidth=1.2, alpha=0.75)
+            ax.text(chart_len * 0.88, vp["poc_price"], "POC", fontsize=6.5, color=COLORS["poc"], va="bottom")
         if vp.get("value_area_low") is not None and vp.get("value_area_high") is not None:
-            ax.axhspan(vp["value_area_low"], vp["value_area_high"], facecolor="#ff9800", alpha=0.08, zorder=1)
-            ax.text(chart_len * 0.02, vp["value_area_high"], "VA High", fontsize=6, color="#ffb74d", va="bottom")
-            ax.text(chart_len * 0.02, vp["value_area_low"], "VA Low", fontsize=6, color="#ffb74d", va="top")
+            ax.axhspan(vp["value_area_low"], vp["value_area_high"], facecolor="#ff9800", alpha=0.05, zorder=1)
 
     # Position container
     pos = setup.get("position") or family.get("position")
