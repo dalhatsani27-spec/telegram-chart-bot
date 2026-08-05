@@ -176,6 +176,34 @@ def run_silver_bullet_analysis(symbol: str, timeframe: str = "5min") -> Dict[str
     sweep = _detect_liquidity_sweep(df)
     displacement = _detect_displacement(df, sweep)
 
+    # Enrich with Institutional Structure Engine when enough bars (dynamic
+    # liquidity / manipulation / acceptance — same pipeline as Trendline/AMD)
+    ise = None
+    if len(df) >= 60:
+        try:
+            from structure_engine import run_structure_engine
+            ise = run_structure_engine(df)
+            if ise and not ise.get("error"):
+                # Prefer ISE sweep when local detector missed it
+                if sweep is None and ise.get("sweep"):
+                    sw = ise["sweep"]
+                    sweep = {
+                        "side": sw.get("side", "BSL"),
+                        "level": sw.get("level"),
+                        "direction_hint": sw.get("direction_hint", "NEUTRAL"),
+                        "note": sw.get("note", "ISE liquidity sweep"),
+                    }
+                # Use ISE impulse as displacement confirmation when candle scan missed
+                if displacement is None and ise.get("impulse") and not ise["impulse"].get("weak"):
+                    imp = ise["impulse"]
+                    displacement = {
+                        "direction": imp["direction"],
+                        "body_ratio_atr": imp.get("length_atr", 0),
+                        "note": f"ISE impulse displacement ({imp['length_atr']}x ATR / {imp['bars']} bars)",
+                    }
+        except Exception:
+            ise = None
+
     inside = window is not None
     window_fvgs = _fvg_inside_window(fvgs, df, window) if inside else []
 
@@ -232,6 +260,22 @@ def run_silver_bullet_analysis(symbol: str, timeframe: str = "5min") -> Dict[str
         else:
             reasons.append(f"Structure: {structure.get('note', structure.get('bias'))}")
 
+    # ISE acceptance boost when available
+    if ise and not ise.get("error"):
+        acc = ise.get("acceptance") or {}
+        man = ise.get("manipulation") or {}
+        if man.get("confirmed"):
+            score += 5
+            reasons.append("ISE manipulation confirmed")
+        if acc.get("accepted"):
+            score += 8
+            reasons.append(f"ISE acceptance: {acc.get('note', 'held')}")
+            if ise.get("direction") in ("BUY", "SELL") and direction == "NEUTRAL":
+                direction = ise["direction"]
+        if ise.get("valid") and ise.get("direction") == direction:
+            score = min(100, score + 5)
+            reasons.append("ISE full path aligned with SB direction")
+
     # Full ICT sequence requires the sweep -> displacement chain, not just a
     # score threshold reached through alignment alone.
     valid = inside and score >= 55 and direction in ("BUY", "SELL") and sweep is not None and displacement is not None
@@ -256,6 +300,7 @@ def run_silver_bullet_analysis(symbol: str, timeframe: str = "5min") -> Dict[str
         "valid": valid,
         "reasons": reasons,
         "df": df,
+        "ise": ise,
     }
 
 
