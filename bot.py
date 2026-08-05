@@ -38,31 +38,68 @@ from charts import (
 )
 
 # ==========================================
-# 1. FLASK WEB SERVER (local only -- EA talks to 127.0.0.1)
+# 1. FLASK WEB SERVER (EA + Render health / keep-alive)
 # ==========================================
 app = Flask(__name__)
 
 @app.route('/')
+@app.route('/health')
+@app.route('/ping')
 def health_check():
-    return "Price-Action Engine + MT5 Control Center Active", 200
+    """Render and external monitors hit these to keep the free tier awake."""
+    return {
+        "status": "ok",
+        "service": "Price-Action Engine + MT5 Control Center",
+        "ts": datetime.utcnow().isoformat() + "Z",
+    }, 200
 
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+def _public_base_url():
+    """Resolve the public URL Render assigned to this service."""
+    explicit = (os.environ.get("RENDER_EXTERNAL_URL")
+                or os.environ.get("KEEP_ALIVE_URL")
+                or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    host = (os.environ.get("RENDER_EXTERNAL_HOSTNAME") or "").strip()
+    if host:
+        return f"https://{host}"
+    return None
 
 def keep_alive_ping():
-    """Only relevant when deployed on Render (free tier sleeps after inactivity).
-    No-op locally/Termux since RENDER_EXTERNAL_URL won't be set there."""
-    if not RENDER_EXTERNAL_URL:
-        return
+    """
+    Self-ping so Render free-tier does not spin down from idle.
+
+    Render free web services sleep after ~15 min with no HTTP traffic.
+    We hit /health every 4 minutes. Also supports an external KEEP_ALIVE_URL
+    if self-DNS is unreliable.
+
+    Note: if the process is already fully asleep, only an *external* ping
+    (UptimeRobot / cron-job.org) can wake it — set that to hit /health every
+    5 minutes as a backup. Paid Render instances do not need this.
+    """
     import requests
+    interval = int(os.environ.get("KEEP_ALIVE_INTERVAL_SEC", "240"))  # 4 min
+    # Wait for Flask to bind before first ping
+    time.sleep(20)
     while True:
-        time.sleep(600)
-        try:
-            requests.get(RENDER_EXTERNAL_URL, timeout=10)
-        except Exception:
-            pass
+        base = _public_base_url()
+        targets = []
+        if base:
+            targets.extend([f"{base}/health", f"{base}/", f"{base}/ping"])
+        # Local loopback always works while the process is up (keeps Flask busy)
+        port = int(os.environ.get("PORT", "5000"))
+        targets.append(f"http://127.0.0.1:{port}/health")
+        for url in targets:
+            try:
+                requests.get(url, timeout=12)
+            except Exception:
+                pass
+        time.sleep(interval)
 
-threading.Thread(target=keep_alive_ping, daemon=True).start()
+threading.Thread(target=keep_alive_ping, daemon=True, name="keep-alive").start()
 
+# EA routes (poll / report / dashboard)
+import runtime as engine_api
 engine_api.register_routes(app)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -1270,12 +1307,12 @@ engine.register_notifiers(auto_fired=on_auto_fired, approval_request=on_approval
 engine._notify_callbacks["report_event"] = on_report_event
 
 # ==========================================
-# 7. ENTRYPOINT -- runs Flask (for the EA) and Telegram polling together,
-#    all local, no keep-alive ping needed since nothing sleeps on your PC.
+# 7. ENTRYPOINT -- Flask (EA + health) + Telegram polling
 # ==========================================
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
+    # threaded=True so /health keep-alive and EA poll do not block each other
+    app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 def run_telegram_bot():
     global TELEGRAM_LOOP, TELEGRAM_APP
