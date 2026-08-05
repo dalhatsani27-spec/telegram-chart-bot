@@ -526,7 +526,7 @@ def generate_smc_map(
     swings = zones.get("swings") or (structure.get("swings") if structure else None)
     if not swings:
         try:
-            from structure_engine import zigzag_swings
+            from market_structure import zigzag_swings
             swings = zigzag_swings(df, depth=4, deviation_atr=0.28)
         except Exception:
             swings = []
@@ -698,7 +698,7 @@ def generate_amd_map(
     swings = analysis.get("swings")
     if not swings:
         try:
-            from structure_engine import zigzag_swings
+            from market_structure import zigzag_swings
             swings = zigzag_swings(df, depth=4, deviation_atr=0.28)
         except Exception:
             swings = []
@@ -835,7 +835,7 @@ def generate_trendline_map(
     pivots = family.get("pivots") or []
     if not pivots:
         try:
-            from structure_engine import zigzag_swings
+            from market_structure import zigzag_swings
             pivots = zigzag_swings(df, depth=4, deviation_atr=0.28)
         except Exception:
             pivots = []

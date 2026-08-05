@@ -1,8 +1,4 @@
 """
-strategy.py — strategy routing, scoring, hybrid, trade tickets, confirmation.
-"""
-from __future__ import annotations
-"""
 strategy_engine.py
 ==================
 Routes analysis and signal generation according to:
@@ -10,20 +6,20 @@ Routes analysis and signal generation according to:
   - HYBRID mode  → all enabled strategies, pick best confluence, explain why
 """
 
+from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-import runtime as ts
-import data as mt5_data
-from analysis import run_topdown_analysis, format_institutional_report
-from analysis import run_amd_analysis, format_amd_report
-from analysis import (
+import trade_state as ts
+from institutional_analysis import run_topdown_analysis, format_institutional_report
+from amd_analysis import run_amd_analysis, format_amd_report
+from silver_bullet import (
     run_silver_bullet_analysis,
     format_silver_bullet_report,
     build_silver_bullet_ticket,
 )
-# charts imported lazily where needed
-import data
+from chart_engine import generate_smc_map, generate_amd_map, generate_trendline_map, generate_ticket_chart
+import mt5_data
 
 
 def _score_smc(analysis: Dict) -> Dict[str, Any]:
@@ -251,7 +247,7 @@ def _score_trendline(symbol: str, timeframe: str = None) -> Dict[str, Any]:
     # whatever the background scanner is also using.
     timeframe = timeframe or ts.state.get_watch_timeframe()
     try:
-        from analysis import (
+        from trendline_family import (
             build_trendline_family,
             build_position_container,
             format_trendline_report,
@@ -316,7 +312,7 @@ def _score_trendline(symbol: str, timeframe: str = None) -> Dict[str, Any]:
         # HTF context (details only — final map stays M30)
         htf_notes = []
         try:
-            from structure_engine import analyse_structure
+            from market_structure import analyse_structure
             for tf, lab in (("1h", "H1"), ("4h", "H4")):
                 hdf = mt5_data.fetch_candles(symbol, tf, count=120)
                 if hdf is not None and len(hdf) >= 40:
@@ -358,7 +354,7 @@ def _score_trendline(symbol: str, timeframe: str = None) -> Dict[str, Any]:
 def _attach_projections(result: Dict[str, Any], symbol: str) -> Dict[str, Any]:
     """Add measured-move projections + optional position for any strategy chart."""
     try:
-        from analysis import build_trendline_family, build_position_container
+        from trendline_family import build_trendline_family, build_position_container
         analysis = result.get("analysis") or {}
         df = None
         if isinstance(analysis, dict):
@@ -546,268 +542,3 @@ def format_trade_ticket(result: Dict[str, Any], symbol: str) -> str:
     lines.append("══════════════════════════")
     lines.append("Enter this trade manually on your phone.")
     return "\n".join(lines)
-"""
-trade_setup.py
-================
-Takes a confirmation_engine fire decision + the detected pattern and computes
-the final entry/SL/TP1/TP2 numbers. Kept separate from confirmation_engine.py
-so "when do we act" and "what are the numbers" stay independently testable.
-
-Rules carried over from the earlier design:
-  - SL is structural: bound to the pattern's own footprint (its trigger_line
-    span), not an arbitrary fixed lookback -- avoids grabbing a flagpole's
-    origin and producing an oversized stop.
-  - TP for flags/pennants uses the measured-move (flagpole height), ANCHORED
-    TO THE TRIGGER PRICE (not the actual fill price) -- so a stretched/Fib
-    entry doesn't get an inflated target just because the fill was late.
-  - TP for everything else uses a 1.5R / 3R risk-multiple off the SL distance.
-"""
-
-
-def _pattern_atr(df):
-    if 'ATR' in df.columns and not df['ATR'].isna().all():
-        return float(df['ATR'].iloc[-1])
-    return float((df['High'] - df['Low']).tail(14).mean())
-
-
-def build_trade_setup(df, pattern, fire_decision):
-    """
-    df: OHLC dataframe used for the scan (with ATR column).
-    pattern: the DetectedPattern that was confirmed.
-    fire_decision: dict from ConfirmationEngine.step() with action in
-                   {"FIRE_MARKET","FIRE_LIMIT"}.
-
-    Returns dict: entry, order_type, sl, tp1, tp2, trigger_price, bias, pattern_name
-    """
-    entry = fire_decision["fire_price"]
-    order_type = fire_decision["order_type"]
-    bias = pattern.bias
-    trigger = pattern.trigger_price
-    atr = _pattern_atr(df)
-
-    span_xs = [p[0] for p in (pattern.trigger_line or [])]
-    n = len(df)
-    if span_xs:
-        window_start = max(0, min(span_xs) - 3)
-    else:
-        window_start = max(0, n - 60)
-    local_window = df.iloc[window_start:]
-    resistance_level = float(local_window['High'].max())
-    support_level = float(local_window['Low'].min())
-
-    if bias == "BUY":
-        sl = min(entry, support_level) - atr * 0.5
-        risk = max(abs(entry - sl), atr * 0.25)
-        tp1 = entry + risk * 1.5
-        tp2 = entry + risk * 3.0
-    else:
-        sl = max(entry, resistance_level) + atr * 0.5
-        risk = max(abs(sl - entry), atr * 0.25)
-        tp1 = entry - risk * 1.5
-        tp2 = entry - risk * 3.0
-
-    if "Flag" in pattern.name or "Pennant" in pattern.name:
-        pole_pts = [p for p in (pattern.key_points or []) if "Pole" in p[2]]
-        if len(pole_pts) >= 2:
-            pole_height = abs(pole_pts[1][1] - pole_pts[0][1])
-            if pole_height > 0:
-                # Anchored to the TRIGGER, not the fill price.
-                if bias == "BUY":
-                    tp1 = trigger + pole_height * 0.618
-                    tp2 = trigger + pole_height * 1.0
-                else:
-                    tp1 = trigger - pole_height * 0.618
-                    tp2 = trigger - pole_height * 1.0
-
-    return {
-        "entry": entry, "order_type": order_type, "bias": bias,
-        "sl": sl, "tp1": tp1, "tp2": tp2,
-        "trigger_price": trigger, "pattern_name": pattern.name,
-        "category": pattern.category, "confidence": pattern.confidence,
-        "note": pattern.note, "expiry_bars": fire_decision.get("expiry_bars"),
-    }
-"""
-confirmation_engine.py
-================
-Turns a detected chart pattern into an actual "fire or wait" decision.
-
-Rule (agreed design):
-  1. A pattern only fires on a MARUBOZU candle closing beyond the trigger
-     (body >= 70% of range, reversal-side wick < 15% of range, range >= 0.8x ATR).
-  2. If that marubozu closes within 2x ATR of the trigger -> fire at market,
-     immediately.
-  3. If it's already stretched beyond 2x ATR -> don't chase. Compute a
-     Fibonacci discount/premium zone (50%-79% retracement) on the trigger->
-     extreme leg, and fire a LIMIT order at the 61.8% anchor within that
-     zone, with a 15-bar expiry.
-  4. If no marubozu appears within 20 bars of a pattern becoming valid, the
-     watch is abandoned (stale).
-
-This module only decides WHEN and AT WHAT PRICE/ORDER-TYPE to act. SL/TP
-math and what to actually DO with that decision (auto-fire / ask approval /
-send a manual mobile ticket) live in the caller (bot.py's trade layer).
-
-Known simplification: if price reverses hard against a still-WATCHING
-pattern without a scan ever confirming it, the watch is cleared naturally
-next time scan_all_patterns() stops returning that pattern (structure has
-changed), rather than via an explicit "opposite invalidation" check here.
-"""
-
-STALE_BARS = 20
-FIB_WAIT_BARS = 15
-MARUBOZU_BODY_RATIO = 0.70
-MARUBOZU_WICK_RATIO = 0.15
-MARUBOZU_ATR_RATIO = 0.8
-FAR_ATR_MULTIPLE = 2.0
-FIB_ZONE_LOW = 0.50
-FIB_ZONE_HIGH = 0.79
-FIB_ENTRY_ANCHOR = 0.618
-
-from analysis import detect_confirmation_candle
-
-
-def is_marubozu(o, h, l, c, atr):
-    rng = h - l
-    if rng <= 0 or atr is None or atr <= 0:
-        return False
-    if rng < MARUBOZU_ATR_RATIO * atr:
-        return False
-    body = abs(c - o)
-    if body / rng < MARUBOZU_BODY_RATIO:
-        return False
-    reversal_wick = (h - c) if c >= o else (c - l)
-    if reversal_wick / rng > MARUBOZU_WICK_RATIO:
-        return False
-    return True
-
-
-def fib_discount_premium_zone(trigger_price, extreme_price, bias):
-    """
-    Returns (zone_low, zone_high, entry_anchor_price) for the pullback zone
-    on the trigger->extreme breakout leg.
-    """
-    if bias == "BUY":
-        leg = extreme_price - trigger_price
-        zone_low = extreme_price - leg * FIB_ZONE_HIGH
-        zone_high = extreme_price - leg * FIB_ZONE_LOW
-        entry = extreme_price - leg * FIB_ENTRY_ANCHOR
-    else:
-        leg = trigger_price - extreme_price
-        zone_high = extreme_price + leg * FIB_ZONE_HIGH
-        zone_low = extreme_price + leg * FIB_ZONE_LOW
-        entry = extreme_price + leg * FIB_ENTRY_ANCHOR
-    return zone_low, zone_high, entry
-
-
-def check_current_confirmation(df, trigger_price, bias):
-    """
-    One-off check of the LATEST candle against a trigger -- used by the
-    Telegram informational display, which doesn't need the stateful
-    bars_watched/stale-timeout tracking the live polling engine uses. Just
-    answers: "as of right now, is this confirmed, and by what?"
-
-    Returns (confirmed: bool, confirmation_type: str or None).
-    """
-    if len(df) < 3:
-        return False, None
-    o = float(df['Open'].iloc[-1]); h = float(df['High'].iloc[-1])
-    l = float(df['Low'].iloc[-1]);  c = float(df['Close'].iloc[-1])
-    atr = float(df['ATR'].iloc[-1]) if 'ATR' in df.columns else None
-
-    broke = (c > trigger_price) if bias == "BUY" else (c < trigger_price)
-    if not broke:
-        return False, None
-
-    if is_marubozu(o, h, l, c, atr):
-        return True, "Marubozu"
-
-    candle_confirmed, candle_name = detect_confirmation_candle(df, bias)
-    if candle_confirmed:
-        return True, candle_name
-
-    return False, None
-
-
-class ConfirmationEngine:
-    """Holds per (symbol, timeframe) watch state across successive polls."""
-
-    def __init__(self):
-        self._watches = {}  # (symbol, tf) -> dict
-
-    def reset(self, symbol, tf):
-        self._watches.pop((symbol, tf), None)
-
-    def step(self, symbol, tf, df, best_pattern):
-        """
-        df: cleaned OHLC dataframe (with 'ATR' column), chronological, latest
-            bar last.
-        best_pattern: the top result from patterns.scan_all_patterns(df), or
-            None if nothing currently qualifies.
-
-        Returns a dict:
-          {"action": "NONE"|"FIRE_MARKET"|"FIRE_LIMIT",
-           "pattern": DetectedPattern or None,
-           "fire_price": float or None,
-           "order_type": "MARKET"|"LIMIT"|None,
-           "expiry_bars": int or None,
-           "reason": str}
-        """
-        key = (symbol, tf)
-
-        if best_pattern is None:
-            self._watches.pop(key, None)
-            return {"action": "NONE", "pattern": None, "fire_price": None,
-                    "order_type": None, "expiry_bars": None, "reason": "no_pattern"}
-
-        watch = self._watches.get(key)
-        if watch is None or watch["pattern_name"] != best_pattern.name or watch["bias"] != best_pattern.bias:
-            watch = {"pattern_name": best_pattern.name, "bias": best_pattern.bias,
-                      "trigger_price": best_pattern.trigger_price, "bars_watched": 0, "state": "WATCHING"}
-            self._watches[key] = watch
-        else:
-            watch["trigger_price"] = best_pattern.trigger_price  # keep fresh for sloped necklines (H&S)
-
-        if watch["state"] != "WATCHING":
-            return {"action": "NONE", "pattern": best_pattern, "fire_price": None,
-                    "order_type": None, "expiry_bars": None, "reason": "already_resolved"}
-
-        watch["bars_watched"] += 1
-        if watch["bars_watched"] > STALE_BARS:
-            self._watches.pop(key, None)
-            return {"action": "NONE", "pattern": best_pattern, "fire_price": None,
-                    "order_type": None, "expiry_bars": None, "reason": "stale_pattern_timeout"}
-
-        o = float(df['Open'].iloc[-1]); h = float(df['High'].iloc[-1])
-        l = float(df['Low'].iloc[-1]);  c = float(df['Close'].iloc[-1])
-        atr = float(df['ATR'].iloc[-1]) if 'ATR' in df.columns else None
-        trigger = watch["trigger_price"]
-        bias = watch["bias"]
-
-        broke = (c > trigger) if bias == "BUY" else (c < trigger)
-        if not broke:
-            return {"action": "NONE", "pattern": best_pattern, "fire_price": None,
-                    "order_type": None, "expiry_bars": None, "reason": "not_broken_yet"}
-
-        if not is_marubozu(o, h, l, c, atr):
-            candle_confirmed, candle_name = detect_confirmation_candle(df, bias)
-            if not candle_confirmed:
-                return {"action": "NONE", "pattern": best_pattern, "fire_price": None,
-                        "order_type": None, "expiry_bars": None, "reason": "broke_but_not_confirmed"}
-            confirmation_label = candle_name
-        else:
-            confirmation_label = "Marubozu"
-
-        # Confirmed (either a marubozu close or a qualifying candlestick pattern) -- resolve this watch (one-shot fire).
-        watch["state"] = "DONE"
-        distance = abs(c - trigger)
-
-        if atr and distance <= FAR_ATR_MULTIPLE * atr:
-            return {"action": "FIRE_MARKET", "pattern": best_pattern, "fire_price": c,
-                    "order_type": "MARKET", "expiry_bars": None,
-                    "reason": f"{confirmation_label}_confirmed_near_trigger"}
-
-        extreme = h if bias == "BUY" else l
-        _, _, entry_anchor = fib_discount_premium_zone(trigger, extreme, bias)
-        return {"action": "FIRE_LIMIT", "pattern": best_pattern, "fire_price": entry_anchor,
-                "order_type": "LIMIT", "expiry_bars": FIB_WAIT_BARS,
-                "reason": f"{confirmation_label}_confirmed_stretched_fib_pullback"}

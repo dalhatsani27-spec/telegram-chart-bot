@@ -13,32 +13,30 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from openai import OpenAI
 
-import data as mt5_data
-import analysis as htf_context
-import runtime as ts
-import runtime as engine
-from analysis import (
-    scan_all_patterns,
-    _atr as pattern_atr,
-    run_topdown_analysis,
-    format_institutional_report,
-    run_amd_analysis,
-    format_amd_report,
-    run_silver_bullet_analysis,
-    format_silver_bullet_report,
-)
-from data import compute_volume_profile
-from strategy import check_current_confirmation, run_strategy_for_symbol, format_trade_ticket
-from structure_engine import structure_trade_permission
-from charts import (
+from patterns import scan_all_patterns, _atr as pattern_atr
+from volume_profile import compute_volume_profile
+from confirmation_engine import check_current_confirmation
+import htf_context
+import mt5_data
+import legacy_data
+import trade_state as ts
+import engine
+import engine_api
+import ai_throttle
+from institutional_analysis import run_topdown_analysis, format_institutional_report
+from amd_analysis import run_amd_analysis, format_amd_report
+from market_structure import structure_trade_permission
+from chart_engine import (
     generate_smc_map,
     generate_amd_map,
     generate_trendline_map,
     generate_ticket_chart,
 )
+from silver_bullet import run_silver_bullet_analysis, format_silver_bullet_report
+from strategy_engine import run_strategy_for_symbol, format_trade_ticket
 
 # ==========================================
-# 1. FLASK WEB SERVER (EA + Render health / keep-alive)
+# 1. FLASK WEB SERVER (local only -- EA talks to 127.0.0.1)
 # ==========================================
 app = Flask(__name__)
 
@@ -46,7 +44,6 @@ app = Flask(__name__)
 @app.route('/health')
 @app.route('/ping')
 def health_check():
-    """Render and external monitors hit these to keep the free tier awake."""
     return {
         "status": "ok",
         "service": "Price-Action Engine + MT5 Control Center",
@@ -54,7 +51,6 @@ def health_check():
     }, 200
 
 def _public_base_url():
-    """Resolve the public URL Render assigned to this service."""
     explicit = (os.environ.get("RENDER_EXTERNAL_URL")
                 or os.environ.get("KEEP_ALIVE_URL")
                 or "").strip().rstrip("/")
@@ -66,27 +62,16 @@ def _public_base_url():
     return None
 
 def keep_alive_ping():
-    """
-    Self-ping so Render free-tier does not spin down from idle.
-
-    Render free web services sleep after ~15 min with no HTTP traffic.
-    We hit /health every 4 minutes. Also supports an external KEEP_ALIVE_URL
-    if self-DNS is unreliable.
-
-    Note: if the process is already fully asleep, only an *external* ping
-    (UptimeRobot / cron-job.org) can wake it — set that to hit /health every
-    5 minutes as a backup. Paid Render instances do not need this.
-    """
+    """Ping /health every 4 min so Render free-tier stays awake while process is up.
+    Also set an external monitor (UptimeRobot) on /health every 5 min to wake from full sleep."""
     import requests
-    interval = int(os.environ.get("KEEP_ALIVE_INTERVAL_SEC", "240"))  # 4 min
-    # Wait for Flask to bind before first ping
+    interval = int(os.environ.get("KEEP_ALIVE_INTERVAL_SEC", "240"))
     time.sleep(20)
     while True:
         base = _public_base_url()
         targets = []
         if base:
             targets.extend([f"{base}/health", f"{base}/", f"{base}/ping"])
-        # Local loopback always works while the process is up (keeps Flask busy)
         port = int(os.environ.get("PORT", "5000"))
         targets.append(f"http://127.0.0.1:{port}/health")
         for url in targets:
@@ -98,8 +83,6 @@ def keep_alive_ping():
 
 threading.Thread(target=keep_alive_ping, daemon=True, name="keep-alive").start()
 
-# EA routes (poll / report / dashboard)
-import runtime as engine_api
 engine_api.register_routes(app)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -252,7 +235,7 @@ def build_display_setup(symbol, timeframe):
     # --- 1) Pivot-anchored parallel channel family (primary chart structure) ---
     family = {}
     try:
-        from analysis import build_trendline_family
+        from trendline_family import build_trendline_family
         family = build_trendline_family(df, max_lines=4)
         if family.get("error"):
             family = {}
@@ -270,7 +253,7 @@ def build_display_setup(symbol, timeframe):
         upper = ch.get("upper") or {}
         lower = ch.get("lower") or {}
         # Build a synthetic Pattern-like payload so the rest of the pipeline is uniform
-        from analysis import Pattern
+        from patterns import Pattern
         y_hi = float(upper.get("y_end", current_close * 1.002))
         y_lo = float(lower.get("y_end", current_close * 0.998))
         trigger = y_hi if direction == "BUY" else y_lo
@@ -815,7 +798,7 @@ async def send_silver_bullet_analysis(context, chat_id, symbol):
 
         # Mobile Manual ticket when in COPY_TRADE mode and setup is valid
         if ts.state.get_mode() == ts.MODE_COPY_TRADE and analysis.get("valid"):
-            from analysis import build_silver_bullet_ticket
+            from silver_bullet import build_silver_bullet_ticket
             ticket = build_silver_bullet_ticket(analysis)
             if ticket:
                 ticket_text = format_trade_ticket(
@@ -1307,11 +1290,11 @@ engine.register_notifiers(auto_fired=on_auto_fired, approval_request=on_approval
 engine._notify_callbacks["report_event"] = on_report_event
 
 # ==========================================
-# 7. ENTRYPOINT -- Flask (EA + health) + Telegram polling
+# 7. ENTRYPOINT -- runs Flask (for the EA) and Telegram polling together,
+#    all local, no keep-alive ping needed since nothing sleeps on your PC.
 # ==========================================
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
-    # threaded=True so /health keep-alive and EA poll do not block each other
     app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
 
 def run_telegram_bot():
