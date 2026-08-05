@@ -588,7 +588,8 @@ def scan_all_patterns(df, left=3, right=3, volume_profile=None):
     for fn in (detect_flag_or_pennant,):
         try:
             res = fn(df)
-        except Exception:
+        except Exception as e:
+            print(f"[patterns] {fn.__name__} raised: {e!r}")
             res = None
         if res:
             detected.append(res)
@@ -598,7 +599,8 @@ def scan_all_patterns(df, left=3, right=3, volume_profile=None):
                detect_inverse_head_shoulders):
         try:
             res = fn(df, ph, pl)
-        except Exception:
+        except Exception as e:
+            print(f"[patterns] {fn.__name__} raised: {e!r}")
             res = None
         if res:
             detected.append(res)
@@ -606,7 +608,8 @@ def scan_all_patterns(df, left=3, right=3, volume_profile=None):
     for fn in (detect_triangle_or_wedge, detect_rectangle):
         try:
             res = fn(df, ph, pl)
-        except Exception:
+        except Exception as e:
+            print(f"[patterns] {fn.__name__} raised: {e!r}")
             res = None
         if res:
             detected.append(res)
