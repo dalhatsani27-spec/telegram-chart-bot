@@ -876,6 +876,41 @@ def generate_trendline_map(
         ax.text(chart_len * 0.02, mw["neckline"], f"NECKLINE ({mw.get('pattern', '')})",
                 fontsize=7.5, color="#ffb74d", fontweight="bold", va="bottom")
 
+    # Discrete pattern-scanner output (Double Top/Bottom, H&S, Triangle,
+    # Wedge, Flag, Rectangle -- from patterns.py). This payload shape is
+    # different from the trendline-family payload above (single trigger
+    # line + labelled key points instead of a rail family), and previously
+    # had NO render path here at all -- the Pattern Scanner chart would come
+    # back with candles only and none of the actual detected structure.
+    trigger_line = family.get("trigger_line") or setup.get("trigger_line")
+    if trigger_line and len(trigger_line) >= 2:
+        xs = [max(0, int(p[0]) - offset) for p in trigger_line]
+        ys = [float(p[1]) for p in trigger_line]
+        if xs[-1] < chart_len:
+            # Extend the trigger/neckline to the right edge of the chart so
+            # it's visible as the level to watch, not just where it was formed.
+            xs = xs + [chart_len - 1]
+            ys = ys + [ys[-1]]
+        ax.plot(xs, ys, color="#ff9800", linewidth=1.7, linestyle="-", alpha=0.95, zorder=5)
+        label = family.get("category", "pattern")
+        ax.text(chart_len * 0.02, ys[0], f"TRIGGER ({label})", fontsize=7.5,
+                color="#ffb74d", fontweight="bold", va="bottom")
+
+    key_points = family.get("key_points") or setup.get("key_points")
+    if key_points:
+        for kp in key_points:
+            if len(kp) < 2:
+                continue
+            px = int(kp[0]) - offset
+            if not (0 <= px < chart_len):
+                continue
+            py = float(kp[1])
+            label = kp[2] if len(kp) > 2 else ""
+            ax.scatter([px], [py], s=60, c="#ffca28", edgecolors="#000000", linewidths=0.7, zorder=11, marker="o")
+            if label:
+                ax.annotate(label, (px, py), fontsize=6.5, color="#ffe0b2",
+                            xytext=(4, 4), textcoords="offset points")
+
     # Projections — subtle
     for p in (family.get("projections") or [])[:3]:
         ax.axhline(p["price"], color="#7e57c2", linestyle="-.", linewidth=0.9, alpha=0.65)
