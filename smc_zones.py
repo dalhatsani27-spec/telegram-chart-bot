@@ -43,10 +43,13 @@ def _atr_series(df, period=14):
     return tr.rolling(period).mean()
 
 
-def detect_fvgs(df, min_gap_atr=0.15, max_zones=8):
+def detect_fvgs(df, min_gap_atr=0.18, max_zones=5):
     """
     Detect unfilled and recently mitigated FVGs.
-    Returns list of zone dicts (most recent first).
+
+    LOCKED RULE (clean chart):
+      Prefer unmitigated FVGs. Keep only a small number of the most recent,
+      meaningful gaps. Inverted FVGs (IFVG) are kept only when fully violated.
     """
     if df is None or len(df) < 5:
         return []
@@ -103,12 +106,11 @@ def detect_fvgs(df, min_gap_atr=0.15, max_zones=8):
         if start >= n:
             continue
         if z["bias"] == "BULLISH":
-            # Mitigated when a later low trades into/through the gap
             later_lows = lows[start:]
             if len(later_lows) and later_lows.min() <= z["top"]:
                 z["mitigated"] = True
-                # Fully filled + closed below → inverse FVG potential
                 later_closes = closes[start:]
+                # Full body close below the gap → IFVG
                 if len(later_closes) and later_closes.min() < z["bottom"]:
                     z["inverted"] = True
                     z["type"] = "IFVG"
@@ -121,7 +123,7 @@ def detect_fvgs(df, min_gap_atr=0.15, max_zones=8):
                     z["inverted"] = True
                     z["type"] = "IFVG"
 
-    # Prefer active (unmitigated) zones, then recent
+    # Prefer active (unmitigated) zones, then recent IFVGs
     active = [z for z in zones if not z["mitigated"]]
     inverted = [z for z in zones if z.get("inverted")]
     combined = active + [z for z in inverted if z not in active]
@@ -129,18 +131,20 @@ def detect_fvgs(df, min_gap_atr=0.15, max_zones=8):
     return combined[:max_zones]
 
 
-def detect_order_blocks(df, structure=None, min_body_atr=0.45, max_zones=6):
+def detect_order_blocks(df, structure=None, min_body_atr=0.45, max_zones=4, require_bos=True):
     """
     ICT-correct Order Blocks tied to ZigZag swings + displacement.
 
-    Valid sequence on every structural leg:
+    LOCKED RULE (clean chart):
+      Only map an OB when the displacement leg that created it also produced
+      a BOS or CHoCH/MSS. Isolated OBs without structure break are discarded.
+
+    Valid sequence:
       1. Swing high/low (ZigZag)
       2. Optional liquidity sweep of that swing
-      3. Displacement that breaks structure (BOS/CHoCH)
+      3. Displacement that breaks structure (BOS/CHoCH)  ← REQUIRED when require_bos=True
       4. OB = last opposing candle BEFORE the displacement
       5. FVG often forms inside that same displacement (linked by impulse_index)
-
-    Rule: No BOS/CHoCH-quality displacement → no valid OB.
     """
     if df is None or len(df) < 20:
         return []
@@ -156,21 +160,19 @@ def detect_order_blocks(df, structure=None, min_body_atr=0.45, max_zones=6):
 
     pivots = zigzag_swings(df, depth=4, deviation_atr=0.30)
     if len(pivots) < 3:
-        pivots = []  # fall through will return fewer zones
+        pivots = []
 
     zones = []
 
-    # --- Primary path: OB at origin of leg that breaks a prior swing ---
     for k in range(1, len(pivots)):
         cur = pivots[k]
         prev = pivots[k - 1]
-        # Displacement leg runs from prev pivot toward cur
         leg_start = prev["index"]
         leg_end = cur["index"]
         if leg_end - leg_start < 2:
             continue
 
-        # Did this leg break a prior swing of the same type? (BOS quality)
+        # Did this leg break a prior swing of the same type? (BOS / CHoCH quality)
         broken = None
         for older in reversed(pivots[: k - 1]):
             if older["type"] == cur["type"]:
@@ -179,22 +181,25 @@ def detect_order_blocks(df, structure=None, min_body_atr=0.45, max_zones=6):
                 elif cur["type"] == "low" and cur["price"] < older["price"]:
                     broken = older
                 break
+
+        # LOCKED: if require_bos is True, discard legs that did not break structure
         if broken is None:
-            # Still allow strong displacement vs ATR even without prior same-type break
+            if require_bos:
+                continue
+            # Fallback (only when require_bos=False): allow very strong displacement
             leg_range = abs(cur["price"] - prev["price"])
             a_mid = float(atr.iloc[min(leg_end, n - 1)]) if not np.isnan(atr.iloc[min(leg_end, n - 1)]) else 0
-            if a_mid <= 0 or leg_range < 1.2 * a_mid:
+            if a_mid <= 0 or leg_range < 1.5 * a_mid:
                 continue
 
         # Find last opposing candle before the impulsive part of the leg
-        # Scan from leg_end backward toward leg_start
         if cur["type"] == "high":
-            # Bullish displacement → last bearish candle in the leg = bullish OB
+            # Bullish displacement → last bearish candle = bullish OB
             ob_idx = None
             for j in range(leg_end - 1, leg_start - 1, -1):
                 if j < 0:
                     break
-                if c[j] < o[j]:  # bearish candle
+                if c[j] < o[j]:
                     a = float(atr.iloc[j]) if not np.isnan(atr.iloc[j]) else 0
                     body = abs(c[j] - o[j])
                     if a > 0 and body >= min_body_atr * a * 0.5:
@@ -245,7 +250,7 @@ def detect_order_blocks(df, structure=None, min_body_atr=0.45, max_zones=6):
                 "inverted": False,
             })
 
-    # Prefer OBs that actually broke structure
+    # Prefer structure-breaking OBs, then most recent
     zones.sort(key=lambda z: (not z.get("bos", False), -z["index"]))
 
     # Mitigation → Breaker
@@ -271,12 +276,14 @@ def detect_order_blocks(df, structure=None, min_body_atr=0.45, max_zones=6):
     active = [z for z in zones if not z["mitigated"]]
     breakers = [z for z in zones if z.get("inverted") and z not in active]
     combined = active + breakers
+
     # Deduplicate near-identical zones
     cleaned = []
     for z in combined:
         if any(abs(z["mid"] - c0["mid"]) / max(abs(z["mid"]), 1e-9) < 0.0008 for c0 in cleaned):
             continue
         cleaned.append(z)
+
     return cleaned[:max_zones]
 
 

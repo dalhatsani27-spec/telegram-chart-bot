@@ -137,10 +137,11 @@ def _analyse_single_tf(symbol, tf_code, tf_label):
     vp = compute_volume_profile(df.iloc[:-1])
     best, all_pats = scan_all_patterns(df.iloc[:-1], volume_profile=vp)
     structure = analyse_structure(df, left=3, right=3, lookback=70)
-    fvgs = detect_fvgs(df, min_gap_atr=0.15, max_zones=5)
-    obs = detect_order_blocks(df, structure=structure, max_zones=4)
-    idms = detect_inducement_zones(df, max_zones=4)
-    bos_events = build_bos_events(df, max_events=8)
+    # LOCKED clean-chart defaults: fewer zones, only structure-confirmed OBs
+    fvgs = detect_fvgs(df, min_gap_atr=0.18, max_zones=4)
+    obs = detect_order_blocks(df, structure=structure, max_zones=3, require_bos=True)
+    idms = detect_inducement_zones(df, max_zones=3)
+    bos_events = build_bos_events(df, max_events=6)
     return {
         "tf": tf_code, "tf_label": tf_label, "df": df,
         "close": float(df["Close"].iloc[-1]),

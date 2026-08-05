@@ -181,8 +181,9 @@ def run_silver_bullet_analysis(symbol: str, timeframe: str = "5min") -> Dict[str
         return {"error": f"Insufficient data for Silver Bullet on {symbol}."}
 
     structure = analyse_structure(df, left=2, right=2, lookback=50)
-    fvgs = detect_fvgs(df, min_gap_atr=0.10, max_zones=8)
-    obs = detect_order_blocks(df, structure=structure, max_zones=5)
+    # LOCKED clean-chart defaults: fewer zones, only structure-confirmed OBs
+    fvgs = detect_fvgs(df, min_gap_atr=0.15, max_zones=4)
+    obs = detect_order_blocks(df, structure=structure, max_zones=3, require_bos=True)
     sweep = _detect_liquidity_sweep(df)
     displacement = _detect_displacement(df, sweep)
 
