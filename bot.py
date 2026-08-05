@@ -604,6 +604,14 @@ async def send_full_analysis(context, chat_id, symbol, timeframe):
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         setup = build_display_setup(symbol, timeframe)
+        # generate_trendline_map() reads chart-drawing keys (upper_line/
+        # channel/pivots for channel mode, trigger_line/key_points for
+        # pattern mode) from setup["family"]/setup["analysis"], falling back
+        # to setup itself only if neither is present. build_display_setup()
+        # nests all of that under setup["geometry_data"] instead -- without
+        # this line the chart silently rendered candles only, with none of
+        # the actual detected pattern/channel ever drawn.
+        setup["family"] = setup["geometry_data"]
         # Use new trendline / execution style map
         chart_img = generate_trendline_map(
             setup["geometry_data"]["df"],
