@@ -447,30 +447,34 @@ def generate_smc_map(
     )
     ax = axlist[0]
 
-    # --- Zones ---
+    # --- Zones (LOCKED clean style: only the most important sequential levels) ---
     fvgs = zones.get("fvgs") or []
     obs = zones.get("order_blocks") or []
     idms = zones.get("inducements") or []
     structure = zones.get("structure") or {}
     vp = zones.get("volume_profile")
-    bos_events = zones.get("bos_events") or []  # list of {index, price, type}
+    bos_events = zones.get("bos_events") or []
 
-    # FVG
-    for z in fvgs[:7]:
+    # Prefer unmitigated structure-confirmed OBs only
+    clean_obs = [z for z in obs if z.get("bos") or str(z.get("type", "")).upper() == "BREAKER"][:3]
+    if not clean_obs:
+        clean_obs = obs[:2]
+
+    # FVG — max 3, prefer unmitigated
+    for z in fvgs[:3]:
         mitigated = z.get("mitigated", False)
         bias = str(z.get("bias", "")).upper()
         color = COLORS["fvg_bull"] if bias in ("BULLISH", "BUY") else COLORS["fvg_bear"]
         if mitigated:
             color = "#607d8b"
         label = "FVG" if not mitigated else "IFVG"
-        # Map original index into visible window
         z_idx = int(z.get("index", chart_len - 10)) - offset
         x0 = max(0, z_idx - 2)
         x1 = min(chart_len - 1, z_idx + 8)
         _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.20 if not mitigated else 0.08, label)
 
-    # Order Blocks / Breakers
-    for z in obs[:6]:
+    # Order Blocks / Breakers — max 3, structure-confirmed only
+    for z in clean_obs:
         mitigated = z.get("mitigated", False)
         bias = str(z.get("bias", "")).upper()
         is_breaker = mitigated or str(z.get("type", "")).upper() == "BREAKER"
@@ -485,8 +489,8 @@ def generate_smc_map(
         x1 = min(chart_len - 1, z_idx + 12)
         _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.24 if not mitigated else 0.10, label)
 
-    # Inducement / Liquidity
-    for z in idms[:5]:
+    # Inducement — max 2 (only important liquidity traps)
+    for z in idms[:2]:
         mitigated = z.get("mitigated") or z.get("swept")
         color = "#9e9e9e" if mitigated else COLORS["idm"]
         label = "IDM✗" if mitigated else "IDM"
@@ -505,8 +509,9 @@ def generate_smc_map(
         ax.text(chart_len * 0.02, structure["structure_low"], "RANGE LOW / SSL", fontsize=7,
                 color=COLORS["liquidity"], va="top", fontweight="bold")
 
-    # BOS / CHoCH — dotted horizontal line at the broken swing level + label
-    for ev in bos_events[:8]:
+    # BOS / CHoCH / MSS — dotted line + clear educational labels (max 5)
+    # Prefer the most recent structure events for clean charts
+    for ev in bos_events[-5:]:
         idx = int(ev.get("index", 0)) - offset
         price = ev.get("price")
         if price is None:
@@ -525,12 +530,18 @@ def generate_smc_map(
             zorder=6,
         )
         label_x = min(max(idx, 0), chart_len - 1)
+        # Educational labels: CHoCH = REVERSAL signal, BOS after CHoCH = CONTINUATION
+        display = kind
+        if kind == "CHOCH":
+            display = "CHoCH"
+        elif kind == "MSS":
+            display = "MSS"
         ax.annotate(
-            kind,
+            display,
             xy=(label_x, price),
             xytext=(4, 10 if bias == "BULLISH" else -12),
             textcoords="offset points",
-            fontsize=7,
+            fontsize=7.5,
             color=color,
             fontweight="bold",
             ha="left",
