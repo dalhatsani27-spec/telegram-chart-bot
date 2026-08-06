@@ -267,15 +267,13 @@ def _draw_projections(ax, projections, chart_len: int):
 
 
 def _draw_volume_profile_levels(ax, vp, chart_len: int):
+    """Draw only POC line. Value Area big orange box removed for clean charts."""
     if not vp:
         return
     if vp.get("poc_price") is not None:
         ax.axhline(vp["poc_price"], color=COLORS["poc"], linestyle=":", linewidth=1.35, alpha=0.9)
         ax.text(chart_len * 0.86, vp["poc_price"], "POC", fontsize=7, color=COLORS["poc"], va="bottom")
-    if vp.get("value_area_low") is not None and vp.get("value_area_high") is not None:
-        ax.axhspan(vp["value_area_low"], vp["value_area_high"], facecolor="#ff9800", alpha=0.07, zorder=1)
-        ax.text(chart_len * 0.01, vp["value_area_high"], "VA-H", fontsize=6, color="#ffb74d", va="bottom")
-        ax.text(chart_len * 0.01, vp["value_area_low"], "VA-L", fontsize=6, color="#ffb74d", va="top")
+    # LOCKED: do NOT draw the big orange Value Area rectangle (too noisy)
 
 
 def _draw_position_container(ax, pos, chart_len: int):
