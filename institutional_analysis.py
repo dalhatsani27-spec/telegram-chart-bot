@@ -204,7 +204,28 @@ def run_topdown_analysis(symbol):
     symbol = symbol.strip().upper()
     frames = _fetch_ladder_parallel(symbol, TOPDOWN_LADDER)
     if len(frames) < 2:
-        frames = _fetch_ladder_parallel(symbol, ALT_LADDER)
+        # Only fetch the ALT_LADDER timeframes we don't already have, and do
+        # it in the same parallel batch style -- re-running the whole ladder
+        # here used to double the worst-case wait (each ladder can take up
+        # to ~30s per TF on the slow-provider path), which was enough to
+        # blow past the outer timeout in bot.py. Topping up just the gaps
+        # keeps this bounded to roughly one more slowest-fetch, not two.
+        have = {f["tf"] for f in frames}
+        missing = [(tf_code, tf_label) for tf_code, tf_label in ALT_LADDER if tf_code not in have]
+        if missing:
+            extra = _fetch_ladder_parallel(symbol, missing)
+            by_tf = {f["tf"]: f for f in frames}
+            for f in extra:
+                by_tf[f["tf"]] = f
+            # Preserve ALT_LADDER's HTF-first order for downstream code
+            # (frames[0] must stay the highest timeframe available).
+            order = [tf for tf, _ in ALT_LADDER] if len(extra) >= len(frames) else [tf for tf, _ in TOPDOWN_LADDER]
+            ordered = [by_tf[tf] for tf in order if tf in by_tf]
+            # Include anything fetched that fell outside the chosen order list.
+            for tf, f in by_tf.items():
+                if f not in ordered:
+                    ordered.append(f)
+            frames = ordered
     if not frames:
         return {
             "error": (
@@ -334,4 +355,3 @@ def format_institutional_report(analysis):
         lines.append(f"Pattern: {getattr(p, 'name', '?')} ({getattr(p, 'bias', '?')}) {conf:.0f}%")
 
     return "\n".join(lines)
-
