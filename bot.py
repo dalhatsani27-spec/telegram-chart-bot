@@ -666,7 +666,7 @@ async def send_institutional_topdown(context, chat_id, symbol):
         try:
             analysis = await asyncio.wait_for(
                 loop.run_in_executor(None, run_topdown_analysis, symbol),
-                timeout=120.0,
+                timeout=150.0,
             )
         except asyncio.TimeoutError:
             await context.bot.send_message(
