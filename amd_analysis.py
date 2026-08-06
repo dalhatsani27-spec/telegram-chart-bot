@@ -359,10 +359,9 @@ def run_amd_analysis(symbol):
     if ise.get("valid") and ise.get("direction") in ("BUY", "SELL"):
         amd_bias = ise["direction"]
 
-    # LOCKED clean-chart defaults: fewer zones, only structure-confirmed OBs
-    fvgs = detect_fvgs(df_1h, min_gap_atr=0.18, max_zones=4)
-    obs = detect_order_blocks(df_1h, structure=structure_1h, max_zones=3, require_bos=True)
-    idms = detect_inducement_zones(df_1h, max_zones=4)
+    fvgs = detect_fvgs(df_1h, min_gap_atr=0.12, max_zones=6)
+    obs = detect_order_blocks(df_1h, structure=structure_1h, max_zones=5)
+    idms = detect_inducement_zones(df_1h, max_zones=5)
     vp = compute_volume_profile(df_1h.iloc[:-1])
 
     last_session = str(df_1h["Session"].iloc[-1]) if "Session" in df_1h.columns else "Unknown"
