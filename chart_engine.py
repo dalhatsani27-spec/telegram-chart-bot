@@ -91,38 +91,6 @@ def _session_name(hour: int) -> str:
     return "+".join(names) if names else "Off"
 
 
-def _safe_zone_x(z: Dict[str, Any], offset: int, chart_len: int, fallback: int) -> Optional[int]:
-    """
-    Validate a zone's 'index' field before it's used as a chart x-position.
-
-    'index' is supposed to be a positional row number in the same df the
-    chart was built from (0-based, matching df.iloc[i]) -- that's the
-    contract every detector in this codebase (market_structure.py,
-    smc_zones.py, structure_engine.py) is meant to follow. If a detector
-    ever slips and stores a datetime label or something else instead,
-    int(z['index']) - offset does NOT raise -- e.g. int(pandas.Timestamp)
-    silently returns nanoseconds-since-epoch -- and the zone still "draws",
-    just clamped to the chart edge instead of at the real candle. That's
-    a silent wrong-place bug rather than a loud, fixable one.
-
-    Returns a valid visible-chart x position, or None if the index looks
-    implausible (caller should skip drawing that zone rather than guess).
-    """
-    raw = z.get("index", fallback)
-    try:
-        raw_int = int(raw)
-    except (TypeError, ValueError):
-        print(f"[chart_engine] skipping zone with non-numeric index: {raw!r} ({z.get('type')})")
-        return None
-    # A plausible df row position is within a few chart-lengths of the
-    # visible window -- anything wildly outside that (e.g. a nanosecond
-    # timestamp, ~10^18) is not a real row index.
-    if abs(raw_int) > max(chart_len, offset + chart_len) * 20 + 10_000:
-        print(f"[chart_engine] skipping zone with out-of-range index: {raw_int} ({z.get('type')})")
-        return None
-    return raw_int - offset
-
-
 def _draw_zone(
     ax,
     x0: float,
@@ -468,31 +436,26 @@ def generate_smc_map(
     fvgs = zones.get("fvgs") or []
     obs = zones.get("order_blocks") or []
     idms = zones.get("inducements") or []
-    base_zones = zones.get("base_zones") or []
     structure = zones.get("structure") or {}
     vp = zones.get("volume_profile")
     bos_events = zones.get("bos_events") or []  # list of {index, price, type}
 
-
-    # FVG — prefer higher quality / unmitigated first
-    fvg_sorted = sorted(fvgs, key=lambda z: (-z.get("quality", 50), z.get("mitigated", False), -z.get("index", 0)))
-    for z in fvg_sorted[:5]:
+    # FVG
+    for z in fvgs[:7]:
         mitigated = z.get("mitigated", False)
         bias = str(z.get("bias", "")).upper()
         color = COLORS["fvg_bull"] if bias in ("BULLISH", "BUY") else COLORS["fvg_bear"]
         if mitigated:
             color = "#607d8b"
         label = "FVG" if not mitigated else "IFVG"
-        z_idx = _safe_zone_x(z, offset, chart_len, chart_len - 10)
-        if z_idx is None:
-            continue
+        # Map original index into visible window
+        z_idx = int(z.get("index", chart_len - 10)) - offset
         x0 = max(0, z_idx - 2)
         x1 = min(chart_len - 1, z_idx + 8)
         _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.20 if not mitigated else 0.08, label)
 
-    # Order Blocks / Breakers — prefer high-quality unmitigated
-    ob_sorted = sorted(obs, key=lambda z: (-z.get("quality", 50), z.get("mitigated", False), -z.get("index", 0)))
-    for z in ob_sorted[:5]:
+    # Order Blocks / Breakers
+    for z in obs[:6]:
         mitigated = z.get("mitigated", False)
         bias = str(z.get("bias", "")).upper()
         is_breaker = mitigated or str(z.get("type", "")).upper() == "BREAKER"
@@ -502,51 +465,22 @@ def generate_smc_map(
         else:
             color = COLORS["ob_bull"] if bias in ("BULLISH", "BUY") else COLORS["ob_bear"]
             label = "OB"
-        z_idx = _safe_zone_x(z, offset, chart_len, chart_len - 15)
-        if z_idx is None:
-            continue
+        z_idx = int(z.get("index", chart_len - 15)) - offset
         x0 = max(0, z_idx - 1)
         x1 = min(chart_len - 1, z_idx + 12)
         _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.24 if not mitigated else 0.10, label)
-
 
     # Inducement / Liquidity
     for z in idms[:5]:
         mitigated = z.get("mitigated") or z.get("swept")
         color = "#9e9e9e" if mitigated else COLORS["idm"]
         label = "IDM✗" if mitigated else "IDM"
-        z_idx = _safe_zone_x(z, offset, chart_len, chart_len - 20)
-        if z_idx is None:
-            continue
+        z_idx = int(z.get("index", chart_len - 20)) - offset
         x0 = max(0, z_idx - 1)
         x1 = min(chart_len - 1, z_idx + 6)
         _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.22 if not mitigated else 0.08, label)
 
-    # RBR / DBD / RBD / DBR base zones (Supply & Demand)
-    base_sorted = sorted(
-        base_zones,
-        key=lambda z: (-z.get("quality", 50), z.get("mitigated", False), -z.get("index", 0)),
-    )
-    for z in base_sorted[:4]:
-        mitigated = z.get("mitigated", False)
-        bias = str(z.get("bias", "")).upper()
-        ptype = str(z.get("type", "BASE")).upper()
-        if mitigated:
-            color = "#607d8b"
-        elif bias in ("BULLISH", "BUY"):
-            color = "#26a69a"
-        else:
-            color = "#ef5350"
-        label = ptype
-        z_idx = _safe_zone_x(z, offset, chart_len, chart_len - 18)
-        if z_idx is None:
-            continue
-        x0 = max(0, z_idx - 1)
-        x1 = min(chart_len - 1, z_idx + 10)
-        _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.20 if not mitigated else 0.08, label)
-
     # Structure High / Low
-
     if structure.get("structure_high"):
         ax.axhline(structure["structure_high"], color=COLORS["liquidity"], linestyle="--", linewidth=1.15, alpha=0.85)
         ax.text(chart_len * 0.02, structure["structure_high"], "RANGE HIGH / BSL", fontsize=7,
@@ -742,9 +676,7 @@ def generate_amd_map(
         color = COLORS["fvg_bull"] if bias in ("BULLISH", "BUY") else COLORS["fvg_bear"]
         if mitigated:
             color = "#607d8b"
-        z_idx = _safe_zone_x(z, offset, chart_len, chart_len - 10)
-        if z_idx is None:
-            continue
+        z_idx = int(z.get("index", chart_len - 10)) - offset
         x0 = max(0, z_idx - 1)
         x1 = min(chart_len - 1, z_idx + 7)
         _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.22 if not mitigated else 0.08,
@@ -756,9 +688,7 @@ def generate_amd_map(
         color = COLORS["ob_bull"] if bias in ("BULLISH", "BUY") else COLORS["ob_bear"]
         if mitigated:
             color = COLORS["breaker"]
-        z_idx = _safe_zone_x(z, offset, chart_len, chart_len - 15)
-        if z_idx is None:
-            continue
+        z_idx = int(z.get("index", chart_len - 15)) - offset
         x0 = max(0, z_idx - 1)
         x1 = min(chart_len - 1, z_idx + 10)
         _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.25 if not mitigated else 0.10,
