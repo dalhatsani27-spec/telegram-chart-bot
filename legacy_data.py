@@ -58,24 +58,37 @@ def normalize_ticker_yfinance(symbol):
 
 def fetch_twelve_data(symbol, interval="30min", outputsize=150):
     if not TWELVE_DATA_API_KEY:
+        print("[legacy_data] TWELVE_DATA_API_KEY not set — skipping Twelve Data")
         return pd.DataFrame()
     clean_symbol = normalize_ticker_twelve_data(symbol)
     url = "https://api.twelvedata.com/time_series"
-    params = {"symbol": clean_symbol, "interval": interval, "outputsize": outputsize, "apikey": TWELVE_DATA_API_KEY}
+    params = {
+        "symbol": clean_symbol,
+        "interval": interval,
+        "outputsize": outputsize,
+        "apikey": TWELVE_DATA_API_KEY,
+        "timezone": "UTC",
+    }
     try:
-        res = requests.get(url, params=params, timeout=10)
-        data = res.json()
+        res = requests.get(url, params=params, timeout=12)
+        data = res.json() if res.content else {}
         if res.status_code == 200 and "values" in data:
             df = pd.DataFrame(data["values"])
-            df['datetime'] = pd.to_datetime(df['datetime'])
-            df.set_index('datetime', inplace=True)
+            df["datetime"] = pd.to_datetime(df["datetime"])
+            df.set_index("datetime", inplace=True)
             df = df.sort_index()
-            for col in ['open', 'high', 'low', 'close']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'}, inplace=True)
-            return df[['Open', 'High', 'Low', 'Close']].dropna()
-    except Exception:
-        pass
+            for col in ["open", "high", "low", "close"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df.rename(
+                columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"},
+                inplace=True,
+            )
+            return df[["Open", "High", "Low", "Close"]].dropna()
+        # Surface API messages (credits, invalid symbol, etc.)
+        msg = data.get("message") or data.get("status") or res.text[:200]
+        print(f"[legacy_data] Twelve Data empty for {clean_symbol} {interval}: {msg}")
+    except Exception as e:
+        print(f"[legacy_data] Twelve Data error for {symbol}: {e!r}")
     return pd.DataFrame()
 
 

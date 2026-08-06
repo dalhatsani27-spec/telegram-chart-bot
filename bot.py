@@ -661,10 +661,34 @@ async def send_institutional_topdown(context, chat_id, symbol):
     """SMC Top-Down — zones, structure, liquidity mapped like the educational charts."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        analysis = run_topdown_analysis(symbol)
+        # Heavy sync work off the asyncio loop so Telegram stays responsive
+        loop = asyncio.get_running_loop()
+        try:
+            analysis = await asyncio.wait_for(
+                loop.run_in_executor(None, run_topdown_analysis, symbol),
+                timeout=90.0,
+            )
+        except asyncio.TimeoutError:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⏱ SMC analysis timed out for {symbol} (data provider slow). Try again.",
+                reply_markup=get_home_menu(),
+            )
+            return
+
+        if not analysis or analysis.get("error"):
+            err = (analysis or {}).get("error") or "Unknown analysis error"
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ {err}",
+                reply_markup=get_home_menu(),
+            )
+            return
+
         report = format_institutional_report(analysis)
         overall_bias = analysis.get("overall_bias", "NEUTRAL")
 
+        # Chart is best-effort — never block the text report
         try:
             frames = analysis.get("frames") or []
             chart_frame = None
@@ -688,35 +712,42 @@ async def send_institutional_topdown(context, chat_id, symbol):
                     "projections": analysis.get("projections") or [],
                     "position": analysis.get("position"),
                 }
-
                 tf_lab = chart_frame.get("tf_label", "1H")
-                chart_img = generate_smc_map(
-                    chart_frame["df"],
-                    symbol,
-                    title_suffix=f"Institutional {tf_lab} | {ts_str}",
-                    zones=zones,
-                    bias_label=overall_bias,
-                    show_sessions=True,
+
+                def _build_chart():
+                    return generate_smc_map(
+                        chart_frame["df"],
+                        symbol,
+                        title_suffix=f"Institutional {tf_lab} | {ts_str}",
+                        zones=zones,
+                        bias_label=overall_bias,
+                        show_sessions=True,
+                    )
+
+                chart_img = await asyncio.wait_for(
+                    loop.run_in_executor(None, _build_chart),
+                    timeout=45.0,
                 )
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=chart_img,
                     caption=f"{symbol} SMC Map | Bias: {overall_bias} | {ts_str}",
                 )
-        except Exception:
-            pass
+        except Exception as chart_err:
+            print(f"[smc_topdown] chart failed for {symbol}: {chart_err!r}")
 
         await context.bot.send_message(chat_id=chat_id, text=report)
         await context.bot.send_message(
             chat_id=chat_id,
             text="Choose next action:",
-            reply_markup=get_home_menu()
+            reply_markup=get_home_menu(),
         )
     except Exception as e:
+        print(f"[smc_topdown] failed for {symbol}: {e!r}")
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"Institutional analysis failed for '{symbol}': {str(e)}",
-            reply_markup=get_home_menu()
+            reply_markup=get_home_menu(),
         )
 
 
