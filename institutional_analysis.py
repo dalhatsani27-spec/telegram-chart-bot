@@ -19,11 +19,16 @@ import pandas as pd
 from patterns import scan_all_patterns, find_pivots, _atr, Pattern
 from volume_profile import compute_volume_profile
 from market_structure import analyse_structure, structure_trade_permission
+from direction_banner import direction_banner
 from smc_zones import (
     detect_fvgs, detect_order_blocks, detect_inducement_zones,
-    detect_base_zones, pair_idm_with_extreme_ob, summarise_smc_zones,
-    build_bos_events,
+    pair_idm_with_extreme_ob, summarise_smc_zones, build_bos_events,
 )
+try:
+    from smc_zones import detect_base_zones
+except ImportError:
+    def detect_base_zones(df, max_zones=4):
+        return []
 
 import mt5_data
 
@@ -130,110 +135,45 @@ def _fit_trendline_family(df, lookback=80):
 
 
 def _analyse_single_tf(symbol, tf_code, tf_label):
-    df = mt5_data.fetch_candles(symbol, tf_code, count=150)
+    df = mt5_data.fetch_candles(symbol, tf_code, count=250)
     if df is None or df.empty or len(df) < 40:
         return None
     ema_bias, ema_note, ema_dist = _ema200_bias(df)
     vwap = _vwap_context(df)
-    # Full detectors only on HTF/primary chart TF — keeps Render free tier under timeout
-    heavy = tf_code in ("4h", "1h")
-    trend = _fit_trendline_family(df) if heavy else None
-    vp = compute_volume_profile(df.iloc[:-1]) if heavy else None
-    if heavy:
-        best, all_pats = scan_all_patterns(df.iloc[:-1], volume_profile=vp)
-    else:
-        best, all_pats = None, []
-    structure = analyse_structure(df, left=3, right=3, lookback=50 if heavy else 40)
-    fvgs = detect_fvgs(df, min_gap_atr=0.18, max_zones=4 if heavy else 2)
-    obs = detect_order_blocks(df, structure=structure, max_zones=3 if heavy else 2, require_bos=True)
-    idms = detect_inducement_zones(df, max_zones=3 if heavy else 2)
-    base_zones = detect_base_zones(df, max_zones=3) if heavy else []
-    bos_events = build_bos_events(df, max_events=6 if heavy else 3)
+    trend = _fit_trendline_family(df)
+    vp = compute_volume_profile(df.iloc[:-1])
+    best, all_pats = scan_all_patterns(df.iloc[:-1], volume_profile=vp)
+    structure = analyse_structure(df, left=3, right=3, lookback=70)
+    fvgs = detect_fvgs(df, min_gap_atr=0.18, max_zones=4)
+    obs = detect_order_blocks(df, structure=structure, max_zones=3, require_bos=True)
+    idms = detect_inducement_zones(df, max_zones=3)
+    bos_events = build_bos_events(df, max_events=8)
     return {
         "tf": tf_code, "tf_label": tf_label, "df": df,
         "close": float(df["Close"].iloc[-1]),
         "ema200_bias": ema_bias, "ema200_note": ema_note, "ema200_dist": ema_dist,
         "vwap": vwap, "trendline": trend, "volume_profile": vp,
         "best_pattern": best, "all_patterns": all_pats[:3] if all_pats else [],
-        "structure": structure, "fvgs": fvgs, "order_blocks": obs,
-        "inducements": idms, "base_zones": base_zones,
+        "structure": structure, "fvgs": fvgs, "order_blocks": obs, "inducements": idms,
         "bos_events": bos_events,
     }
 
 
-
-import concurrent.futures
-
-
-def _fetch_ladder_parallel(symbol, ladder):
-    """
-    Fetches every timeframe in `ladder` concurrently instead of serially.
-    Each _analyse_single_tf call can take up to ~30s in the worst case
-    (Twelve Data timeout + yfinance fallback timeout stacked, which is
-    common for symbols like BTCUSD that aren't on the free Twelve Data
-    tier). Fetching 3 timeframes serially could take up to ~90s -- and if
-    the ladder came up short and ALT_LADDER had to run too, that doubled
-    to ~180s, blowing past the 120s outer timeout in bot.py. Running them
-    in parallel bounds total wait to roughly the single slowest fetch.
-    """
-    frames = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(ladder)) as ex:
-        futures = {
-            ex.submit(_analyse_single_tf, symbol, tf_code, tf_label): tf_code
-            for tf_code, tf_label in ladder
-        }
-        results = {}
-        for fut in concurrent.futures.as_completed(futures):
-            tf_code = futures[fut]
-            try:
-                snap = fut.result()
-            except Exception as e:
-                print(f"[institutional_analysis] {symbol} {tf_code} failed: {e!r}")
-                snap = None
-            if snap:
-                results[tf_code] = snap
-    # Preserve ladder order (HTF first) regardless of completion order --
-    # downstream code assumes frames[0] is the highest timeframe.
-    for tf_code, _ in ladder:
-        if tf_code in results:
-            frames.append(results[tf_code])
-    return frames
-
-
 def run_topdown_analysis(symbol):
     symbol = symbol.strip().upper()
-    frames = _fetch_ladder_parallel(symbol, TOPDOWN_LADDER)
+    frames = []
+    for tf_code, tf_label in TOPDOWN_LADDER:
+        snap = _analyse_single_tf(symbol, tf_code, tf_label)
+        if snap:
+            frames.append(snap)
     if len(frames) < 2:
-        # Only fetch the ALT_LADDER timeframes we don't already have, and do
-        # it in the same parallel batch style -- re-running the whole ladder
-        # here used to double the worst-case wait (each ladder can take up
-        # to ~30s per TF on the slow-provider path), which was enough to
-        # blow past the outer timeout in bot.py. Topping up just the gaps
-        # keeps this bounded to roughly one more slowest-fetch, not two.
-        have = {f["tf"] for f in frames}
-        missing = [(tf_code, tf_label) for tf_code, tf_label in ALT_LADDER if tf_code not in have]
-        if missing:
-            extra = _fetch_ladder_parallel(symbol, missing)
-            by_tf = {f["tf"]: f for f in frames}
-            for f in extra:
-                by_tf[f["tf"]] = f
-            # Preserve ALT_LADDER's HTF-first order for downstream code
-            # (frames[0] must stay the highest timeframe available).
-            order = [tf for tf, _ in ALT_LADDER] if len(extra) >= len(frames) else [tf for tf, _ in TOPDOWN_LADDER]
-            ordered = [by_tf[tf] for tf in order if tf in by_tf]
-            # Include anything fetched that fell outside the chosen order list.
-            for tf, f in by_tf.items():
-                if f not in ordered:
-                    ordered.append(f)
-            frames = ordered
+        frames = []
+        for tf_code, tf_label in ALT_LADDER:
+            snap = _analyse_single_tf(symbol, tf_code, tf_label)
+            if snap:
+                frames.append(snap)
     if not frames:
-        return {
-            "error": (
-                f"No market data for {symbol}. "
-                "On Render, MT5 is unavailable — set TWELVE_DATA_API_KEY or check yfinance access."
-            )
-        }
-
+        return {"error": f"No data for {symbol}."}
 
     htf = frames[0]
     overall_bias = htf["ema200_bias"]
@@ -292,7 +232,7 @@ def run_topdown_analysis(symbol):
 
 
 def format_institutional_report(analysis):
-    """Vital-info only. Chart carries the visual detail."""
+    """SHORT summary — chart shows the zones."""
     if "error" in analysis:
         return analysis["error"]
 
@@ -302,57 +242,57 @@ def format_institutional_report(analysis):
     htf = analysis["frames"][0]
     lines = []
 
-    lines.append(f"🏛 {symbol}  |  Bias: {bias}  |  {align}")
-    lines.append(f"HTF: {analysis.get('htf_regime', '—')}")
+    lines.append(f"🏛 {symbol}  |  {align}")
+    lines.append(direction_banner(bias, extra=symbol))
+    lines.append(f"HTF: {analysis['htf_regime']}")
 
+    # One-line structure per TF
     bits = []
     for f in analysis["frames"]:
         ev = (f.get("structure") or {}).get("last_event") or "—"
-        bits.append(f"{f['tf_label']}:{ev}")
+        bits.append(f"{f['tf_label']}: {ev}")
     lines.append("Struct: " + " · ".join(bits))
 
+    # Key levels only (not every zone price)
     keys = []
-    if htf.get("vwap") and isinstance(htf["vwap"], dict):
-        keys.append(f"VWAP {htf['vwap'].get('vwap', 0):.5f}")
+    if htf.get("vwap"):
+        keys.append(f"VWAP {htf['vwap']['vwap']:.5f}")
     if analysis.get("htf_poc"):
         keys.append(f"POC {analysis['htf_poc']:.5f}")
     if htf.get("trendline"):
         t = htf["trendline"]
-        keys.append(f"Ch {t.get('lower', 0):.5f}/{t.get('upper', 0):.5f}")
+        keys.append(f"Ch {t['lower']:.5f}/{t['upper']:.5f}")
     if keys:
         lines.append("Levels: " + " | ".join(keys))
 
     proj = analysis.get("primary_projection")
     if proj:
-        lines.append(
-            f"Proj: {proj.get('direction')} → {proj.get('target', 0):.5f}  "
-            f"(inv {proj.get('invalidation', 0):.5f})"
-        )
+        lines.append(f"Proj: {proj['direction']} → {proj['target']:.5f}  (inv {proj['invalidation']:.5f})")
 
+    # Zone counts (details are on the chart)
     n_fvg = len(htf.get("fvgs") or [])
     n_ob = len(htf.get("order_blocks") or [])
     n_idm = len(htf.get("inducements") or [])
-    n_base = len(htf.get("base_zones") or [])
     unmit_idm = sum(1 for z in (htf.get("inducements") or []) if not z.get("mitigated"))
-    lines.append(f"Zones: {n_fvg} FVG · {n_ob} OB · {n_idm} IDM · {n_base} Base ({unmit_idm} IDM open)")
-
+    lines.append(f"Zones: {n_fvg} FVG · {n_ob} OB · {n_idm} IDM ({unmit_idm} unmitigated)")
 
     pairs = analysis.get("idm_ob_pairs") or []
     if pairs:
-        lines.append(f"Setup: {pairs[0].get('direction')} IDM→OB")
+        p = pairs[0]
+        lines.append(f"Setup: {p['direction']} — IDM→OB (see chart)")
     else:
-        lines.append("Setup: none clean")
+        lines.append("Setup: no clean IDM→OB pair")
 
     allowed = analysis.get("structure_allowed")
-    prefer = analysis.get("structure_prefer", "—")
-    lines.append(f"Permission: {'YES' if allowed else 'WAIT'} → {prefer}")
+    lines.append(
+        f"Permission: {'YES' if allowed else 'WAIT'} — {analysis.get('structure_prefer', 'n/a')}"
+    )
     if analysis.get("structure_reason"):
         lines.append(f"  {analysis['structure_reason']}")
 
     if htf.get("best_pattern"):
         p = htf["best_pattern"]
-        conf = getattr(p, "confidence", 0)
-        lines.append(f"Pattern: {getattr(p, 'name', '?')} ({getattr(p, 'bias', '?')}) {conf:.0f}%")
+        lines.append(f"Pattern: {p.name} ({p.bias}) {p.confidence:.0f}%")
 
+    lines.append("📷 Chart = full story (FVG/OB/IDM/EMA/structure)")
     return "\n".join(lines)
-
