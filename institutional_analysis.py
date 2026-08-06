@@ -24,12 +24,6 @@ from smc_zones import (
     detect_fvgs, detect_order_blocks, detect_inducement_zones,
     pair_idm_with_extreme_ob, summarise_smc_zones, build_bos_events,
 )
-try:
-    from smc_zones import detect_base_zones
-except ImportError:
-    def detect_base_zones(df, max_zones=4):
-        return []
-
 import mt5_data
 
 TOPDOWN_LADDER = [
@@ -159,6 +153,81 @@ def _analyse_single_tf(symbol, tf_code, tf_label):
     }
 
 
+
+def _pullback_position_from_zones(prefer, fvgs, obs, atr=None, close=None):
+    """
+    Build TradingView-style long/short position on the OB or FVG
+    where we expect the pullback entry after CHoCH/BOS confirmation.
+
+    prefer: 'BUY' | 'SELL'
+    """
+    if prefer not in ("BUY", "SELL"):
+        return None
+
+    want_bias = "BULLISH" if prefer == "BUY" else "BEARISH"
+
+    # Prefer unmitigated OB with BOS first, then unmitigated FVG
+    candidates = []
+    for z in (obs or []):
+        if z.get("mitigated"):
+            continue
+        bias = str(z.get("bias", "")).upper()
+        if bias != want_bias and bias not in (("BUY",) if prefer == "BUY" else ("SELL",)):
+            # accept BULLISH for BUY, BEARISH for SELL
+            if not ((prefer == "BUY" and bias == "BULLISH") or (prefer == "SELL" and bias == "BEARISH")):
+                continue
+        score = 3 if z.get("bos") else 1
+        score += 2 if not z.get("mitigated") else 0
+        candidates.append((score, "OB", z))
+
+    for z in (fvgs or []):
+        if z.get("mitigated"):
+            continue
+        bias = str(z.get("bias", "")).upper()
+        if not ((prefer == "BUY" and bias == "BULLISH") or (prefer == "SELL" and bias == "BEARISH")):
+            continue
+        candidates.append((2, "FVG", z))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: (-x[0], -int(x[2].get("index", 0))))
+    _, kind, z = candidates[0]
+
+    top = float(z["top"])
+    bottom = float(z["bottom"])
+    mid = float(z.get("mid", (top + bottom) / 2.0))
+    a = float(atr) if atr and atr > 0 else max((top - bottom) * 2.0, 1e-6)
+
+    if prefer == "BUY":
+        entry = mid  # expect pullback into zone
+        sl = bottom - a * 0.35
+        risk = max(entry - sl, a * 0.25)
+        tp1 = entry + risk * 1.5
+        tp2 = entry + risk * 3.0
+        side = "LONG"
+    else:
+        entry = mid
+        sl = top + a * 0.35
+        risk = max(sl - entry, a * 0.25)
+        tp1 = entry - risk * 1.5
+        tp2 = entry - risk * 3.0
+        side = "SHORT"
+
+    return {
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "side": side,
+        "direction": prefer,
+        "zone_type": kind,
+        "zone_top": top,
+        "zone_bottom": bottom,
+        "note": f"Pullback entry on {kind} after structure confirmation",
+    }
+
+
 def run_topdown_analysis(symbol):
     symbol = symbol.strip().upper()
     frames = []
@@ -212,20 +281,45 @@ def run_topdown_analysis(symbol):
         overall_bias, ltf.get("structure") or {}
     )
 
+    # On confirmation: place TV long/short template on the OB/FVG pullback zone
+    position = None
+    if allowed and pref in ("BUY", "SELL"):
+        # Prefer LTF zones for entry, fall back to HTF
+        src = ltf if ltf else htf
+        atr = None
+        try:
+            df = src.get("df")
+            if df is not None and "ATR" in df.columns:
+                atr = float(df["ATR"].iloc[-1])
+        except Exception:
+            atr = None
+        position = _pullback_position_from_zones(
+            pref,
+            src.get("fvgs") or htf.get("fvgs"),
+            src.get("order_blocks") or htf.get("order_blocks"),
+            atr=atr,
+            close=src.get("close"),
+        )
+        # Attach to chart frame so chart_engine draws the position box on the zone
+        if position and htf is not None:
+            htf = dict(htf)
+            htf["position"] = position
+
     return {
         "symbol": symbol,
         "overall_bias": overall_bias,
         "alignment": alignment,
-        "htf_regime": htf["ema200_note"],
+        "htf_regime": htf["ema200_note"] if htf else "",
         "frames": frames,
         "primary_projection": primary_proj,
-        "htf_trendline": htf.get("trendline"),
-        "htf_vwap": htf.get("vwap"),
-        "htf_poc": htf["volume_profile"]["poc_price"] if htf.get("volume_profile") else None,
+        "htf_trendline": htf.get("trendline") if htf else None,
+        "htf_vwap": htf.get("vwap") if htf else None,
+        "htf_poc": htf["volume_profile"]["poc_price"] if htf and htf.get("volume_profile") else None,
         "idm_ob_pairs": pairs,
         "structure_allowed": allowed,
         "structure_reason": reason,
         "structure_prefer": pref,
+        "position": position,
         # Chart payload (HTF preferred for institutional map; LTF for entry view)
         "chart_frame": htf,
     }
@@ -240,10 +334,32 @@ def format_institutional_report(analysis):
     bias = analysis["overall_bias"]
     align = analysis["alignment"]
     htf = analysis["frames"][0]
+    allowed = analysis.get("structure_allowed")
+    prefer = analysis.get("structure_prefer")  # BUY / SELL / NEUTRAL
+
+    # LOCKED RULES:
+    #   - 200 EMA / HTF = overall bias only (never entry)
+    #   - CHoCH + BOS/MSS confirmation decides trade direction
+    #   - On confirmation → look for pullback entry in confirmation direction
+    display_bias = bias
+    if allowed and prefer in ("BUY", "SELL"):
+        # Confirmation wins — trade the new structure direction
+        display_bias = prefer
+        if prefer != bias:
+            align = f"CONFIRM {prefer} (HTF bias {bias} — context only)"
+        else:
+            align = f"CONFIRM {prefer}"
+    elif allowed is False:
+        display_bias = "NEUTRAL"
+        if prefer in ("BUY", "SELL"):
+            align = f"WAIT — need BOS/MSS after CHoCH ({prefer})"
+        else:
+            align = "WAIT"
+
     lines = []
 
     lines.append(f"🏛 {symbol}  |  {align}")
-    lines.append(direction_banner(bias, extra=symbol))
+    lines.append(direction_banner(display_bias, extra=symbol))
     lines.append(f"HTF: {analysis['htf_regime']}")
 
     # One-line structure per TF
