@@ -591,8 +591,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 WATCHLIST_SCAN_INTERVAL_SECONDS = 300  # 5 minutes -- keeps well under free-tier rate limits
 _last_scan_error_notified = {"symbol": None, "at": 0}
 
+WATCHLIST_SCAN_TIMEOUT_SECONDS = 90.0  # hard ceiling so one slow/hung poll can never freeze the loop forever
+
 async def background_watchlist_scanner():
     await asyncio.sleep(15)
+    loop = asyncio.get_running_loop()
     while True:
         symbol = None
         try:
@@ -600,9 +603,21 @@ async def background_watchlist_scanner():
             tf = ts.state.get_watch_timeframe()
             if symbol and ts.state.get_mode() != ts.MODE_OFF and not ts.state.is_ea_available(symbol):
                 try:
-                    result = engine.poll(symbol, tf)
+                    # engine.poll() does CPU-bound pattern/structure/confirmation work
+                    # (heavier now than when this loop was written). Running it inline
+                    # here blocks the entire asyncio event loop for however long it
+                    # takes -- no Telegram button press, no other in-flight analysis,
+                    # nothing gets processed until it returns. Offload to a worker
+                    # thread, same as every other heavy call in this file, and bound
+                    # it with a timeout so a hung fetch can't wedge the scanner forever.
+                    result = await asyncio.wait_for(
+                        loop.run_in_executor(None, engine.poll, symbol, tf),
+                        timeout=WATCHLIST_SCAN_TIMEOUT_SECONDS,
+                    )
                     if result and result.get("error"):
                         print(f"[watchlist_scanner] {symbol} ({tf}) poll returned error: {result['error']}")
+                except asyncio.TimeoutError:
+                    print(f"[watchlist_scanner] poll timed out for {symbol} ({tf}) after {WATCHLIST_SCAN_TIMEOUT_SECONDS}s")
                 except Exception as e:
                     print(f"[watchlist_scanner] poll failed for {symbol} ({tf}): {e!r}")
                     # Also surface it in Telegram once per 30 min per symbol, so a
