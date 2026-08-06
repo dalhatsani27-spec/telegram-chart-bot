@@ -21,11 +21,6 @@ except ImportError:
 
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
-# Short in-memory cache so multi-TF analysis does not re-hit the API
-_TD_CACHE = {}
-_TD_CACHE_TTL = 90  # seconds
-
-
 _TF_TWELVE_INTERVAL = {"1min": "1min", "3min": "1min", "5min": "5min", "15min": "15min", "30min": "30min", "1h": "1h", "4h": "4h"}
 _TF_YF_INTERVAL = {"1min": "1m", "3min": "1m", "5min": "5m", "15min": "15m", "30min": "30m", "1h": "60m", "4h": "60m"}
 _TF_RESAMPLE = {"3min": "3min"}
@@ -63,46 +58,24 @@ def normalize_ticker_yfinance(symbol):
 
 def fetch_twelve_data(symbol, interval="30min", outputsize=150):
     if not TWELVE_DATA_API_KEY:
-        print("[legacy_data] TWELVE_DATA_API_KEY not set — skipping Twelve Data")
         return pd.DataFrame()
-    import time as _time
     clean_symbol = normalize_ticker_twelve_data(symbol)
-    cache_key = f"{clean_symbol}|{interval}|{outputsize}"
-    hit = _TD_CACHE.get(cache_key)
-    if hit is not None:
-        ts, df = hit
-        if _time.time() - ts < _TD_CACHE_TTL and df is not None and not df.empty:
-            return df.copy()
     url = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": clean_symbol,
-        "interval": interval,
-        "outputsize": outputsize,
-        "apikey": TWELVE_DATA_API_KEY,
-        "timezone": "UTC",
-    }
+    params = {"symbol": clean_symbol, "interval": interval, "outputsize": outputsize, "apikey": TWELVE_DATA_API_KEY}
     try:
-        res = requests.get(url, params=params, timeout=12)
-        data = res.json() if res.content else {}
+        res = requests.get(url, params=params, timeout=10)
+        data = res.json()
         if res.status_code == 200 and "values" in data:
             df = pd.DataFrame(data["values"])
-            df["datetime"] = pd.to_datetime(df["datetime"])
-            df.set_index("datetime", inplace=True)
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            df.set_index('datetime', inplace=True)
             df = df.sort_index()
-            for col in ["open", "high", "low", "close"]:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-            df.rename(
-                columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"},
-                inplace=True,
-            )
-            out = df[["Open", "High", "Low", "Close"]].dropna()
-            _TD_CACHE[cache_key] = (_time.time(), out)
-            return out.copy()
-        # Surface API messages (credits, invalid symbol, etc.)
-        msg = data.get("message") or data.get("status") or res.text[:200]
-        print(f"[legacy_data] Twelve Data empty for {clean_symbol} {interval}: {msg}")
-    except Exception as e:
-        print(f"[legacy_data] Twelve Data error for {symbol}: {e!r}")
+            for col in ['open', 'high', 'low', 'close']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'}, inplace=True)
+            return df[['Open', 'High', 'Low', 'Close']].dropna()
+    except Exception:
+        pass
     return pd.DataFrame()
 
 
@@ -138,25 +111,6 @@ def _resample_ohlc(df, rule):
     return df.resample(rule).agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last'}).dropna()
 
 
-def _yf_download_with_timeout(ticker, period, interval, timeout_sec=18):
-    """yfinance has no built-in timeout; wrap so Render free tier cannot hang forever."""
-    import concurrent.futures
-    def _job():
-        data = yf.download(
-            ticker, period=period, interval=interval,
-            progress=False, auto_adjust=True, threads=False,
-        )
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-        return data
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_job)
-            return fut.result(timeout=timeout_sec)
-    except Exception:
-        return pd.DataFrame()
-
-
 def fetch_timeframe_data_legacy(symbol, tf_code, outputsize=250):
     td_interval = _TF_TWELVE_INTERVAL.get(tf_code, "30min")
     fetch_size = outputsize * 3 if tf_code == "3min" else outputsize
@@ -166,18 +120,19 @@ def fetch_timeframe_data_legacy(symbol, tf_code, outputsize=250):
         ticker = normalize_ticker_yfinance(symbol)
         yf_interval = _TF_YF_INTERVAL.get(tf_code, "30m")
         period = _TF_YF_PERIOD.get(yf_interval, "30d")
-        raw = _yf_download_with_timeout(ticker, period, yf_interval, timeout_sec=18)
+        try:
+            data = yf.download(ticker, period=period, interval=yf_interval, progress=False, auto_adjust=True)
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+            raw = data
+        except Exception:
+            raw = pd.DataFrame()
 
-    if raw is None or (hasattr(raw, "empty") and raw.empty):
+    if raw.empty:
         return pd.DataFrame()
 
     if tf_code in _TF_RESAMPLE:
-        raw = raw.copy()
         raw.columns = [c.capitalize() for c in raw.columns]
-        cols = [c for c in ["Open", "High", "Low", "Close"] if c in raw.columns]
-        if len(cols) < 4:
-            return pd.DataFrame()
-        raw = _resample_ohlc(raw[cols], _TF_RESAMPLE[tf_code])
+        raw = _resample_ohlc(raw[['Open', 'High', 'Low', 'Close']], _TF_RESAMPLE[tf_code])
 
     return clean_and_normalize_data(raw)
-
