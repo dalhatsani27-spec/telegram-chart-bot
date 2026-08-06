@@ -26,6 +26,7 @@ import pandas as pd
 
 from market_structure import analyse_structure, find_swings
 from smc_zones import detect_fvgs, detect_order_blocks
+from direction_banner import direction_banner
 import mt5_data
 
 
@@ -318,7 +319,8 @@ def format_silver_bullet_report(analysis: Dict[str, Any]) -> str:
     else:
         lines.append(f"Window: ❌ Outside  |  Next: {analysis['next_window']} in ~{analysis['minutes_to_next']} min")
 
-    lines.append(f"Direction: {analysis['direction']}  |  Score: {analysis['score']}/100  |  Valid: {'YES' if analysis['valid'] else 'NO'}")
+    lines.append(direction_banner(analysis['direction'], extra=analysis['symbol']))
+    lines.append(f"Score: {analysis['score']}/100  |  Valid: {'YES' if analysis['valid'] else 'NO'}")
 
     if analysis.get("sweep"):
         lines.append(f"Sweep: {analysis['sweep']['note']}")
