@@ -1,6 +1,5 @@
 import os
 import logging
-import asyncio
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -8,17 +7,15 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
 
-# Import custom MetaApi wrappers (replaces local MetaTrader5 library)
+# Import custom MetaApi wrappers from mt5_data.py
 from mt5_data import fetch_rates, execute_trade
 
 # Load environment variables
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # Configure logging
 logging.basicConfig(
@@ -28,8 +25,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------
+# Command Handlers
+# ---------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends welcome message and bot status."""
+    """Sends welcome message and bot commands."""
     welcome_text = (
         "🤖 **MT5 Trading & Analysis Bot Online**\n\n"
         "Commands:\n"
@@ -41,7 +41,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Checks data connectivity."""
+    """Checks data connectivity to MT5 via MetaApi."""
     await update.message.reply_text("⏳ Checking MetaApi MT5 connection...")
     df = fetch_rates(symbol="EURUSD", timeframe="15m", count=10)
     
@@ -52,7 +52,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fetches market data for a symbol and returns price stats."""
+    """Fetches candle stats for a requested symbol."""
     args = context.args
     if not args:
         await update.message.reply_text("⚠️ Usage: `/analyze <symbol>` (e.g., `/analyze BTCUSD`)", parse_mode="Markdown")
@@ -78,7 +78,6 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• **50-Bar Low:** `{lowest}`\n"
     )
 
-    # Quick action inline buttons
     keyboard = [
         [
             InlineKeyboardButton(f"Buy {symbol}", callback_data=f"TRADE|BUY|{symbol}"),
@@ -91,10 +90,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Executes trades directly.
-    Usage: /trade BTCUSD BUY 0.01 64000 66000
-    """
+    """Executes a market or pending order."""
     args = context.args
     if len(args) < 3:
         await update.message.reply_text(
@@ -120,7 +116,7 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles inline button clicks."""
+    """Handles inline quick-action buttons."""
     query = update.callback_query
     await query.answer()
 
@@ -138,24 +134,40 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.message.reply_text(f"❌ Failed to place **{action}** order for {symbol}.")
 
 
+# ---------------------------------------------------------
+# Main Application Launcher
+# ---------------------------------------------------------
 def main():
-    """Builds and starts the Telegram bot listener."""
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+    if not TELEGRAM_BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable is not set!")
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Add command handlers
+    # Register handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("analyze", analyze_command))
     app.add_handler(CommandHandler("trade", trade_command))
-
-    # Add callback query handler for inline button actions
     app.add_handler(CallbackQueryHandler(button_callback_handler))
 
-    logger.info("Bot started successfully. Listening for commands...")
-    app.run_polling()
+    # Detect if running on Render cloud environment
+    port = int(os.getenv("PORT", 10000))
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+
+    if render_url:
+        # WEBHOOK MODE (Automated on Render)
+        logger.info(f"Starting bot with Webhook on Render (Port: {port})...")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=TELEGRAM_BOT_TOKEN,
+            webhook_url=f"{render_url}/{TELEGRAM_BOT_TOKEN}",
+            drop_pending_updates=True
+        )
+    else:
+        # POLLING MODE (Fallback for local testing)
+        logger.info("Starting bot with Polling (Local mode)...")
+        app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
