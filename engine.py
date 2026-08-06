@@ -9,15 +9,98 @@ analysis buttons call too.
 
 import time
 import numpy as np
-from patterns import scan_all_patterns
+from patterns import scan_all_patterns, Pattern
 from confirmation_engine import ConfirmationEngine
 from trade_setup import build_trade_setup
 from volume_profile import compute_volume_profile
+from trendline_family import build_trendline_family, build_position_container
 import htf_context
 import trade_state as ts
 import mt5_data
 
 _confirmation_engine = ConfirmationEngine()
+
+
+def _trendline_fallback(established_df):
+    """
+    Runs only when scan_all_patterns() finds NO classic chart pattern (no
+    flag/pennant, double/triple top/bottom, H&S, triangle, wedge,
+    rectangle). Falls back to the trendline-family read -- one clean
+    parallel channel OR a converging wedge/triangle -- so a chart that
+    doesn't fit a textbook pattern still gets a structured trade idea
+    instead of going silent for the bar.
+
+    Returns (Pattern, fire_decision, setup) or (None, None, None).
+
+    This does NOT go through ConfirmationEngine's marubozu-wait logic --
+    the trendline family already has its own confirmation layer
+    (_grade_breakout's confirmed/developing/weak, with automatic
+    retest-routing for anything not yet confirmed), so gating happens
+    right here instead.
+    """
+    family = build_trendline_family(established_df, max_lines=3)
+    if family.get("error"):
+        return None, None, None
+    direction = family.get("direction")
+    if direction not in ("BUY", "SELL"):
+        return None, None, None
+
+    quality = family.get("primary_quality")
+    strength = family.get("strength", 0)
+    brk = family.get("breakout_grade")
+    wedge = family.get("wedge")
+
+    # Don't fire off a thin/unconfirmed read. Either the break itself is
+    # graded confirmed/developing (weak breaks are dropped), or -- if
+    # there's no break in play -- the underlying channel/wedge is at
+    # least a validated 3+ touch structure with real strength.
+    if brk:
+        if brk["strength"] == "weak":
+            return None, None, None
+    else:
+        if quality == "unconfirmed" or strength < 60:
+            return None, None, None
+
+    if wedge:
+        name = wedge["pattern"]
+        category = "reversal" if wedge["pattern"] != "Converging Channel" else "continuation"
+        trigger_line = [(wedge["lower"]["x0"], wedge["lower"]["y0"]),
+                         (wedge["lower"]["x1"], wedge["lower"]["y1"])]
+    else:
+        kind = str(family.get("family_kind") or "channel").title()
+        name = f"{kind} Trendline Channel"
+        category = "continuation"
+        fl = (family.get("family_lines") or [None])[0]
+        trigger_line = [(fl["x0"], fl["y0"]), (fl["x1"], fl["y1"])] if fl else []
+
+    pos = build_position_container(family)
+    if not pos:
+        return None, None, None
+
+    confidence = float(min(95, max(30, strength)))
+    note = "; ".join(family.get("reasons") or [])[:280] or "Trendline-family structural read"
+
+    pattern_obj = Pattern(
+        name=name, category=category, bias=direction,
+        trigger_price=pos["entry"], trigger_line=trigger_line,
+        key_points=[], confidence=confidence, note=note,
+    )
+    order_type = pos.get("order_type", "MARKET")
+    fire_decision = {
+        "action": "FIRE_LIMIT" if order_type == "LIMIT" else "FIRE_MARKET",
+        "pattern": pattern_obj, "fire_price": pos["entry"],
+        "order_type": order_type,
+        "expiry_bars": 15 if order_type == "LIMIT" else None,
+        "reason": "trendline_fallback_" + ("retest" if pos.get("entry_note") else "structural"),
+    }
+    setup = {
+        "entry": pos["entry"], "order_type": order_type, "bias": direction,
+        "sl": pos["sl"], "tp1": pos["tp1"], "tp2": pos["tp2"],
+        "trigger_price": pos["entry"], "pattern_name": name,
+        "category": category, "confidence": confidence, "note": note,
+        "expiry_bars": fire_decision["expiry_bars"],
+    }
+    return pattern_obj, fire_decision, setup
 
 # Callbacks the Telegram layer registers so this module can push messages
 # without importing bot.py directly (avoids circular imports).
@@ -65,6 +148,16 @@ def poll(symbol, tf, magic_number=None, pushed_df=None):
     volume_profile = compute_volume_profile(established_df)
     best, all_patterns = scan_all_patterns(established_df, volume_profile=volume_profile)
 
+    # No classic chart pattern this bar -- fall back to the trendline/
+    # channel/wedge read ("my logic") instead of going quiet. This bypasses
+    # ConfirmationEngine (which is pattern-shaped: marubozu-through-trigger)
+    # because the trendline fallback already carries its own confirmed/
+    # developing/weak breakout grade and retest routing.
+    trendline_setup = None
+    trendline_fire_decision = None
+    if best is None:
+        best, trendline_fire_decision, trendline_setup = _trendline_fallback(established_df)
+
     htf_bias = htf_desc = None
     if best is not None:
         htf_bias, htf_desc = htf_context.get_htf_bias(symbol, tf)
@@ -72,8 +165,15 @@ def poll(symbol, tf, magic_number=None, pushed_df=None):
         if delta != 0.0:
             best.confidence = float(np.clip(best.confidence + delta, 0.0, 100.0))
             best.note += f" {htf_note}"
+            if trendline_setup is not None:
+                trendline_setup["confidence"] = best.confidence
+                trendline_setup["note"] = best.note
 
-    decision = _confirmation_engine.step(symbol, tf, df, best)
+    if trendline_fire_decision is not None:
+        decision = trendline_fire_decision
+    else:
+        decision = _confirmation_engine.step(symbol, tf, df, best)
+
     response["pattern"] = best.name if best else None
     response["reason"] = decision["reason"]
     response["trigger_price"] = best.trigger_price if best else None
@@ -89,7 +189,7 @@ def poll(symbol, tf, magic_number=None, pushed_df=None):
         response["command"] = ts.state.pop_command(symbol)
         return response
 
-    setup = build_trade_setup(df, decision["pattern"], decision)
+    setup = trendline_setup if trendline_setup is not None else build_trade_setup(df, decision["pattern"], decision)
     setup["symbol"] = symbol
     setup["timeframe"] = tf
 
