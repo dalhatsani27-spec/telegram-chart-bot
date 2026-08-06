@@ -111,6 +111,25 @@ def _resample_ohlc(df, rule):
     return df.resample(rule).agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last'}).dropna()
 
 
+def _yf_download_with_timeout(ticker, period, interval, timeout_sec=18):
+    """yfinance has no built-in timeout; wrap so Render free tier cannot hang forever."""
+    import concurrent.futures
+    def _job():
+        data = yf.download(
+            ticker, period=period, interval=interval,
+            progress=False, auto_adjust=True, threads=False,
+        )
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+        return data
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_job)
+            return fut.result(timeout=timeout_sec)
+    except Exception:
+        return pd.DataFrame()
+
+
 def fetch_timeframe_data_legacy(symbol, tf_code, outputsize=250):
     td_interval = _TF_TWELVE_INTERVAL.get(tf_code, "30min")
     fetch_size = outputsize * 3 if tf_code == "3min" else outputsize
@@ -120,19 +139,18 @@ def fetch_timeframe_data_legacy(symbol, tf_code, outputsize=250):
         ticker = normalize_ticker_yfinance(symbol)
         yf_interval = _TF_YF_INTERVAL.get(tf_code, "30m")
         period = _TF_YF_PERIOD.get(yf_interval, "30d")
-        try:
-            data = yf.download(ticker, period=period, interval=yf_interval, progress=False, auto_adjust=True)
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = data.columns.get_level_values(0)
-            raw = data
-        except Exception:
-            raw = pd.DataFrame()
+        raw = _yf_download_with_timeout(ticker, period, yf_interval, timeout_sec=18)
 
-    if raw.empty:
+    if raw is None or (hasattr(raw, "empty") and raw.empty):
         return pd.DataFrame()
 
     if tf_code in _TF_RESAMPLE:
+        raw = raw.copy()
         raw.columns = [c.capitalize() for c in raw.columns]
-        raw = _resample_ohlc(raw[['Open', 'High', 'Low', 'Close']], _TF_RESAMPLE[tf_code])
+        cols = [c for c in ["Open", "High", "Low", "Close"] if c in raw.columns]
+        if len(cols) < 4:
+            return pd.DataFrame()
+        raw = _resample_ohlc(raw[cols], _TF_RESAMPLE[tf_code])
 
     return clean_and_normalize_data(raw)
+

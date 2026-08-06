@@ -172,7 +172,13 @@ def run_topdown_analysis(symbol):
             if snap:
                 frames.append(snap)
     if not frames:
-        return {"error": f"No data for {symbol}."}
+        return {
+            "error": (
+                f"No market data for {symbol}. "
+                "On Render, MT5 is unavailable — set TWELVE_DATA_API_KEY or check yfinance access."
+            )
+        }
+
 
     htf = frames[0]
     overall_bias = htf["ema200_bias"]

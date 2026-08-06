@@ -680,6 +680,7 @@ async def send_institutional_topdown(context, chat_id, symbol):
                     "fvgs": chart_frame.get("fvgs") or [],
                     "order_blocks": chart_frame.get("order_blocks") or [],
                     "inducements": chart_frame.get("inducements") or [],
+                    "base_zones": chart_frame.get("base_zones") or [],
                     "structure": chart_frame.get("structure") or {},
                     "volume_profile": chart_frame.get("volume_profile") or analysis.get("volume_profile"),
                     "bos_events": chart_frame.get("bos_events") or [],
@@ -687,6 +688,7 @@ async def send_institutional_topdown(context, chat_id, symbol):
                     "projections": analysis.get("projections") or [],
                     "position": analysis.get("position"),
                 }
+
                 tf_lab = chart_frame.get("tf_label", "1H")
                 chart_img = generate_smc_map(
                     chart_frame["df"],
