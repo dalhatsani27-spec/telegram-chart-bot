@@ -23,6 +23,7 @@ import trade_state as ts
 import engine
 import engine_api
 import ai_throttle
+from direction_banner import direction_banner
 from institutional_analysis import run_topdown_analysis, format_institutional_report
 from amd_analysis import run_amd_analysis, format_amd_report
 from market_structure import structure_trade_permission
@@ -752,9 +753,11 @@ async def send_full_analysis(context, chat_id, symbol, timeframe):
                 f"- Confirmation: close beyond {fmt.format(setup['geometry_data']['trigger_price'])} "
                 f"-- higher probability, standard size (this is what the EA waits for)\n"
             )
-        summary = (f"SUMMARY ({symbol} | {setup['selected_tf']}):\n- Pattern: {setup['pattern_name']}\n"
+        summary = (f"SUMMARY ({symbol} | {setup['selected_tf']}):\n"
+                   + direction_banner(setup['direction'], extra=setup['action_type']) + "\n"
+                   f"- Pattern: {setup['pattern_name']}\n"
                    f"- Confidence: {setup['confidence']:.1f}%\n- Status: {setup['trendline_status']}\n"
-                   f"- Signal: {setup['direction']} [{setup['action_type']}]\n" + trade_block + entry_styles_block)
+                   + trade_block + entry_styles_block)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🤖 AI Commentary", callback_data=f"ai_commentary|{symbol}|{timeframe}")]])
         await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"{symbol} ({setup['selected_tf']}) | {ts_str}")
         await context.bot.send_message(chat_id=chat_id, text=summary)
@@ -1259,14 +1262,16 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 # ==========================================
 def on_auto_fired(setup):
     fmt = f"{{:.{_decimals_for(setup['symbol'])}f}}"
-    text = (f"🚨 AUTO-FIRED: {setup['symbol']} {setup['bias']} [{setup['order_type']}]\n"
+    text = (f"🚨 AUTO-FIRED: {setup['symbol']} [{setup['order_type']}]\n"
+           + direction_banner(setup['bias'], extra=setup['symbol']) + "\n"
            f"Pattern: {setup['pattern_name']}\nEntry: {fmt.format(setup['entry'])}\n"
            f"SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}")
     push_telegram_message(text)
 
 def on_approval_request(approval_id, setup):
     fmt = f"{{:.{_decimals_for(setup['symbol'])}f}}"
-    text = (f"⏳ APPROVAL NEEDED: {setup['symbol']} {setup['bias']} [{setup['order_type']}]\n"
+    text = (f"⏳ APPROVAL NEEDED: {setup['symbol']} [{setup['order_type']}]\n"
+           + direction_banner(setup['bias'], extra=setup['symbol']) + "\n"
            f"Pattern: {setup['pattern_name']}\nEntry: {fmt.format(setup['entry'])}\n"
            f"SL: {fmt.format(setup['sl'])} | TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}\n"
            f"Expires in 3 minutes.")
@@ -1278,7 +1283,8 @@ def on_manual_ticket(setup):
     fmt = f"{{:.{_decimals_for(setup['symbol'])}f}}"
     order_note = "Place as a LIMIT order at this exact price." if setup['order_type'] == "LIMIT" else "Place as a MARKET order now."
     text = (f"📋 MANUAL SETUP (Copy Trade -- you're away, EA is halted):\n"
-           f"{setup['symbol']} {setup['bias']} | {setup['pattern_name']}\n{order_note}\n\n"
+           + direction_banner(setup['bias'], extra=setup['symbol']) + "\n"
+           f"{setup['pattern_name']}\n{order_note}\n\n"
            f"Entry: {fmt.format(setup['entry'])}\nSL: {fmt.format(setup['sl'])}\n"
            f"TP1: {fmt.format(setup['tp1'])} | TP2: {fmt.format(setup['tp2'])}")
     push_telegram_message(text)
