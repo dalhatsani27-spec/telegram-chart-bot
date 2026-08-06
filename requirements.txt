@@ -1,9 +1,5 @@
+metaapi-cloud-sdk>=25.0.0
 python-telegram-bot>=20.0
-flask
-requests
-numpy
-pandas
-mplfinance
-matplotlib
-openai
-yfinance
+pandas>=2.0.0
+numpy>=1.24.0
+python-dotenv>=1.0.0
