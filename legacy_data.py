@@ -21,6 +21,11 @@ except ImportError:
 
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
+# Short in-memory cache so multi-TF analysis does not re-hit the API
+_TD_CACHE = {}
+_TD_CACHE_TTL = 90  # seconds
+
+
 _TF_TWELVE_INTERVAL = {"1min": "1min", "3min": "1min", "5min": "5min", "15min": "15min", "30min": "30min", "1h": "1h", "4h": "4h"}
 _TF_YF_INTERVAL = {"1min": "1m", "3min": "1m", "5min": "5m", "15min": "15m", "30min": "30m", "1h": "60m", "4h": "60m"}
 _TF_RESAMPLE = {"3min": "3min"}
@@ -60,7 +65,14 @@ def fetch_twelve_data(symbol, interval="30min", outputsize=150):
     if not TWELVE_DATA_API_KEY:
         print("[legacy_data] TWELVE_DATA_API_KEY not set — skipping Twelve Data")
         return pd.DataFrame()
+    import time as _time
     clean_symbol = normalize_ticker_twelve_data(symbol)
+    cache_key = f"{clean_symbol}|{interval}|{outputsize}"
+    hit = _TD_CACHE.get(cache_key)
+    if hit is not None:
+        ts, df = hit
+        if _time.time() - ts < _TD_CACHE_TTL and df is not None and not df.empty:
+            return df.copy()
     url = "https://api.twelvedata.com/time_series"
     params = {
         "symbol": clean_symbol,
@@ -83,7 +95,9 @@ def fetch_twelve_data(symbol, interval="30min", outputsize=150):
                 columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"},
                 inplace=True,
             )
-            return df[["Open", "High", "Low", "Close"]].dropna()
+            out = df[["Open", "High", "Low", "Close"]].dropna()
+            _TD_CACHE[cache_key] = (_time.time(), out)
+            return out.copy()
         # Surface API messages (credits, invalid symbol, etc.)
         msg = data.get("message") or data.get("status") or res.text[:200]
         print(f"[legacy_data] Twelve Data empty for {clean_symbol} {interval}: {msg}")

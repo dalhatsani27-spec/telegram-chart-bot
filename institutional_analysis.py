@@ -130,21 +130,25 @@ def _fit_trendline_family(df, lookback=80):
 
 
 def _analyse_single_tf(symbol, tf_code, tf_label):
-    df = mt5_data.fetch_candles(symbol, tf_code, count=250)
+    df = mt5_data.fetch_candles(symbol, tf_code, count=150)
     if df is None or df.empty or len(df) < 40:
         return None
     ema_bias, ema_note, ema_dist = _ema200_bias(df)
     vwap = _vwap_context(df)
-    trend = _fit_trendline_family(df)
-    vp = compute_volume_profile(df.iloc[:-1])
-    best, all_pats = scan_all_patterns(df.iloc[:-1], volume_profile=vp)
-    structure = analyse_structure(df, left=3, right=3, lookback=70)
-    # LOCKED clean-chart defaults: fewer zones, only structure-confirmed OBs
-    fvgs = detect_fvgs(df, min_gap_atr=0.18, max_zones=4)
-    obs = detect_order_blocks(df, structure=structure, max_zones=3, require_bos=True)
-    idms = detect_inducement_zones(df, max_zones=3)
-    base_zones = detect_base_zones(df, max_zones=4)
-    bos_events = build_bos_events(df, max_events=6)
+    # Full detectors only on HTF/primary chart TF — keeps Render free tier under timeout
+    heavy = tf_code in ("4h", "1h")
+    trend = _fit_trendline_family(df) if heavy else None
+    vp = compute_volume_profile(df.iloc[:-1]) if heavy else None
+    if heavy:
+        best, all_pats = scan_all_patterns(df.iloc[:-1], volume_profile=vp)
+    else:
+        best, all_pats = None, []
+    structure = analyse_structure(df, left=3, right=3, lookback=50 if heavy else 40)
+    fvgs = detect_fvgs(df, min_gap_atr=0.18, max_zones=4 if heavy else 2)
+    obs = detect_order_blocks(df, structure=structure, max_zones=3 if heavy else 2, require_bos=True)
+    idms = detect_inducement_zones(df, max_zones=3 if heavy else 2)
+    base_zones = detect_base_zones(df, max_zones=3) if heavy else []
+    bos_events = build_bos_events(df, max_events=6 if heavy else 3)
     return {
         "tf": tf_code, "tf_label": tf_label, "df": df,
         "close": float(df["Close"].iloc[-1]),
