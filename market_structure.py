@@ -38,6 +38,72 @@ def find_swings(df, left=3, right=3):
     return swings
 
 
+
+def filter_non_ranging_swings(df, pivots, range_atr_mult=2.2, min_leg_atr=0.55):
+    """
+    LOCKED RULE: only keep swings that are part of directional (non-ranging) structure.
+
+    A swing is kept when the leg into it is meaningful vs ATR.
+    Swings that form inside tight sideways chop are discarded.
+    """
+    if not pivots or df is None or len(df) < 10:
+        return pivots or []
+
+    if "ATR" in df.columns and not df["ATR"].isna().all():
+        atr = df["ATR"].values.astype(float)
+    else:
+        atr = (df["High"] - df["Low"]).rolling(14, min_periods=1).mean().values
+
+    kept = [pivots[0]]
+    for i in range(1, len(pivots)):
+        prev = kept[-1]
+        cur = pivots[i]
+        a = float(atr[min(cur["index"], len(atr) - 1)]) if len(atr) else 0.0
+        if a <= 0:
+            a = abs(cur["price"] - prev["price"]) or 1e-9
+        leg = abs(cur["price"] - prev["price"])
+        # Discard micro legs that are just range noise
+        if leg < min_leg_atr * a:
+            # Replace previous same-type extreme if this one is more extreme
+            if kept and kept[-1]["type"] == cur["type"]:
+                if cur["type"] == "high" and cur["price"] > kept[-1]["price"]:
+                    kept[-1] = cur
+                elif cur["type"] == "low" and cur["price"] < kept[-1]["price"]:
+                    kept[-1] = cur
+            continue
+        kept.append(cur)
+
+    # Second pass: drop internal swings that sit inside a tight box of neighbors
+    if len(kept) < 4:
+        return kept
+    final = [kept[0]]
+    for i in range(1, len(kept) - 1):
+        a = float(atr[min(kept[i]["index"], len(atr) - 1)]) if len(atr) else 0.0
+        window = kept[max(0, i - 2): i + 3]
+        prices = [p["price"] for p in window]
+        box = max(prices) - min(prices)
+        if a > 0 and box < range_atr_mult * a:
+            # Inside a ranging cluster — skip unless it is the extreme of the cluster
+            if kept[i]["type"] == "high" and kept[i]["price"] < max(prices) * 0.9995:
+                continue
+            if kept[i]["type"] == "low" and kept[i]["price"] > min(prices) * 1.0005:
+                continue
+        final.append(kept[i])
+    final.append(kept[-1])
+
+    # Ensure alternating after filtering
+    cleaned = []
+    for p in final:
+        if cleaned and cleaned[-1]["type"] == p["type"]:
+            if p["type"] == "high" and p["price"] >= cleaned[-1]["price"]:
+                cleaned[-1] = p
+            elif p["type"] == "low" and p["price"] <= cleaned[-1]["price"]:
+                cleaned[-1] = p
+        else:
+            cleaned.append(p)
+    return cleaned
+
+
 def zigzag_swings(df, depth=5, deviation_atr=0.35):
     """
     ZigZag-style alternating swing highs/lows (noise-filtered).
@@ -133,7 +199,8 @@ def zigzag_swings(df, depth=5, deviation_atr=0.35):
                 cleaned[-1] = p
         else:
             cleaned.append(p)
-    return cleaned
+    # LOCKED: drop ranging / choppy swings
+    return filter_non_ranging_swings(df, cleaned)
 
 
 def _last_swing(swings, swing_type, before_idx=None):
