@@ -28,25 +28,23 @@ import pandas as pd
 # ----------------------------------------------------------------------------
 def find_pivots(df, left=3, right=3):
     """
-    Fractal pivot detection: a bar is a pivot HIGH if its High is the max of
-    the (left + 1 + right) window centered on it; pivot LOW analogous on Lows.
+    Swing pivot detection, sourced from the shared ZigZag engine
+    (market_structure.zigzag_swings) so pattern scanning agrees with
+    everything else in the bot (chart drawing, trendlines, SMC zones,
+    structure engine) instead of running its own separate fractal calc
+    that could disagree and produce conflicting reads across strategies.
+
+    left/right are kept as the public knobs (unchanged call signature)
+    and mapped onto ZigZag's `depth` so nothing else has to change.
 
     Returns two lists of integer indices (positions, not timestamps):
         pivot_highs, pivot_lows
     """
-    highs = df['High'].values
-    lows = df['Low'].values
-    n = len(df)
-    pivot_highs, pivot_lows = [], []
-
-    for i in range(left, n - right):
-        window_h = highs[i - left:i + right + 1]
-        if highs[i] == window_h.max() and np.argmax(window_h) == left:
-            pivot_highs.append(i)
-        window_l = lows[i - left:i + right + 1]
-        if lows[i] == window_l.min() and np.argmin(window_l) == left:
-            pivot_lows.append(i)
-
+    from market_structure import zigzag_swings
+    depth = max(2, left + right)
+    pivots = zigzag_swings(df, depth=depth, deviation_atr=0.30)
+    pivot_highs = [p["index"] for p in pivots if p["type"] == "high"]
+    pivot_lows = [p["index"] for p in pivots if p["type"] == "low"]
     return pivot_highs, pivot_lows
 
 
