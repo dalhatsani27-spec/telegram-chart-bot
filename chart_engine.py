@@ -279,22 +279,76 @@ def _draw_volume_profile_levels(ax, vp, chart_len: int):
 
 
 def _draw_position_container(ax, pos, chart_len: int):
+    """
+    Big, unmissable long/short position container (matches the shaded
+    entry->target boxes in TradingView-style SMC education charts):
+      - solid shaded risk zone (entry->SL, red) and reward zone
+        (entry->TP1/TP2, green)
+      - thick bordered box around the whole container
+      - large bold LONG / SHORT banner with R:R, colored green/red
+      - thick entry/SL/TP lines with labels
+    Used identically by every chart type (SMC map, AMD map, trendline map,
+    ticket chart) so the position reads the same everywhere.
+    """
     if not pos:
         return
-    if pos.get("entry") is not None:
-        ax.axhline(pos["entry"], color=COLORS["entry"], linestyle="--", linewidth=1.45)
-        ax.text(chart_len * 0.70, pos["entry"], f"ENTRY {pos.get('side', pos.get('direction', ''))}",
-                fontsize=7, color=COLORS["entry"], fontweight="bold", va="bottom")
-    if pos.get("sl") is not None:
-        ax.axhline(pos["sl"], color=COLORS["sl"], linestyle="-", linewidth=1.35)
-        ax.text(chart_len * 0.70, pos["sl"], "SL", fontsize=7, color=COLORS["sl"], fontweight="bold", va="top")
-    if pos.get("tp1") is not None:
-        ax.axhline(pos["tp1"], color=COLORS["tp"], linestyle=":", linewidth=1.2)
-        ax.text(chart_len * 0.70, pos["tp1"], "TP1", fontsize=7, color=COLORS["tp"], va="bottom")
-    if pos.get("tp2") is not None:
-        ax.axhline(pos["tp2"], color=COLORS["tp"], linestyle=":", linewidth=1.2)
-        ax.text(chart_len * 0.70, pos["tp2"], "TP2", fontsize=7, color=COLORS["tp"], va="bottom")
+    entry = pos.get("entry")
+    sl = pos.get("sl")
+    tp1 = pos.get("tp1")
+    tp2 = pos.get("tp2")
+    if entry is None:
+        return
 
+    side = str(pos.get("side") or pos.get("direction") or "").upper()
+    is_long = ("LONG" in side) or (side == "BUY") or ("BULL" in side)
+    box_color = "#00e676" if is_long else "#ff1744"
+    label = "LONG" if is_long else "SHORT"
+
+    x0_frac = 0.66
+    x0 = chart_len * x0_frac
+    x1 = chart_len - 1
+
+    span_vals = [entry]
+    if sl is not None:
+        ax.axhspan(min(entry, sl), max(entry, sl), xmin=x0_frac, xmax=1.0,
+                   facecolor="#ff1744", alpha=0.28, zorder=2)
+        ax.axhline(sl, color="#ff1744", linestyle="-", linewidth=2.0, xmin=x0_frac, zorder=4)
+        ax.text(x0 + 1, sl, "SL", fontsize=8, color="#ff1744", fontweight="bold", va="top", zorder=12)
+        span_vals.append(sl)
+    for tp, tp_label, tp_alpha in ((tp1, "TP1", 1.0), (tp2, "TP2", 0.7)):
+        if tp is None:
+            continue
+        ax.axhspan(min(entry, tp), max(entry, tp), xmin=x0_frac, xmax=1.0,
+                   facecolor="#00e676", alpha=0.28 * tp_alpha, zorder=2)
+        ax.axhline(tp, color="#00e676", linestyle=":", linewidth=1.8, xmin=x0_frac, alpha=max(tp_alpha, 0.6), zorder=4)
+        ax.text(x0 + 1, tp, tp_label, fontsize=8, color="#00e676", fontweight="bold", va="bottom", zorder=12)
+        span_vals.append(tp)
+
+    ax.axhline(entry, color=COLORS["entry"], linestyle="--", linewidth=2.2, xmin=x0_frac, zorder=5)
+    ax.text(x0 + 1, entry, "ENTRY", fontsize=8, color=COLORS["entry"], fontweight="bold", va="bottom", zorder=12)
+
+    span_lo, span_hi = min(span_vals), max(span_vals)
+    if span_hi > span_lo:
+        rect = mpatches.FancyBboxPatch(
+            (x0, span_lo), (x1 - x0), (span_hi - span_lo),
+            boxstyle="square,pad=0", facecolor="none", edgecolor=box_color,
+            linewidth=2.4, alpha=0.9, zorder=3,
+        )
+        ax.add_patch(rect)
+
+    risk = abs(entry - sl) if sl is not None else None
+    reward = abs((tp1 if tp1 is not None else tp2) - entry) if (tp1 is not None or tp2 is not None) else None
+    rr_txt = f"  R:R 1:{(reward / risk):.1f}" if risk and reward else ""
+
+    header_y = span_hi + (span_hi - span_lo) * 0.14 if span_hi > span_lo else entry * 1.001
+    ax.text(
+        (x0 + x1) / 2, header_y, f"{label}{rr_txt}",
+        fontsize=14, color="#000000" if is_long else "#ffffff",
+        fontweight="bold", ha="center", va="bottom",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor=box_color, alpha=0.95,
+                  edgecolor="#000000", linewidth=1.3),
+        zorder=13,
+    )
 
 
 def _draw_vp_histogram(ax, vp, chart_len: int, price_min: float, price_max: float):
@@ -332,49 +386,10 @@ def _draw_vp_histogram(ax, vp, chart_len: int, price_min: float, price_max: floa
 
 
 def _draw_tv_position_box(ax, pos, chart_len: int):
-    """
-    TradingView-style long/short container:
-      - shaded risk (entry→SL) and reward (entry→TP) zones
-      - R:R label
-    Projection levels = container edges.
-    """
-    if not pos:
-        return
-    entry = pos.get("entry")
-    sl = pos.get("sl")
-    tp1 = pos.get("tp1")
-    tp2 = pos.get("tp2") or tp1
-    if entry is None or sl is None or tp1 is None:
-        return
-    side = str(pos.get("side") or pos.get("direction") or "").upper()
-    risk = abs(entry - sl)
-    reward = abs(tp1 - entry)
-    rr = float(pos.get("rr")) if pos.get("rr") is not None else ((reward / risk) if risk > 0 else 0.0)
-
-    x0 = chart_len * 0.72
-    x1 = chart_len - 1
-
-    # Risk zone
-    y_lo_r, y_hi_r = min(entry, sl), max(entry, sl)
-    ax.axhspan(y_lo_r, y_hi_r, xmin=0.72, xmax=1.0, facecolor="#ef5350", alpha=0.18, zorder=2)
-    # Reward zone (to TP1)
-    y_lo_p, y_hi_p = min(entry, tp1), max(entry, tp1)
-    ax.axhspan(y_lo_p, y_hi_p, xmin=0.72, xmax=1.0, facecolor="#26a69a", alpha=0.18, zorder=2)
-
-    ax.axhline(entry, color=COLORS["entry"], linestyle="--", linewidth=1.4, xmin=0.72)
-    ax.axhline(sl, color=COLORS["sl"], linestyle="-", linewidth=1.3, xmin=0.72)
-    ax.axhline(tp1, color=COLORS["tp"], linestyle=":", linewidth=1.2, xmin=0.72)
-    if tp2 is not None and tp2 != tp1:
-        ax.axhline(tp2, color=COLORS["tp"], linestyle=":", linewidth=1.0, xmin=0.72, alpha=0.7)
-
-    label = f"{'LONG' if 'LONG' in side or side == 'BUY' else 'SHORT'}  R:R 1:{rr:.1f}"
-    ax.text(x0 + 1, max(y_hi_r, y_hi_p), label, fontsize=8, color="#ffffff",
-            fontweight="bold", va="bottom",
-            bbox=dict(boxstyle="round,pad=0.25", facecolor="#263238", alpha=0.85, edgecolor="#546e7a"),
-            zorder=12)
-    ax.text(x0 + 1, entry, "Entry", fontsize=6.5, color=COLORS["entry"], va="bottom")
-    ax.text(x0 + 1, sl, "SL", fontsize=6.5, color=COLORS["sl"], va="top")
-    ax.text(x0 + 1, tp1, "TP1", fontsize=6.5, color=COLORS["tp"], va="bottom")
+    """Alias kept for existing call sites -- delegates to the single shared
+    _draw_position_container so every chart type renders an identical,
+    equally bold container instead of maintaining two versions."""
+    _draw_position_container(ax, pos, chart_len)
 
 
 def generate_smc_map(
@@ -1007,18 +1022,14 @@ def generate_ticket_chart(
     )
     ax = axlist[0]
 
-    if ticket.get("entry") is not None:
-        ax.axhline(ticket["entry"], color=COLORS["entry"], linestyle="--", linewidth=1.6)
-        ax.text(2, ticket["entry"], "ENTRY", fontsize=8, color=COLORS["entry"], fontweight="bold", va="bottom")
-    if ticket.get("sl") is not None:
-        ax.axhline(ticket["sl"], color=COLORS["sl"], linestyle="-", linewidth=1.5)
-        ax.text(2, ticket["sl"], "SL", fontsize=8, color=COLORS["sl"], fontweight="bold", va="top")
-    if ticket.get("tp1") is not None:
-        ax.axhline(ticket["tp1"], color=COLORS["tp"], linestyle=":", linewidth=1.3)
-        ax.text(2, ticket["tp1"], "TP1", fontsize=8, color=COLORS["tp"], fontweight="bold", va="bottom")
-    if ticket.get("tp2") is not None:
-        ax.axhline(ticket["tp2"], color=COLORS["tp"], linestyle=":", linewidth=1.3)
-        ax.text(2, ticket["tp2"], "TP2", fontsize=8, color=COLORS["tp"], fontweight="bold", va="bottom")
+    pos = {
+        "entry": ticket.get("entry"),
+        "sl": ticket.get("sl"),
+        "tp1": ticket.get("tp1"),
+        "tp2": ticket.get("tp2"),
+        "side": ticket.get("direction", ""),
+    }
+    _draw_position_container(ax, pos, chart_len)
 
     direction = ticket.get("direction", "")
     strategy = ticket.get("strategy", "")
