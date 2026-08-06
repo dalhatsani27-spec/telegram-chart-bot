@@ -863,17 +863,8 @@ def generate_trendline_map(
             pivots = zigzag_swings(df, depth=4, deviation_atr=0.28)
         except Exception:
             pivots = []
-    # Full HH/HL/LH/LL labeling + zigzag skeleton
-    _draw_swings(ax, pivots, offset, chart_len)
-    # Emphasize every visible pivot with a clear marker
-    for s in pivots:
-        idx = int(s.get("index", -1)) - offset
-        if not (0 <= idx < chart_len):
-            continue
-        price = float(s["price"])
-        is_high = s.get("type") == "high"
-        color = "#ffeb3b" if is_high else "#00e5ff"
-        ax.scatter([idx], [price], s=42, c=color, edgecolors="#000000", linewidths=0.6, zorder=10)
+    # LOCKED clean style (match hand-drawn maps): NO HH/HL spam, no zigzag skeleton
+    # Only subtle markers on the few pivots that anchor the rails
 
     # Clean parallel family only (MT5-style rails — anchored on pivots)
     def _line_at(tl, x):
@@ -889,7 +880,7 @@ def generate_trendline_map(
         if family.get("channel"):
             rails = [family["channel"].get("lower"), family["channel"].get("upper")]
             rails = [r for r in rails if r]
-    for i, tl in enumerate(rails[:5]):
+    for i, tl in enumerate(rails[:3]):
         if not tl:
             continue
         xs = [max(0, int(tl["x0"]) - offset), chart_len - 1]
@@ -909,7 +900,7 @@ def generate_trendline_map(
     # M/W neckline (double top / double bottom)
     mw = family.get("mw_pattern")
     if mw and mw.get("neckline") is not None:
-        ax.axhline(mw["neckline"], color="#ff9800", linestyle="-", linewidth=1.6, alpha=0.95, zorder=5)
+        ax.axhline(mw["neckline"], color="#ff9800", linestyle="--", linewidth=1.1, alpha=0.70, zorder=5)
         ax.text(chart_len * 0.02, mw["neckline"], f"NECKLINE ({mw.get('pattern', '')})",
                 fontsize=7.5, color="#ffb74d", fontweight="bold", va="bottom")
 
@@ -948,17 +939,76 @@ def generate_trendline_map(
                 ax.annotate(label, (px, py), fontsize=6.5, color="#ffe0b2",
                             xytext=(4, 4), textcoords="offset points")
 
-    # Projections — subtle
-    for p in (family.get("projections") or [])[:3]:
-        ax.axhline(p["price"], color="#7e57c2", linestyle="-.", linewidth=0.9, alpha=0.65)
-        ax.text(chart_len * 0.01, p["price"], p["label"], fontsize=6.5, color="#b39ddb", va="bottom", alpha=0.85)
+    # Horizontal Support / Resistance from recent non-ranging pivots (bounce expectations)
+    try:
+        recent_piv = [p for p in (pivots or []) if 0 <= int(p.get("index", -1)) - offset < chart_len][-6:]
+        highs = sorted([float(p["price"]) for p in recent_piv if p.get("type") == "high"], reverse=True)
+        lows = sorted([float(p["price"]) for p in recent_piv if p.get("type") == "low"])
+        for price in highs[:2]:
+            ax.axhline(price, color="#ef5350", linestyle="--", linewidth=1.0, alpha=0.55, zorder=3)
+            ax.text(chart_len * 0.01, price, "R", fontsize=7, color="#ef5350", va="bottom", fontweight="bold")
+        for price in lows[:2]:
+            ax.axhline(price, color="#26a69a", linestyle="--", linewidth=1.0, alpha=0.55, zorder=3)
+            ax.text(chart_len * 0.01, price, "S", fontsize=7, color="#26a69a", va="top", fontweight="bold")
+    except Exception:
+        pass
 
-    # Volume Profile histogram (right side) + POC/VA
+    # Fibonacci pullback levels (for trend entries) — 0.5 / 0.618 / 0.705 / 0.79
+    # Anchored to the last clear impulse leg from non-ranging pivots
+    try:
+        direction = str(family.get("direction") or setup.get("direction") or "").upper()
+        if direction in ("BUY", "SELL", "LONG", "SHORT", "BULLISH", "BEARISH") and pivots and len(pivots) >= 2:
+            # Last impulse: previous swing -> latest swing in trend direction
+            leg = pivots[-2:]
+            a, b = leg[0], leg[1]
+            hi = max(float(a["price"]), float(b["price"]))
+            lo = min(float(a["price"]), float(b["price"]))
+            span = hi - lo
+            if span > 0:
+                # Standard ICT/SMC OTE-style pullback zone
+                fibs = [
+                    (0.50, "0.5"),
+                    (0.618, "0.618"),
+                    (0.705, "0.705"),
+                    (0.79, "0.79"),
+                ]
+                is_buy = direction in ("BUY", "LONG", "BULLISH")
+                for ratio, label in fibs:
+                    if is_buy:
+                        # Pullback down into discount of bullish impulse
+                        price = hi - span * ratio
+                    else:
+                        # Pullback up into premium of bearish impulse
+                        price = lo + span * ratio
+                    ax.axhline(price, color="#ab47bc", linestyle=":", linewidth=0.95, alpha=0.75, zorder=3)
+                    ax.text(chart_len * 0.70, price, f"Fib {label}", fontsize=6.5,
+                            color="#ce93d8", va="bottom", alpha=0.9)
+                # Highlight OTE band (0.618–0.79) lightly
+                if is_buy:
+                    ote_top = hi - span * 0.618
+                    ote_bot = hi - span * 0.79
+                else:
+                    ote_bot = lo + span * 0.618
+                    ote_top = lo + span * 0.79
+                ax.axhspan(min(ote_bot, ote_top), max(ote_bot, ote_top),
+                           facecolor="#ab47bc", alpha=0.06, zorder=1)
+    except Exception:
+        pass
+
+    # Volume Profile — keep POC + Value Area (useful), no heavy histogram clutter
     vp = family.get("volume_profile") or setup.get("volume_profile")
-    _draw_vp_histogram(ax, vp, chart_len, price_min, price_max)
-    if vp and vp.get("poc_price") is not None:
-        ax.axhline(vp["poc_price"], color=COLORS["poc"], linestyle=":", linewidth=1.15, alpha=0.8)
-        ax.text(chart_len * 0.55, vp["poc_price"], "POC", fontsize=6.5, color=COLORS["poc"], va="bottom")
+    if vp:
+        if vp.get("poc_price") is not None:
+            ax.axhline(vp["poc_price"], color=COLORS["poc"], linestyle=":", linewidth=1.25, alpha=0.9)
+            ax.text(chart_len * 0.55, vp["poc_price"], "POC", fontsize=7, color=COLORS["poc"], va="bottom")
+        if vp.get("value_area_low") is not None and vp.get("value_area_high") is not None:
+            # Light Value Area band (not the old heavy orange box)
+            ax.axhspan(vp["value_area_low"], vp["value_area_high"],
+                       facecolor="#ff9800", alpha=0.05, zorder=1)
+            ax.axhline(vp["value_area_high"], color="#ffb74d", linestyle=":", linewidth=0.8, alpha=0.7)
+            ax.axhline(vp["value_area_low"], color="#ffb74d", linestyle=":", linewidth=0.8, alpha=0.7)
+            ax.text(chart_len * 0.01, vp["value_area_high"], "VA-H", fontsize=6, color="#ffb74d", va="bottom")
+            ax.text(chart_len * 0.01, vp["value_area_low"], "VA-L", fontsize=6, color="#ffb74d", va="top")
 
     # TradingView-style position container (R:R) — projection levels
     pos = setup.get("position") or family.get("position")
