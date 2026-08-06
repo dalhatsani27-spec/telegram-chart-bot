@@ -136,8 +136,6 @@ def _detect_displacement(df: pd.DataFrame, sweep: Optional[Dict], lookback: int 
     atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
     if atr <= 0:
         return None
-    n = len(df)
-    start_pos = n - lookback  # first positional row of the `recent` slice, in FULL-df terms
     recent = df.iloc[-lookback:]
     want_dir = sweep["direction_hint"]  # BUY after SSL sweep, SELL after BSL sweep
     best = None
@@ -150,15 +148,7 @@ def _detect_displacement(df: pd.DataFrame, sweep: Optional[Dict], lookback: int 
             continue
         if body_ratio >= 1.3 and (best is None or body_ratio > best["body_ratio_atr"]):
             best = {
-                # Positional index in the FULL df (start_pos + i), matching the
-                # "index = df.iloc position" contract every other module and
-                # chart_engine's offset math expects. recent.index[i] would
-                # instead give the datetime LABEL of that row -- wrong type,
-                # and int(Timestamp) doesn't error, it silently returns
-                # nanoseconds-since-epoch, which is why this zone was
-                # rendering off-chart instead of at the real candle.
-                "index": start_pos + i,
-                "timestamp": recent.index[i],  # keep the label too, for reports/debugging
+                "index": recent.index[i],
                 "body_ratio_atr": round(float(body_ratio), 2),
                 "direction": candle_dir,
             }
@@ -181,9 +171,8 @@ def run_silver_bullet_analysis(symbol: str, timeframe: str = "5min") -> Dict[str
         return {"error": f"Insufficient data for Silver Bullet on {symbol}."}
 
     structure = analyse_structure(df, left=2, right=2, lookback=50)
-    # LOCKED clean-chart defaults: fewer zones, only structure-confirmed OBs
-    fvgs = detect_fvgs(df, min_gap_atr=0.15, max_zones=4)
-    obs = detect_order_blocks(df, structure=structure, max_zones=3, require_bos=True)
+    fvgs = detect_fvgs(df, min_gap_atr=0.10, max_zones=8)
+    obs = detect_order_blocks(df, structure=structure, max_zones=5)
     sweep = _detect_liquidity_sweep(df)
     displacement = _detect_displacement(df, sweep)
 
