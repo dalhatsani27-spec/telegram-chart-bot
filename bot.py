@@ -1402,9 +1402,29 @@ def run_telegram_bot():
     app_bot.add_handler(CallbackQueryHandler(button_callback_handler))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    loop.run_until_complete(app_bot.initialize())
-    loop.run_until_complete(app_bot.start())
-    loop.run_until_complete(app_bot.updater.start_polling(drop_pending_updates=True))
+    # Startup (initialize/start/start_polling) hits Telegram's API over the
+    # network. A single transient timeout here used to crash the ENTIRE
+    # process (uncaught exception at module level) -- Render would then
+    # restart it, and the brief overlap between the dying and newly-starting
+    # process is a likely source of "Conflict: terminated by other
+    # getUpdates request" errors, on top of just losing the bot for no
+    # good reason. Retry with backoff instead of crashing outright.
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        try:
+            loop.run_until_complete(app_bot.initialize())
+            loop.run_until_complete(app_bot.start())
+            loop.run_until_complete(app_bot.updater.start_polling(drop_pending_updates=True))
+            break
+        except Exception as e:
+            print(f"[startup] Telegram init failed (attempt {attempt}/{max_attempts}): {e!r}")
+            if attempt == max_attempts:
+                print("[startup] Giving up after max attempts -- process will exit.")
+                raise
+            backoff = min(30, 5 * attempt)
+            print(f"[startup] Retrying in {backoff}s...")
+            time.sleep(backoff)
+
     loop.create_task(background_watchlist_scanner())
     loop.run_forever()
 
