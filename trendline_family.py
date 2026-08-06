@@ -22,9 +22,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from market_structure import zigzag_swings, williams_fractals, fractal_structure_levels
+from market_structure import zigzag_swings
 from volume_profile import compute_volume_profile
-
 
 
 def _line_value(x0: float, y0: float, x1: float, y1: float, x: float) -> float:
@@ -277,23 +276,12 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
         return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}
 
     n = len(df)
-
-    # Fractal structure context (multi-scale) — internal only, no arrows drawn
-    frac = fractal_structure_levels(df)
-    fractal_bias = frac.get("bias", "NEUTRAL")
-
-    # Pivot source priority:
-    # 1) ZigZag (noise-filtered, alternating) — primary for clean channels
-    # 2) Fall back to Williams fractals if ZigZag is too sparse
+    # Prefer more pivots on lower TFs so channels match hand-drawn structure
     pivots = zigzag_swings(df, depth=3, deviation_atr=0.22)
     if len(pivots) < 5:
         pivots = zigzag_swings(df, depth=3, deviation_atr=0.15)
     if len(pivots) < 4:
         pivots = zigzag_swings(df, depth=2, deviation_atr=0.12)
-    if len(pivots) < 4:
-        # Last resort: classic Williams fractals (still no arrows on chart)
-        pivots = williams_fractals(df, left=2, right=2)
-
 
     support = _fit_primary(pivots, "support", n, df)
     resistance = _fit_primary(pivots, "resistance", n, df)
@@ -417,26 +405,6 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
                 breakout_grade = brk
 
     projections = _measured_move_projections(df, pivots, direction)
-
-    # Channel-width measured move (classic breakout target)
-    if channel and channel.get("width") and direction in ("BUY", "SELL"):
-        width = float(channel["width"])
-        close = float(df["Close"].iloc[-1])
-        if direction == "BUY":
-            projections.append({
-                "price": close + width,
-                "label": "ChW 1.0x",
-                "mult": 1.0,
-                "side": "BUY",
-            })
-        else:
-            projections.append({
-                "price": close - width,
-                "label": "ChW 1.0x",
-                "mult": 1.0,
-                "side": "SELL",
-            })
-
     vp = compute_volume_profile(df.iloc[:-1])
     mw = _detect_mw_pattern(pivots, df)
     if mw:
@@ -448,50 +416,6 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
             strength = min(100, strength + 12)
     else:
         mw = None
-
-    # Base-zone confluence (RBR/DBD/RBD/DBR) near channel rails
-    base_zones = []
-    try:
-        from smc_zones import detect_base_zones
-        base_zones = detect_base_zones(df, max_zones=4)
-        if base_zones and channel:
-            lower = channel["lower"]["y_end"] if channel.get("lower") else None
-            upper = channel["upper"]["y_end"] if channel.get("upper") else None
-            close = float(df["Close"].iloc[-1])
-            for bz in base_zones:
-                if bz.get("mitigated"):
-                    continue
-                mid = bz.get("mid", 0)
-                near_rail = False
-                if lower is not None and abs(mid - lower) / max(abs(lower), 1e-9) < 0.004:
-                    near_rail = True
-                if upper is not None and abs(mid - upper) / max(abs(upper), 1e-9) < 0.004:
-                    near_rail = True
-                if near_rail:
-                    if (direction == "BUY" and bz.get("bias") == "BULLISH") or (
-                        direction == "SELL" and bz.get("bias") == "BEARISH"
-                    ):
-                        strength = min(100, strength + 8)
-                        reasons.append(
-                            f"Base confluence: {bz.get('type')} {bz.get('bias')} at rail"
-                        )
-                        break
-    except Exception:
-        base_zones = []
-
-    # Fractal multi-scale bias confluence (internal — no arrows)
-    if fractal_bias in ("BUY", "SELL"):
-        if direction == fractal_bias:
-            strength = min(100, strength + 6)
-            reasons.append(f"Fractal structure bias aligned ({fractal_bias})")
-        elif direction in ("BUY", "SELL") and direction != fractal_bias:
-            strength = max(0, strength - 8)
-            reasons.append(f"Fractal structure bias opposing ({fractal_bias})")
-
-    # Final clamp — unconfirmed primaries should not score very high
-    if primary and primary.get("quality") == "unconfirmed":
-        strength = min(strength, 58)
-
 
     # Series for chart (only the parallel family — clean)
     upper_line = np.full(n, np.nan)
@@ -509,7 +433,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
         "strength": max(0, min(100, int(strength))),
         "reasons": reasons,
         "family_kind": family_kind,
-        "family_lines": family_lines,
+        "family_lines": family_lines,  # the clean parallel set
         "uptrends": [primary] if family_kind == "ascending" and primary else [],
         "downtrends": [primary] if family_kind == "descending" and primary else [],
         "channel": channel,
@@ -517,7 +441,6 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
         "mw_pattern": mw,
         "pivots": pivots[-16:],
         "volume_profile": vp,
-        "base_zones": base_zones,
         "upper_line": upper_line,
         "lower_line": lower_line,
         "middle_line": mid_line,
@@ -526,10 +449,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
         "breakout_grade": breakout_grade,
         "primary_quality": primary.get("quality") if primary else None,
         "primary_touches": primary.get("touches") if primary else 0,
-        "fractal_bias": fractal_bias,
     }
-
-
 
 
 def _measured_move_projections(df, pivots, direction) -> List[Dict[str, Any]]:
@@ -737,87 +657,56 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
 
 
 def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
-    """Vital-info only trendline / channel summary."""
     if family.get("error"):
         return family["error"]
-
     quality = family.get("primary_quality")
     quality_tag = {
-        "unconfirmed": "⚠️ 2-touch (tentative)",
-        "confirmed": "✅ confirmed",
-        "crowded": "⚠️ crowded (5+)",
+        "unconfirmed": "⚠️ UNCONFIRMED (2 touches)",
+        "confirmed": "✅ CONFIRMED",
+        "crowded": "⚠️ CROWDED (5+ touches)",
     }.get(quality, "")
-
     lines = [
-        f"📐 TRENDLINE | {symbol}",
-        f"Family: {str(family.get('family_kind', '—')).upper()}  ·  "
-        f"Dir: {family.get('direction')}  ·  Strength: {family.get('strength', 0)}/100",
+        f"📐 TRENDLINE FAMILY  |  {symbol}",
+        f"Family: {family.get('family_kind', '—').upper()}  |  "
+        f"Direction: {family.get('direction')}  |  Strength: {family.get('strength', 0)}/100",
     ]
     if quality_tag:
-        lines.append(f"Validation: {quality_tag} · {family.get('primary_touches', 0)} touches")
-
-    fb = family.get("fractal_bias")
-    if fb and fb != "NEUTRAL":
-        lines.append(f"Fractal bias: {fb}")
-
-    # Only the most important reasons (cap at 4)
-    for r in (family.get("reasons") or [])[:4]:
+        lines.append(f"Trendline validation: {quality_tag} · {family.get('primary_touches', 0)} touches")
+    for r in family.get("reasons") or []:
         lines.append(f"  • {r}")
-
-
     n_rails = len(family.get("family_lines") or [])
-    if n_rails:
-        lines.append(f"Rails: {n_rails}")
-
+    lines.append(f"Parallel rails: {n_rails}")
     mw = family.get("mw_pattern")
     if mw:
-        lines.append(f"Pattern: {mw.get('name', '?')} · neckline {mw.get('neckline', 0):.5f}")
-
-    ch = family.get("channel")
-    if ch and ch.get("width"):
-        lines.append(f"Channel width: {ch['width']:.5f}")
-
+        lines.append(f"Pattern: {mw['name']} · neckline {mw['neckline']:.5f}")
+    if family.get("channel"):
+        w = family["channel"].get("width")
+        if w:
+            lines.append(f"Channel width: {w:.5f}")
     projs = family.get("projections") or []
     if projs:
-        lines.append("Proj: " + " · ".join(f"{p.get('label', '?')} {p.get('price', 0):.5f}" for p in projs[:3]))
-
+        lines.append("Projections: " + " · ".join(f"{p['label']} {p['price']:.5f}" for p in projs))
     vp = family.get("volume_profile")
-    if vp and vp.get("poc_price") is not None:
-        lines.append(
-            f"POC {vp['poc_price']:.5f} | VA {vp.get('value_area_low', 0):.5f}–{vp.get('value_area_high', 0):.5f}"
-        )
-
+    if vp:
+        lines.append(f"POC {vp['poc_price']:.5f} | VA {vp['value_area_low']:.5f}–{vp['value_area_high']:.5f}")
     brk = family.get("breakout_grade")
     if brk:
-        grade_tag = {
-            "confirmed": "✅ CONFIRMED",
-            "developing": "🟡 DEVELOPING",
-            "weak": "🔴 WEAK",
-        }.get(brk.get("strength"), brk.get("strength", "?"))
+        grade_tag = {"confirmed": "✅ CONFIRMED", "developing": "🟡 DEVELOPING",
+                     "weak": "🔴 WEAK / LIKELY FAKEOUT"}.get(brk["strength"], brk["strength"])
         lines.append(
-            f"Breakout: {grade_tag} · {brk.get('penetration_atr', '?')} ATR · "
-            f"{brk.get('consecutive_closes', '?')} closes"
+            f"Breakout grade: {grade_tag} · {brk['penetration_atr']} ATR beyond · "
+            f"{brk['consecutive_closes']} consecutive close(s) · body {brk['body_ratio']}"
         )
-        if brk.get("retest_level") is not None:
-            lines.append(f"Retest: {brk['retest_level']:.5f}")
-
-    # Base-zone confluence (RBR/DBD/RBD/DBR) if present
-    bases = family.get("base_zones") or []
-    if bases:
-        top = bases[0]
-        lines.append(
-            f"Base confluence: {top.get('type')} {top.get('bias')} "
-            f"({top.get('strength', '')}) Q{top.get('quality', 0)}"
-        )
-
-    pos = family.get("position") or build_position_container(family)
+        lines.append(f"Retest zone: {brk['retest_level']:.5f}")
+    pos = build_position_container(family)
     if pos:
         lines.append(
-            f"Position: {pos.get('side')}  E {pos.get('entry', 0):.5f}  "
-            f"SL {pos.get('sl', 0):.5f}  TP1 {pos.get('tp1', 0):.5f}"
+            f"Position: {pos['side']}  Entry {pos['entry']:.5f}  SL {pos['sl']:.5f}  "
+            f"TP1 {pos['tp1']:.5f}  TP2 {pos['tp2']:.5f}"
         )
-        lines.append(f"R:R 1:{pos.get('rr', 0):.2f}")
-
+        lines.append(
+            f"R:R 1:{pos.get('rr', 0):.2f}  (risk {pos.get('risk', 0):.5f} → reward {pos.get('reward', 0):.5f})"
+        )
         if pos.get("liquidity_tp1"):
             lines.append(f"TP1 liquidity: {pos['liquidity_tp1']}")
         if pos.get("entry_note"):
