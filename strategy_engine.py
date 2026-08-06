@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 import trade_state as ts
+from direction_banner import direction_banner, direction_tag
 from institutional_analysis import run_topdown_analysis, format_institutional_report
 from amd_analysis import run_amd_analysis, format_amd_report
 from silver_bullet import (
@@ -516,7 +517,7 @@ def format_trade_ticket(result: Dict[str, Any], symbol: str) -> str:
         "══════════════════════════",
         f"  TRADE TICKET  |  {symbol}",
         "══════════════════════════",
-        f"Direction : {direction}",
+        direction_banner(direction),
         f"Strategy  : {strategy}",
         f"Score     : {score}/100",
         f"Mode      : {ts.state.strategy_label()}",
