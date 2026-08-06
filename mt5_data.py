@@ -3,14 +3,14 @@ import asyncio
 import pandas as pd
 from metaapi_cloud_sdk import MetaApi
 
-# Retrieve tokens from environment variables (set these in Render Dashboard)
+# Retrieve tokens from environment variables (set in Render Dashboard)
 META_API_TOKEN = os.getenv("META_API_TOKEN", "YOUR_META_API_TOKEN_HERE")
 ACCOUNT_ID = os.getenv("META_ACCOUNT_ID", "YOUR_META_ACCOUNT_ID_HERE")
 
-api = MetaApi(META_API_TOKEN)
 
 async def get_rpc_connection():
-    """Initializes and returns an active RPC connection to your MT5 account."""
+    """Initializes MetaApi lazily inside an active event loop and connects."""
+    api = MetaApi(META_API_TOKEN)
     account = await api.metatrader_account_api.get_account(ACCOUNT_ID)
     connection = account.get_rpc_connection()
     await connection.connect()
