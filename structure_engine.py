@@ -37,6 +37,7 @@ import numpy as np
 import pandas as pd
 
 from market_structure import find_swings
+from direction_banner import direction_banner, direction_tag
 
 
 # ============================================================================
@@ -635,6 +636,7 @@ def format_structure_report(result: Dict[str, Any], symbol: str) -> str:
     if result.get("error"):
         return result["error"]
     lines = [f"🏗 INSTITUTIONAL STRUCTURE ENGINE | {symbol}"]
+    lines.append(direction_banner(result.get("direction"), extra=symbol))
     st = result["state"]
     lines.append(f"Stage 1 — State: {st['state']} ({st.get('reason', '')})")
     imp = result["impulse"]
@@ -655,10 +657,10 @@ def format_structure_report(result: Dict[str, Any], symbol: str) -> str:
     lines.append(f"Stage 6 — Manipulation: {man.get('note', '')}")
     acc = result["acceptance"]
     lines.append(f"Stage 7 — Acceptance: {acc.get('note', '')}")
-    lines.append(f"Stage 8 — Entry: {result['direction']} (score {result['score']}/100, path={result['entry'].get('path')})")
+    lines.append(f"Stage 8 — Entry: {direction_tag(result['direction'])} (score {result['score']}/100, path={result['entry'].get('path')})")
     if result["filter"]["reject"]:
         lines.append("Stage 9 — Filter: ❌ REJECTED — " + "; ".join(result["filter"]["reasons"]))
     else:
         lines.append("Stage 9 — Filter: ✅ passed")
-    lines.append(f"Verdict: {'TRADE — ' + result['direction'] if result['valid'] else 'WAIT'}")
+    lines.append(f"Verdict: {'TRADE — ' + direction_tag(result['direction']) if result['valid'] else 'WAIT'}")
     return "\n".join(lines)
