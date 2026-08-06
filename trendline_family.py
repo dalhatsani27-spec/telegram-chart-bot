@@ -276,12 +276,13 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
         return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}
 
     n = len(df)
-    # Prefer more pivots on lower TFs so channels match hand-drawn structure
-    pivots = zigzag_swings(df, depth=3, deviation_atr=0.22)
-    if len(pivots) < 5:
-        pivots = zigzag_swings(df, depth=3, deviation_atr=0.15)
+    # LOCKED: only non-ranging swings (zigzag_swings now filters ranging legs)
+    # Prefer cleaner, larger pivots so lines follow real directional structure
+    pivots = zigzag_swings(df, depth=4, deviation_atr=0.30)
     if len(pivots) < 4:
-        pivots = zigzag_swings(df, depth=2, deviation_atr=0.12)
+        pivots = zigzag_swings(df, depth=3, deviation_atr=0.25)
+    if len(pivots) < 3:
+        pivots = zigzag_swings(df, depth=3, deviation_atr=0.18)
 
     support = _fit_primary(pivots, "support", n, df)
     resistance = _fit_primary(pivots, "resistance", n, df)
@@ -311,7 +312,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
     family_lines = []
     channel = None
     if primary:
-        family_lines = _build_parallel_family(primary, pivots, n, max_members=min(3, max_lines))
+        family_lines = _build_parallel_family(primary, pivots, n, max_members=min(2, max_lines))
         if len(family_lines) >= 2:
             channel = {
                 "lower": family_lines[0],
