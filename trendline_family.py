@@ -410,10 +410,23 @@ def _grade_breakout(df: pd.DataFrame, line: Dict, kind: str, n: int) -> Dict[str
     }
 
 
-def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, Any]:
+def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: int = 90) -> Dict[str, Any]:
     """
     Build one clean parallel family (ascending OR descending), not both mixed.
     Market reveals direction: price relative to the family rails.
+
+    lookback_bars: diagonal trendlines (and the wedge detector) only
+    consider pivots from the most recent `lookback_bars` candles. Without
+    this, a long flat chop zone from days ago can out-score the swing that
+    actually shapes the current move -- a flat zone sits near dozens of
+    candles' lows just by being flat and old, racking up touch count, while
+    a real recent diagonal (the thing a trader actually draws) only grazes
+    a handful of candles because it's moving fast. Scoring by raw touch
+    count alone then picks the stale flat line and the rails end up
+    running almost horizontal across the whole chart -- indistinguishable
+    from a moving average -- instead of hugging the live structure.
+    Horizontal S/R intentionally stays full-history (older well-tested
+    flip zones ARE still relevant); only the diagonal fit is windowed.
     """
     if df is None or len(df) < 30:
         return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}
@@ -427,8 +440,18 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
     if len(pivots) < 3:
         pivots = zigzag_swings(df, depth=3, deviation_atr=0.18)
 
-    support = _fit_primary(pivots, "support", n, df)
-    resistance = _fit_primary(pivots, "resistance", n, df)
+    # Recent-only candidate pool for the DIAGONAL fit (see docstring).
+    cutoff = max(0, n - lookback_bars)
+    recent_pivots = [p for p in pivots if p["index"] >= cutoff]
+    if len(recent_pivots) < 3:
+        # Not enough recent structure -- widen gradually rather than
+        # snapping straight back to the full, stale-prone history.
+        recent_pivots = [p for p in pivots if p["index"] >= max(0, n - lookback_bars * 2)]
+    if len(recent_pivots) < 2:
+        recent_pivots = pivots
+
+    support = _fit_primary(recent_pivots, "support", n, df)
+    resistance = _fit_primary(recent_pivots, "resistance", n, df)
 
     # LOCKED RULE:
     #   Uptrend  → map pivot LOWS  (ascending support)
@@ -478,7 +501,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
     family_lines = []
     channel = None
     if primary:
-        family_lines = _build_parallel_family(primary, pivots, n, max_members=min(2, max_lines))
+        family_lines = _build_parallel_family(primary, recent_pivots, n, max_members=min(2, max_lines))
         if len(family_lines) >= 2:
             channel = {
                 "lower": family_lines[0],
@@ -575,7 +598,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
     # horizontal S/R -- computed off the FULL pivot list, before it gets
     # truncated to the last 16 below, so an older well-tested level or a
     # wedge anchored further back doesn't silently drop out.
-    wedge = _detect_converging_wedge(pivots, df, n)
+    wedge = _detect_converging_wedge(recent_pivots, df, n)
     horizontal_levels = _detect_horizontal_levels(df, pivots, n)
     if wedge and direction == "NEUTRAL" and wedge["bias"] != "NEUTRAL":
         direction = wedge["bias"]
