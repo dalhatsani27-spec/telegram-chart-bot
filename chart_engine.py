@@ -468,19 +468,21 @@ def generate_smc_map(
     fvgs = zones.get("fvgs") or []
     obs = zones.get("order_blocks") or []
     idms = zones.get("inducements") or []
+    base_zones = zones.get("base_zones") or []
     structure = zones.get("structure") or {}
     vp = zones.get("volume_profile")
     bos_events = zones.get("bos_events") or []  # list of {index, price, type}
 
-    # FVG
-    for z in fvgs[:7]:
+
+    # FVG — prefer higher quality / unmitigated first
+    fvg_sorted = sorted(fvgs, key=lambda z: (-z.get("quality", 50), z.get("mitigated", False), -z.get("index", 0)))
+    for z in fvg_sorted[:5]:
         mitigated = z.get("mitigated", False)
         bias = str(z.get("bias", "")).upper()
         color = COLORS["fvg_bull"] if bias in ("BULLISH", "BUY") else COLORS["fvg_bear"]
         if mitigated:
             color = "#607d8b"
         label = "FVG" if not mitigated else "IFVG"
-        # Map original index into visible window
         z_idx = _safe_zone_x(z, offset, chart_len, chart_len - 10)
         if z_idx is None:
             continue
@@ -488,8 +490,9 @@ def generate_smc_map(
         x1 = min(chart_len - 1, z_idx + 8)
         _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.20 if not mitigated else 0.08, label)
 
-    # Order Blocks / Breakers
-    for z in obs[:6]:
+    # Order Blocks / Breakers — prefer high-quality unmitigated
+    ob_sorted = sorted(obs, key=lambda z: (-z.get("quality", 50), z.get("mitigated", False), -z.get("index", 0)))
+    for z in ob_sorted[:5]:
         mitigated = z.get("mitigated", False)
         bias = str(z.get("bias", "")).upper()
         is_breaker = mitigated or str(z.get("type", "")).upper() == "BREAKER"
@@ -506,6 +509,7 @@ def generate_smc_map(
         x1 = min(chart_len - 1, z_idx + 12)
         _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.24 if not mitigated else 0.10, label)
 
+
     # Inducement / Liquidity
     for z in idms[:5]:
         mitigated = z.get("mitigated") or z.get("swept")
@@ -518,7 +522,31 @@ def generate_smc_map(
         x1 = min(chart_len - 1, z_idx + 6)
         _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.22 if not mitigated else 0.08, label)
 
+    # RBR / DBD / RBD / DBR base zones (Supply & Demand)
+    base_sorted = sorted(
+        base_zones,
+        key=lambda z: (-z.get("quality", 50), z.get("mitigated", False), -z.get("index", 0)),
+    )
+    for z in base_sorted[:4]:
+        mitigated = z.get("mitigated", False)
+        bias = str(z.get("bias", "")).upper()
+        ptype = str(z.get("type", "BASE")).upper()
+        if mitigated:
+            color = "#607d8b"
+        elif bias in ("BULLISH", "BUY"):
+            color = "#26a69a"
+        else:
+            color = "#ef5350"
+        label = ptype
+        z_idx = _safe_zone_x(z, offset, chart_len, chart_len - 18)
+        if z_idx is None:
+            continue
+        x0 = max(0, z_idx - 1)
+        x1 = min(chart_len - 1, z_idx + 10)
+        _draw_zone(ax, x0, x1, z["bottom"], z["top"], color, 0.20 if not mitigated else 0.08, label)
+
     # Structure High / Low
+
     if structure.get("structure_high"):
         ax.axhline(structure["structure_high"], color=COLORS["liquidity"], linestyle="--", linewidth=1.15, alpha=0.85)
         ax.text(chart_len * 0.02, structure["structure_high"], "RANGE HIGH / BSL", fontsize=7,

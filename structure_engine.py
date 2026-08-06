@@ -632,33 +632,54 @@ def run_structure_engine(df: pd.DataFrame) -> Dict[str, Any]:
 
 
 def format_structure_report(result: Dict[str, Any], symbol: str) -> str:
+    """Vital-info only summary of the Institutional Structure Engine."""
     if result.get("error"):
         return result["error"]
-    lines = [f"🏗 INSTITUTIONAL STRUCTURE ENGINE | {symbol}"]
-    st = result["state"]
-    lines.append(f"Stage 1 — State: {st['state']} ({st.get('reason', '')})")
-    imp = result["impulse"]
+
+    st = result.get("state") or {}
+    imp = result.get("impulse")
+    pb = result.get("pullback")
+    interp = result.get("interpretation") or {}
+    sw = result.get("sweep")
+    man = result.get("manipulation") or {}
+    acc = result.get("acceptance") or {}
+    entry = result.get("entry") or {}
+    filt = result.get("filter") or {}
+
+    lines = [f"🏗 STRUCTURE | {symbol}"]
+    lines.append(f"State: {st.get('state', '?')} ({st.get('reason', '')})")
+
     if imp:
-        lines.append(f"Stage 2 — Impulse: {imp['direction']} · {imp['length_atr']}x ATR / {imp['bars']} bars"
-                      + (" ⚠️ weak" if imp.get("weak") else ""))
+        weak = " ⚠️ weak" if imp.get("weak") else ""
+        lines.append(
+            f"Impulse: {imp.get('direction')} · {imp.get('length_atr')}x ATR / {imp.get('bars')} bars{weak}"
+        )
     else:
-        lines.append("Stage 2 — Impulse: none found")
-    pb = result["pullback"]
+        lines.append("Impulse: none")
+
     if pb:
-        lines.append(f"Stage 3 — Pullback: {pb['pattern'].replace('_', ' ').title()}")
-        lines.append(f"  {pb['watch_for']}")
-    interp = result["interpretation"]
-    lines.append(f"Stage 4 — Read: {interp['note']}")
-    sw = result["sweep"]
-    lines.append(f"Stage 5 — Liquidity: {sw['note'] if sw else 'No sweep detected yet'}")
-    man = result["manipulation"]
-    lines.append(f"Stage 6 — Manipulation: {man.get('note', '')}")
-    acc = result["acceptance"]
-    lines.append(f"Stage 7 — Acceptance: {acc.get('note', '')}")
-    lines.append(f"Stage 8 — Entry: {result['direction']} (score {result['score']}/100, path={result['entry'].get('path')})")
-    if result["filter"]["reject"]:
-        lines.append("Stage 9 — Filter: ❌ REJECTED — " + "; ".join(result["filter"]["reasons"]))
+        lines.append(f"Pullback: {str(pb.get('pattern', '')).replace('_', ' ').title()}")
+        if pb.get("watch_for"):
+            lines.append(f"  → {pb['watch_for']}")
+
+    if interp.get("note"):
+        lines.append(f"Read: {interp['note']}")
+
+    lines.append(f"Liquidity: {sw['note'] if sw else 'No sweep yet'}")
+    lines.append(f"Manip: {man.get('note', '—')}")
+    lines.append(f"Accept: {acc.get('note', '—')}")
+
+    score = result.get("score", entry.get("score", 0))
+    path = entry.get("path", "—")
+    lines.append(f"Entry: {result.get('direction', 'NEUTRAL')} · {score}/100 · {path}")
+
+    if filt.get("reject"):
+        lines.append("❌ Filter: " + "; ".join(filt.get("reasons") or ["rejected"]))
     else:
-        lines.append("Stage 9 — Filter: ✅ passed")
-    lines.append(f"Verdict: {'TRADE — ' + result['direction'] if result['valid'] else 'WAIT'}")
+        lines.append("✅ Filter: passed")
+
+    lines.append(
+        f"Verdict: {'TRADE — ' + str(result.get('direction')) if result.get('valid') else 'WAIT'}"
+    )
     return "\n".join(lines)
+

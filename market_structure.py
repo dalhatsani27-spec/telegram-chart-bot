@@ -18,7 +18,7 @@ import pandas as pd
 
 def find_swings(df, left=3, right=3):
     """
-    Fractal swing highs and lows.
+    Fractal swing highs and lows (generalised Williams fractal).
     Returns list of dicts: {index, price, type: 'high'|'low'}
     """
     highs = df['High'].values
@@ -36,6 +36,61 @@ def find_swings(df, left=3, right=3):
 
     swings.sort(key=lambda s: s["index"])
     return swings
+
+
+def williams_fractals(df, left=2, right=2):
+    """
+    Classic Bill Williams 5-bar fractals (default left=2, right=2).
+
+    Up fractal   : high[i] > high of left and right neighbours
+    Down fractal : low[i]  < low  of left and right neighbours
+
+    Confirmed only after `right` bars have closed (no repaint).
+    Returns list of {index, price, type: 'high'|'low', scale: 'fractal'}.
+
+    NOTE: These are for internal structure / trendline anchoring only.
+          Do not draw fractal arrows on the chart (keep chart clean).
+    """
+    return find_swings(df, left=left, right=right)
+
+
+def fractal_structure_levels(df, short_left=2, mid_left=4, long_left=8):
+    """
+    Multi-scale fractal structure (short / intermediate / long).
+
+    Returns dict:
+      short  – 5-bar style fractals
+      mid    – wider fractal window
+      long   – major swing fractals
+      bias   – rough structural bias from long-scale HH/HL or LH/LL
+
+    Used to give trendline and structure engines cleaner multi-scale context
+    without cluttering the chart with arrows.
+    """
+    short = find_swings(df, left=short_left, right=short_left)
+    mid = find_swings(df, left=mid_left, right=mid_left)
+    long_ = find_swings(df, left=long_left, right=long_left)
+
+    bias = "NEUTRAL"
+    highs = [s for s in long_ if s["type"] == "high"]
+    lows = [s for s in long_ if s["type"] == "low"]
+    if len(highs) >= 2 and len(lows) >= 2:
+        hh = highs[-1]["price"] > highs[-2]["price"]
+        hl = lows[-1]["price"] > lows[-2]["price"]
+        lh = highs[-1]["price"] < highs[-2]["price"]
+        ll = lows[-1]["price"] < lows[-2]["price"]
+        if hh and hl:
+            bias = "BUY"
+        elif lh and ll:
+            bias = "SELL"
+
+    return {
+        "short": short,
+        "mid": mid,
+        "long": long_,
+        "bias": bias,
+    }
+
 
 
 def zigzag_swings(df, depth=5, deviation_atr=0.35):

@@ -21,8 +21,10 @@ from volume_profile import compute_volume_profile
 from market_structure import analyse_structure, structure_trade_permission
 from smc_zones import (
     detect_fvgs, detect_order_blocks, detect_inducement_zones,
-    pair_idm_with_extreme_ob, summarise_smc_zones, build_bos_events,
+    detect_base_zones, pair_idm_with_extreme_ob, summarise_smc_zones,
+    build_bos_events,
 )
+
 import mt5_data
 
 TOPDOWN_LADDER = [
@@ -141,6 +143,7 @@ def _analyse_single_tf(symbol, tf_code, tf_label):
     fvgs = detect_fvgs(df, min_gap_atr=0.18, max_zones=4)
     obs = detect_order_blocks(df, structure=structure, max_zones=3, require_bos=True)
     idms = detect_inducement_zones(df, max_zones=3)
+    base_zones = detect_base_zones(df, max_zones=4)
     bos_events = build_bos_events(df, max_events=6)
     return {
         "tf": tf_code, "tf_label": tf_label, "df": df,
@@ -148,9 +151,11 @@ def _analyse_single_tf(symbol, tf_code, tf_label):
         "ema200_bias": ema_bias, "ema200_note": ema_note, "ema200_dist": ema_dist,
         "vwap": vwap, "trendline": trend, "volume_profile": vp,
         "best_pattern": best, "all_patterns": all_pats[:3] if all_pats else [],
-        "structure": structure, "fvgs": fvgs, "order_blocks": obs, "inducements": idms,
+        "structure": structure, "fvgs": fvgs, "order_blocks": obs,
+        "inducements": idms, "base_zones": base_zones,
         "bos_events": bos_events,
     }
+
 
 
 def run_topdown_analysis(symbol):
@@ -226,7 +231,7 @@ def run_topdown_analysis(symbol):
 
 
 def format_institutional_report(analysis):
-    """SHORT summary — chart shows the zones."""
+    """Vital-info only. Chart carries the visual detail."""
     if "error" in analysis:
         return analysis["error"]
 
@@ -237,55 +242,56 @@ def format_institutional_report(analysis):
     lines = []
 
     lines.append(f"🏛 {symbol}  |  Bias: {bias}  |  {align}")
-    lines.append(f"HTF: {analysis['htf_regime']}")
+    lines.append(f"HTF: {analysis.get('htf_regime', '—')}")
 
-    # One-line structure per TF
     bits = []
     for f in analysis["frames"]:
         ev = (f.get("structure") or {}).get("last_event") or "—"
-        bits.append(f"{f['tf_label']}: {ev}")
+        bits.append(f"{f['tf_label']}:{ev}")
     lines.append("Struct: " + " · ".join(bits))
 
-    # Key levels only (not every zone price)
     keys = []
-    if htf.get("vwap"):
-        keys.append(f"VWAP {htf['vwap']['vwap']:.5f}")
+    if htf.get("vwap") and isinstance(htf["vwap"], dict):
+        keys.append(f"VWAP {htf['vwap'].get('vwap', 0):.5f}")
     if analysis.get("htf_poc"):
         keys.append(f"POC {analysis['htf_poc']:.5f}")
     if htf.get("trendline"):
         t = htf["trendline"]
-        keys.append(f"Ch {t['lower']:.5f}/{t['upper']:.5f}")
+        keys.append(f"Ch {t.get('lower', 0):.5f}/{t.get('upper', 0):.5f}")
     if keys:
         lines.append("Levels: " + " | ".join(keys))
 
     proj = analysis.get("primary_projection")
     if proj:
-        lines.append(f"Proj: {proj['direction']} → {proj['target']:.5f}  (inv {proj['invalidation']:.5f})")
+        lines.append(
+            f"Proj: {proj.get('direction')} → {proj.get('target', 0):.5f}  "
+            f"(inv {proj.get('invalidation', 0):.5f})"
+        )
 
-    # Zone counts (details are on the chart)
     n_fvg = len(htf.get("fvgs") or [])
     n_ob = len(htf.get("order_blocks") or [])
     n_idm = len(htf.get("inducements") or [])
+    n_base = len(htf.get("base_zones") or [])
     unmit_idm = sum(1 for z in (htf.get("inducements") or []) if not z.get("mitigated"))
-    lines.append(f"Zones: {n_fvg} FVG · {n_ob} OB · {n_idm} IDM ({unmit_idm} unmitigated)")
+    lines.append(f"Zones: {n_fvg} FVG · {n_ob} OB · {n_idm} IDM · {n_base} Base ({unmit_idm} IDM open)")
+
 
     pairs = analysis.get("idm_ob_pairs") or []
     if pairs:
-        p = pairs[0]
-        lines.append(f"Setup: {p['direction']} — IDM→OB (see chart)")
+        lines.append(f"Setup: {pairs[0].get('direction')} IDM→OB")
     else:
-        lines.append("Setup: no clean IDM→OB pair")
+        lines.append("Setup: none clean")
 
     allowed = analysis.get("structure_allowed")
-    lines.append(
-        f"Permission: {'YES' if allowed else 'WAIT'} — {analysis.get('structure_prefer', 'n/a')}"
-    )
+    prefer = analysis.get("structure_prefer", "—")
+    lines.append(f"Permission: {'YES' if allowed else 'WAIT'} → {prefer}")
     if analysis.get("structure_reason"):
         lines.append(f"  {analysis['structure_reason']}")
 
     if htf.get("best_pattern"):
         p = htf["best_pattern"]
-        lines.append(f"Pattern: {p.name} ({p.bias}) {p.confidence:.0f}%")
+        conf = getattr(p, "confidence", 0)
+        lines.append(f"Pattern: {getattr(p, 'name', '?')} ({getattr(p, 'bias', '?')}) {conf:.0f}%")
 
-    lines.append("📷 Chart = full story (FVG/OB/IDM/EMA/structure)")
     return "\n".join(lines)
+
