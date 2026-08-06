@@ -109,6 +109,149 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Opt
     return best
 
 
+def _fit_line_any_slope(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
+    """Best 2-point line through swing highs or lows, ANY slope direction.
+
+    _fit_primary locks support to rising / resistance to falling only, which
+    is correct for a parallel channel but can never produce the two
+    independent-slope rails a trader draws by hand for a wedge or triangle
+    (e.g. an ascending-highs line paired with a steeper ascending-lows line
+    = rising wedge). This is the same touch-scored 2-point fit, just without
+    that directional constraint.
+    """
+    pts = [p for p in pivots if p["type"] == ("low" if kind == "support" else "high")]
+    if len(pts) < 2:
+        return None
+    best = None
+    best_score = -1
+    for i in range(len(pts) - 1):
+        for j in range(i + 1, len(pts)):
+            a, b = pts[i], pts[j]
+            if b["index"] <= a["index"]:
+                continue
+            slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
+            touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind)
+            touch_score = touches * 10
+            if touches >= 5:
+                touch_score -= (touches - 4) * 3
+            score = touch_score + (b["index"] / max(n, 1)) * 5 + (b["index"] - a["index"]) * 0.05
+            if score > best_score:
+                best_score = score
+                y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
+                quality = "unconfirmed" if touches < 3 else ("confirmed" if touches <= 4 else "crowded")
+                best = {
+                    "x0": a["index"], "y0": a["price"],
+                    "x1": b["index"], "y1": b["price"],
+                    "y_end": y_end, "slope": slope, "touches": touches,
+                    "confirmed": touches >= 3, "quality": quality, "kind": kind,
+                }
+    return best
+
+
+def _detect_converging_wedge(pivots: List[Dict], df: pd.DataFrame, n: int) -> Optional[Dict]:
+    """
+    Detect two independent-slope trendlines (one off the lows, one off the
+    highs) that converge toward an apex -- wedges and triangles. This is
+    distinct from _build_parallel_family, which only ever produces rails
+    that share the primary's slope. A hand-drawn chart very often shows
+    exactly this shape (two lines of different steepness meeting), and the
+    old single-family logic could never reproduce it.
+    """
+    lower = _fit_line_any_slope(pivots, "support", n, df)
+    upper = _fit_line_any_slope(pivots, "resistance", n, df)
+    if not lower or not upper or lower["touches"] < 2 or upper["touches"] < 2:
+        return None
+
+    start_x = max(min(lower["x0"], upper["x0"]), 0)
+    gap_start = (_line_value(upper["x0"], upper["y0"], upper["x1"], upper["y1"], start_x) -
+                 _line_value(lower["x0"], lower["y0"], lower["x1"], lower["y1"], start_x))
+    gap_end = upper["y_end"] - lower["y_end"]
+    if gap_start <= 0 or gap_end <= 0:
+        return None  # lines have already crossed -- not a clean wedge anymore
+    if gap_end >= gap_start * 0.92:
+        return None  # not meaningfully converging -- let the parallel-channel path handle it
+
+    slope_l, slope_u = lower["slope"], upper["slope"]
+    flat = lambda s: abs(s) < 1e-9
+    if slope_l > 0 and slope_u > 0 and slope_l > slope_u:
+        pattern, bias = "Rising Wedge", "SELL"
+    elif slope_l < 0 and slope_u < 0 and slope_u < slope_l:
+        pattern, bias = "Falling Wedge", "BUY"
+    elif slope_l > 0 and slope_u < 0:
+        pattern, bias = "Symmetrical Triangle", "NEUTRAL"
+    elif flat(slope_l) and slope_u < 0:
+        pattern, bias = "Descending Triangle", "SELL"
+    elif slope_l > 0 and flat(slope_u):
+        pattern, bias = "Ascending Triangle", "BUY"
+    else:
+        pattern, bias = "Converging Channel", "NEUTRAL"
+
+    apex_x = None
+    if abs(slope_l - slope_u) > 1e-9:
+        apex_x = (n - 1) + (upper["y_end"] - lower["y_end"]) / (slope_l - slope_u)
+
+    return {
+        "pattern": pattern, "bias": bias,
+        "lower": lower, "upper": upper,
+        "gap_start": round(gap_start, 5), "gap_end": round(gap_end, 5),
+        "apex_index": apex_x,
+    }
+
+
+def _detect_horizontal_levels(df: pd.DataFrame, pivots: List[Dict], n: int,
+                               max_levels: int = 4, tol_atr: float = 0.45) -> List[Dict]:
+    """
+    Cluster ALL swing pivots across the full chart history by price
+    proximity, not just the last few swings. A level a trader marks by eye
+    usually earned that mark by getting tested repeatedly over the *life*
+    of the chart -- a flip zone from weeks ago that's still respected is
+    exactly the kind of line the old "last 6 pivots, top 2 highs/lows"
+    logic would silently drop once it aged out of that recent window.
+    """
+    if not pivots or df is None or len(df) < 10:
+        return []
+    atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
+    avg_atr = float(np.nanmean(atr[-50:])) if len(atr) else 0.0
+    tol = max(avg_atr * tol_atr, 1e-9)
+
+    clusters: List[Dict] = []
+    for p in pivots:
+        price = float(p["price"])
+        placed = False
+        for c in clusters:
+            if abs(price - c["price"]) <= tol:
+                c["touches"].append(p)
+                c["price"] = float(np.mean([t["price"] for t in c["touches"]]))
+                placed = True
+                break
+        if not placed:
+            clusters.append({"price": price, "touches": [p]})
+
+    close = float(df["Close"].iloc[-1])
+    levels = []
+    for c in clusters:
+        n_touch = len(c["touches"])
+        if n_touch < 2:
+            continue
+        first_idx = min(t["index"] for t in c["touches"])
+        last_idx = max(t["index"] for t in c["touches"])
+        span = last_idx - first_idx
+        recency = last_idx / max(n, 1)
+        # Durability (span) and touch count matter more than raw recency --
+        # this is what lets an older, well-tested zone outscore a level
+        # that just happened to form in the last handful of candles.
+        score = n_touch * 10 + span * 0.08 + recency * 5
+        quality = "unconfirmed" if n_touch < 3 else ("confirmed" if n_touch <= 4 else "crowded")
+        levels.append({
+            "price": c["price"], "touches": n_touch, "span": span,
+            "first_index": first_idx, "last_index": last_idx,
+            "side": "resistance" if c["price"] >= close else "support",
+            "quality": quality, "score": round(score, 2),
+        })
+    levels.sort(key=lambda l: l["score"], reverse=True)
+    return levels[:max_levels]
+
+
 def _build_parallel_family(primary: Dict, pivots: List[Dict], n: int, max_members: int = 4) -> List[Dict]:
     """
     True parallel family: same slope as primary, each member anchored
@@ -428,6 +571,17 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
                 reasons.append(touch_note)
                 breakout_grade = brk
 
+    # Converging wedge/triangle (independent-slope rails) and full-history
+    # horizontal S/R -- computed off the FULL pivot list, before it gets
+    # truncated to the last 16 below, so an older well-tested level or a
+    # wedge anchored further back doesn't silently drop out.
+    wedge = _detect_converging_wedge(pivots, df, n)
+    horizontal_levels = _detect_horizontal_levels(df, pivots, n)
+    if wedge and direction == "NEUTRAL" and wedge["bias"] != "NEUTRAL":
+        direction = wedge["bias"]
+        strength = max(strength, 58)
+        reasons.append(f"{wedge['pattern']} — rails converging toward apex")
+
     projections = _measured_move_projections(df, pivots, direction)
     vp = compute_volume_profile(df.iloc[:-1])
     mw = _detect_mw_pattern(pivots, df)
@@ -461,6 +615,8 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
         "uptrends": [primary] if family_kind == "ascending" and primary else [],
         "downtrends": [primary] if family_kind == "descending" and primary else [],
         "channel": channel,
+        "wedge": wedge,
+        "horizontal_levels": horizontal_levels,
         "projections": projections,
         "mw_pattern": mw,
         "pivots": pivots[-16:],
@@ -700,6 +856,16 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
         lines.append(f"  • {r}")
     n_rails = len(family.get("family_lines") or [])
     lines.append(f"Parallel rails: {n_rails}")
+    wedge = family.get("wedge")
+    if wedge:
+        lines.append(
+            f"Structure: {wedge['pattern']} · lower rail {wedge['lower']['touches']} touches, "
+            f"upper rail {wedge['upper']['touches']} touches · converging (gap {wedge['gap_end']:.5f})"
+        )
+    hz = family.get("horizontal_levels") or []
+    if hz:
+        lines.append("Horizontal levels: " + " · ".join(
+            f"{l['side'][0].upper()} {l['price']:.5f} ({l['touches']}x)" for l in hz))
     mw = family.get("mw_pattern")
     if mw:
         lines.append(f"Pattern: {mw['name']} · neckline {mw['neckline']:.5f}")
