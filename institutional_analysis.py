@@ -19,6 +19,7 @@ import pandas as pd
 from patterns import scan_all_patterns, find_pivots, _atr, Pattern
 from volume_profile import compute_volume_profile
 from market_structure import analyse_structure, structure_trade_permission
+from direction_banner import direction_banner
 from smc_zones import (
     detect_fvgs, detect_order_blocks, detect_inducement_zones,
     pair_idm_with_extreme_ob, summarise_smc_zones, build_bos_events,
@@ -235,7 +236,8 @@ def format_institutional_report(analysis):
     htf = analysis["frames"][0]
     lines = []
 
-    lines.append(f"🏛 {symbol}  |  Bias: {bias}  |  {align}")
+    lines.append(f"🏛 {symbol}  |  {align}")
+    lines.append(direction_banner(bias, extra=symbol))
     lines.append(f"HTF: {analysis['htf_regime']}")
 
     # One-line structure per TF
