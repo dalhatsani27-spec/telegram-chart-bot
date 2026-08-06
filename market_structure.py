@@ -364,7 +364,13 @@ def analyse_structure(df, left=3, right=3, lookback=80):
 
 def structure_trade_permission(htf_bias, structure):
     """
-    Decide whether a lower-TF pattern is allowed given HTF bias + structure.
+    Decide trade permission from structure confirmation.
+
+    LOCKED RULES:
+      1. 200 EMA / HTF bias = overall context ONLY — never the entry signal.
+      2. When CHoCH then BOS/MSS occurs → look for pullback entry in the
+         direction of the NEW trend (confirmation direction wins).
+      3. Trade the confirmation direction, not the EMA direction.
 
     Returns:
       allowed: bool
@@ -374,32 +380,36 @@ def structure_trade_permission(htf_bias, structure):
     struct_bias = structure.get("bias", "NEUTRAL")
     event = structure.get("last_event")
     event_bias = structure.get("event_bias")
+    htf = htf_bias  # context only
 
-    # Map HTF BUY/SELL to structure language
-    htf = htf_bias  # BUY / SELL / NEUTRAL
-
+    # --- Confirmation events drive the trade ---
     if event == "MSS" and event_bias:
-        # Confirmed shift — allow trading the new direction
         direction = "BUY" if event_bias == "BULLISH" else "SELL"
-        return True, f"MSS confirmed ({event_bias}) — reversal permission granted", direction
-
-    if event == "CHoCH" and event_bias:
-        # Early warning only — do not fire full size yet
-        direction = "BUY" if event_bias == "BULLISH" else "SELL"
-        return False, f"CHoCH ({event_bias}) — watch zone, wait for MSS or BOS confirmation", direction
+        note = f"MSS confirmed ({event_bias}) — pullback entry in new trend"
+        if htf not in ("NEUTRAL", direction):
+            note += f" (against HTF {htf} — still valid, HTF is bias only)"
+        return True, note, direction
 
     if event == "BOS" and event_bias:
+        # BOS after structure = continuation of the current/new trend
         direction = "BUY" if event_bias == "BULLISH" else "SELL"
-        # BOS in direction of HTF = strong continuation
-        if htf == "NEUTRAL" or (htf == "BUY" and direction == "BUY") or (htf == "SELL" and direction == "SELL"):
-            return True, f"BOS ({event_bias}) aligned with HTF — continuation", direction
-        # BOS against HTF without MSS = still counter, lower confidence
-        return False, f"BOS ({event_bias}) against HTF {htf} — treat as internal structure only", direction
+        note = f"BOS ({event_bias}) — pullback entry with trend"
+        if htf not in ("NEUTRAL", direction):
+            note += f" (HTF {htf} is bias only, not entry)"
+        return True, note, direction
 
-    # No clear event — fall back to structure bias vs HTF
-    if struct_bias == "BULLISH" and htf in ("BUY", "NEUTRAL"):
-        return True, "Bullish structure supports longs", "BUY"
-    if struct_bias == "BEARISH" and htf in ("SELL", "NEUTRAL"):
-        return True, "Bearish structure supports shorts", "SELL"
+    if event == "CHoCH" and event_bias:
+        # CHoCH alone = early warning. Wait for BOS/MSS before full entry.
+        direction = "BUY" if event_bias == "BULLISH" else "SELL"
+        return False, (
+            f"CHoCH ({event_bias}) — watch for pullback; wait for BOS/MSS "
+            f"confirmation before entry"
+        ), direction
 
-    return False, "No clear structure permission", "NEUTRAL"
+    # No fresh confirmation event — use structure bias, EMA only as soft context
+    if struct_bias == "BULLISH":
+        return True, "Bullish structure — look for pullback longs (EMA is bias only)", "BUY"
+    if struct_bias == "BEARISH":
+        return True, "Bearish structure — look for pullback shorts (EMA is bias only)", "SELL"
+
+    return False, "No clear structure confirmation", "NEUTRAL"
