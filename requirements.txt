@@ -1,5 +1,24 @@
-metaapi-cloud-sdk>=25.0.0
-python-telegram-bot[webhooks]>=20.0
-pandas>=2.0.0
-numpy>=1.24.0
-python-dotenv>=1.0.0
+# --- Core Data & Analysis ---
+numpy
+pandas
+mplfinance
+matplotlib
+rapidfuzz
+pytz
+
+# --- AI & APIs ---
+openai
+requests
+
+# --- Web & Telegram ---
+flask
+python-telegram-bot
+python-dotenv
+
+# --- MetaApi & Sockets ---
+metaapi-cloud-sdk
+metaapi-cloud-copyfactory-sdk
+metaapi-cloud-metastats-sdk
+python-socketio
+python-engineio
+psutil
