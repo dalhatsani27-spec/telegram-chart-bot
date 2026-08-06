@@ -31,6 +31,7 @@ from smc_zones import (
 )
 from volume_profile import compute_volume_profile
 from structure_engine import run_structure_engine, format_structure_report
+from direction_banner import direction_banner
 import mt5_data
 
 
@@ -430,7 +431,8 @@ def format_amd_report(analysis):
 
     symbol = analysis["symbol"]
     lines = []
-    lines.append(f"🕯 AMD {symbol}  |  1H  |  Bias: {analysis['amd_bias']}")
+    lines.append(f"🕯 AMD {symbol}  |  1H")
+    lines.append(direction_banner(analysis['amd_bias'], extra=symbol))
     lines.append(f"Phase: {analysis['phase']}  |  Session: {analysis['last_session']}")
     if analysis.get("phase_note"):
         lines.append(f"  {analysis['phase_note']}")
