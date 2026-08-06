@@ -133,7 +133,8 @@ def fetch_ai_commentary(metrics_summary, target_language="English"):
     return ai_throttle.throttled_call(metrics_summary, target_language, _raw_commentary, fallback_text=fallback)
 
 # ==========================================
-# 3. INFORMATIONAL ANALYSIS ENGINE
+# 3. INFORMATIONAL ANALYSIS ENGINE (for on-demand Telegram buttons --
+#    separate from the EA-driven confirmation/execution pipeline in engine.py)
 # ==========================================
 TREND_CLARITY_THRESHOLD = 0.015
 TF_LABELS = {"1min": "1 Minute", "3min": "3 Minute", "5min": "5 Minute", "15min": "15 Minute", "30min": "30 Minute"}
@@ -215,6 +216,14 @@ def _decimals_for(symbol):
     return 5
 
 def build_display_setup(symbol, timeframe):
+    """
+    Informational analysis for Telegram Pattern Scanner / Run Analysis.
+
+    ALWAYS builds a pivot-anchored parallel channel family (the same structure
+    you draw by hand on MT5: swing highs/lows → rails). Pattern scanner
+    results (flag, H&S, triangle, etc.) layer on top when they qualify.
+    Charts must never come back as candles-only.
+    """
     df = mt5_data.fetch_candles(symbol, timeframe, count=250)
     if df is None or df.empty or len(df) < 40:
         raise ValueError(f"Unable to retrieve market data for '{symbol}' on {timeframe}.")
@@ -223,6 +232,7 @@ def build_display_setup(symbol, timeframe):
     current_close = float(df['Close'].iloc[-1])
     atr = pattern_atr(df) or 0.001
 
+    # --- 1) Pivot-anchored parallel channel family (primary chart structure) ---
     family = {}
     try:
         from trendline_family import build_trendline_family
@@ -232,17 +242,22 @@ def build_display_setup(symbol, timeframe):
     except Exception:
         family = {}
 
+    # --- 2) Classic pattern scan (flags, H&S, triangles, double top/bottom…) ---
     best, all_patterns = scan_all_patterns(df.iloc[:-1], volume_profile=volume_profile)
 
+    # If no classic pattern, promote the channel family itself as the "pattern"
     if best is None and family and family.get("family_kind") in ("ascending", "descending"):
         kind = family["family_kind"]
         direction = "BUY" if kind == "ascending" else "SELL"
         ch = family.get("channel") or {}
         upper = ch.get("upper") or {}
         lower = ch.get("lower") or {}
+        # Build a synthetic Pattern-like payload so the rest of the pipeline is uniform
+        from patterns import Pattern
         y_hi = float(upper.get("y_end", current_close * 1.002))
         y_lo = float(lower.get("y_end", current_close * 0.998))
         trigger = y_hi if direction == "BUY" else y_lo
+        # Trigger line along the far rail of the channel
         rail = upper if direction == "BUY" else lower
         if rail and "x0" in rail:
             trigger_line = [
@@ -252,19 +267,21 @@ def build_display_setup(symbol, timeframe):
         else:
             trigger_line = [(max(0, len(df) - 40), trigger), (len(df) - 1, trigger)]
         conf = float(family.get("strength") or 60)
+        # Key points = pivot anchors
         key_points = []
         for p in (family.get("pivots") or [])[-8:]:
             key_points.append((int(p["index"]), float(p["price"]),
                                "HH" if p.get("type") == "high" else "LL"))
         name = "Ascending Channel" if kind == "ascending" else "Descending Channel"
-        from patterns import Pattern
         best = Pattern(
             name, "continuation", direction,
             trigger_price=trigger,
             trigger_line=trigger_line,
             key_points=key_points,
             confidence=float(np.clip(conf, 50, 88)),
-            note=(f"Pivot-anchored {name.lower()} from swing structure."),
+            note=(f"Pivot-anchored {name.lower()} from swing structure. "
+                  f"Price is {'above' if direction == 'BUY' else 'below'} the primary rail — "
+                  f"direction follows the channel until a break with acceptance."),
         )
         all_patterns = [best] + list(all_patterns or [])
 
@@ -302,7 +319,7 @@ def build_display_setup(symbol, timeframe):
             trendline_status = f"✅ CONFIRMED via {confirmation_type} at {trigger:.5f}"
             action_type = f"{best.name.upper().replace(' ', '_')}_{confirmation_type.upper().replace(' ', '_')}_CONFIRMED"
         elif is_valid:
-            trendline_status = f"Awaiting confirmation at {trigger:.5f}"
+            trendline_status = f"Awaiting confirmation (marubozu OR a qualifying candlestick pattern) at {trigger:.5f}"
             action_type = f"{best.name.upper().replace(' ', '_')}_WATCH"
         else:
             trendline_status = "Structure invalidated"
@@ -316,6 +333,7 @@ def build_display_setup(symbol, timeframe):
             buf = atr * 0.3
             aggressive_sl = aggressive_entry - buf if direction == "BUY" else aggressive_entry + buf
 
+        # Merge family rails + pivots into geometry so the chart ALWAYS draws them
         geometry = {
             "df": df,
             "mode": "pattern",
@@ -327,6 +345,7 @@ def build_display_setup(symbol, timeframe):
             "trigger_price": trigger,
             "category": best.category,
             "volume_profile": volume_profile,
+            # Pivot-anchored channel payload for generate_trendline_map
             "pivots": family.get("pivots") or [],
             "family_lines": family.get("family_lines") or [],
             "family_kind": family.get("family_kind"),
@@ -358,6 +377,7 @@ def build_display_setup(symbol, timeframe):
             "tp2": tp2 if is_valid else None,
         }
 
+    # --- 3) Last resort: regression geometry (still attach any pivots we have) ---
     geom_eval = analyze_backend_line_geometry(df)
     action_eval = evaluate_geometry_signals(geom_eval)
     direction = action_eval["signal"]
@@ -393,6 +413,18 @@ def build_display_setup(symbol, timeframe):
         "sl": sl, "tp1": tp1, "tp2": tp2,
     }
 
+# ==========================================
+# 4. CHART RENDERER  (moved to chart_engine.py)
+# ==========================================
+# Old generate_smc_chart / generate_execution_chart removed.
+# New institutional maps:
+#   generate_smc_map()       – SMC zones + sessions
+#   generate_amd_map()       – AMD 5-phase + session separators
+#   generate_trendline_map() – Trendline / HH-HL style
+#   generate_ticket_chart()  – Mobile Manual Trade ticket
+# Imported from chart_engine at top of file.
+
+
 def generate_memorandum(asset_symbol, setup):
     g = setup["geometry_data"]
     decimals = _decimals_for(asset_symbol); fmt = f"{{:.{decimals}f}}"
@@ -405,10 +437,10 @@ def generate_memorandum(asset_symbol, setup):
             + trigger_line + f"- Invalidation: {invalidation_str}\n\n{setup['rationale']}")
 
 # ==========================================
-# 4. TELEGRAM: STATE, MENUS, HANDLERS
+# 5. TELEGRAM: STATE, MENUS, HANDLERS
 # ==========================================
 user_languages = {}
-primary_chat_id = None
+primary_chat_id = None  # this is a personal single-user bot; captured on first contact
 TELEGRAM_LOOP = None
 TELEGRAM_APP = None
 
@@ -423,6 +455,7 @@ ASSET_CONTAINER = {
 SCALP_TIMEFRAMES = [("1min", "1 Minute"), ("3min", "3 Minute"), ("5min", "5 Minute"), ("15min", "15 Minute")]
 
 def push_telegram_message(text, reply_markup=None):
+    """Thread-safe way to send a Telegram message from Flask/engine callback threads."""
     if TELEGRAM_LOOP is None or TELEGRAM_APP is None or primary_chat_id is None:
         return
     coro = TELEGRAM_APP.bot.send_message(chat_id=primary_chat_id, text=text, reply_markup=reply_markup)
@@ -435,6 +468,7 @@ def push_telegram_photo(photo, caption=""):
     asyncio.run_coroutine_threadsafe(coro, TELEGRAM_LOOP)
 
 def get_home_menu():
+    """Professional institutional-style home interface."""
     strat_label = ts.state.strategy_label()
     keyboard = [
         [InlineKeyboardButton(f"🧠 STRATEGY: {strat_label}", callback_data="menu_strategy")],
@@ -448,6 +482,7 @@ def get_home_menu():
         [InlineKeyboardButton("ℹ️  HELP & GUIDE", callback_data="menu_help")],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 def get_strategy_menu():
     mode = ts.state.get_strategy_mode()
@@ -470,6 +505,7 @@ def get_strategy_menu():
         [InlineKeyboardButton("« Back", callback_data="menu_home")],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 def get_mobile_panel_menu():
     mode = ts.state.get_mode()
@@ -545,7 +581,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome, reply_markup=get_home_menu())
 
-WATCHLIST_SCAN_INTERVAL_SECONDS = 300
+# When no EA has checked in recently for the watched symbol (you're away
+# from the PC), this loop keeps scanning it so Copy Trade tickets keep
+# coming -- throttled to respect the Twelve Data free tier. The symbol
+# AND the timeframe are chosen from the Mobile Control Panel, not
+# hardcoded -- if no symbol is selected, this loop does nothing until you
+# pick one. Any error is logged (not swallowed) so a broken scan is visible
+# instead of just silently never producing a ticket.
+WATCHLIST_SCAN_INTERVAL_SECONDS = 300  # 5 minutes -- keeps well under free-tier rate limits
 _last_scan_error_notified = {"symbol": None, "at": 0}
 
 async def background_watchlist_scanner():
@@ -562,6 +605,8 @@ async def background_watchlist_scanner():
                         print(f"[watchlist_scanner] {symbol} ({tf}) poll returned error: {result['error']}")
                 except Exception as e:
                     print(f"[watchlist_scanner] poll failed for {symbol} ({tf}): {e!r}")
+                    # Also surface it in Telegram once per 30 min per symbol, so a
+                    # persistently broken scan doesn't just go silent forever.
                     now = time.time()
                     if (_last_scan_error_notified["symbol"] != symbol
                             or now - _last_scan_error_notified["at"] > 1800):
@@ -576,6 +621,7 @@ async def background_watchlist_scanner():
         await asyncio.sleep(WATCHLIST_SCAN_INTERVAL_SECONDS)
 
 async def send_amd_analysis(context, chat_id, symbol):
+    """AMD — 5-phase cycle map with TradingView-style session separators."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         analysis = run_amd_analysis(symbol)
@@ -595,11 +641,14 @@ async def send_amd_analysis(context, chat_id, symbol):
                     photo=chart_img,
                     caption=f"{symbol} AMD Cycle Map | Phase: {analysis.get('phase', 'n/a')} | {ts_str}",
                 )
-        except Exception:
+        except Exception as chart_err:
+            # Fallback: still send text even if chart fails
             pass
 
         await context.bot.send_message(chat_id=chat_id, text=report)
-        await context.bot.send_message(chat_id=chat_id, text="Choose next action:", reply_markup=get_home_menu())
+        await context.bot.send_message(
+            chat_id=chat_id, text="Choose next action:", reply_markup=get_home_menu()
+        )
     except Exception as e:
         await context.bot.send_message(
             chat_id=chat_id,
@@ -607,32 +656,12 @@ async def send_amd_analysis(context, chat_id, symbol):
             reply_markup=get_home_menu()
         )
 
+
 async def send_institutional_topdown(context, chat_id, symbol):
+    """SMC Top-Down — zones, structure, liquidity mapped like the educational charts."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        loop = asyncio.get_running_loop()
-        try:
-            analysis = await asyncio.wait_for(
-                loop.run_in_executor(None, run_topdown_analysis, symbol),
-                timeout=120.0,
-            )
-        except asyncio.TimeoutError:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"⏱ SMC analysis timed out for {symbol} (data provider slow). Try again.",
-                reply_markup=get_home_menu(),
-            )
-            return
-
-        if not analysis or analysis.get("error"):
-            err = (analysis or {}).get("error") or "Unknown analysis error"
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"❌ {err}",
-                reply_markup=get_home_menu(),
-            )
-            return
-
+        analysis = run_topdown_analysis(symbol)
         report = format_institutional_report(analysis)
         overall_bias = analysis.get("overall_bias", "NEUTRAL")
 
@@ -651,7 +680,6 @@ async def send_institutional_topdown(context, chat_id, symbol):
                     "fvgs": chart_frame.get("fvgs") or [],
                     "order_blocks": chart_frame.get("order_blocks") or [],
                     "inducements": chart_frame.get("inducements") or [],
-                    "base_zones": chart_frame.get("base_zones") or [],
                     "structure": chart_frame.get("structure") or {},
                     "volume_profile": chart_frame.get("volume_profile") or analysis.get("volume_profile"),
                     "bos_events": chart_frame.get("bos_events") or [],
@@ -660,48 +688,50 @@ async def send_institutional_topdown(context, chat_id, symbol):
                     "position": analysis.get("position"),
                 }
                 tf_lab = chart_frame.get("tf_label", "1H")
-
-                def _build_chart():
-                    return generate_smc_map(
-                        chart_frame["df"],
-                        symbol,
-                        title_suffix=f"Institutional {tf_lab} | {ts_str}",
-                        zones=zones,
-                        bias_label=overall_bias,
-                        show_sessions=True,
-                    )
-
-                chart_img = await asyncio.wait_for(
-                    loop.run_in_executor(None, _build_chart),
-                    timeout=45.0,
+                chart_img = generate_smc_map(
+                    chart_frame["df"],
+                    symbol,
+                    title_suffix=f"Institutional {tf_lab} | {ts_str}",
+                    zones=zones,
+                    bias_label=overall_bias,
+                    show_sessions=True,
                 )
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=chart_img,
                     caption=f"{symbol} SMC Map | Bias: {overall_bias} | {ts_str}",
                 )
-        except Exception as chart_err:
-            print(f"[smc_topdown] chart failed for {symbol}: {chart_err!r}")
+        except Exception:
+            pass
 
         await context.bot.send_message(chat_id=chat_id, text=report)
         await context.bot.send_message(
             chat_id=chat_id,
             text="Choose next action:",
-            reply_markup=get_home_menu(),
+            reply_markup=get_home_menu()
         )
     except Exception as e:
-        print(f"[smc_topdown] failed for {symbol}: {e!r}")
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"Institutional analysis failed for '{symbol}': {str(e)}",
-            reply_markup=get_home_menu(),
+            reply_markup=get_home_menu()
         )
 
+
 async def send_full_analysis(context, chat_id, symbol, timeframe):
+    """Single-timeframe analysis (used by Scalper Mode & Pattern Scanner)."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         setup = build_display_setup(symbol, timeframe)
+        # generate_trendline_map() reads chart-drawing keys (upper_line/
+        # channel/pivots for channel mode, trigger_line/key_points for
+        # pattern mode) from setup["family"]/setup["analysis"], falling back
+        # to setup itself only if neither is present. build_display_setup()
+        # nests all of that under setup["geometry_data"] instead -- without
+        # this line the chart silently rendered candles only, with none of
+        # the actual detected pattern/channel ever drawn.
         setup["family"] = setup["geometry_data"]
+        # Use new trendline / execution style map
         chart_img = generate_trendline_map(
             setup["geometry_data"]["df"],
             symbol,
@@ -716,10 +746,11 @@ async def send_full_analysis(context, chat_id, symbol, timeframe):
         entry_styles_block = ""
         if setup.get('aggressive_entry') is not None and setup['sl'] is not None:
             entry_styles_block = (
-                f"\nENTRY STYLES:\n"
+                f"\nENTRY STYLES (for manual trades -- the EA/AUTO pipeline only ever takes Confirmation):\n"
                 f"- Aggressive: {fmt.format(setup['aggressive_entry'])} (at {setup['aggressive_entry_label']}) "
-                f"| SL {fmt.format(setup['aggressive_sl'])}\n"
-                f"- Confirmation: close beyond {fmt.format(setup['geometry_data']['trigger_price'])}\n"
+                f"| SL {fmt.format(setup['aggressive_sl'])} -- smaller size, best R:R, lower probability\n"
+                f"- Confirmation: close beyond {fmt.format(setup['geometry_data']['trigger_price'])} "
+                f"-- higher probability, standard size (this is what the EA waits for)\n"
             )
         summary = (f"SUMMARY ({symbol} | {setup['selected_tf']}):\n- Pattern: {setup['pattern_name']}\n"
                    f"- Confidence: {setup['confidence']:.1f}%\n- Status: {setup['trendline_status']}\n"
@@ -732,12 +763,15 @@ async def send_full_analysis(context, chat_id, symbol, timeframe):
     except Exception as e:
         await context.bot.send_message(chat_id=chat_id, text=f"Failed to analyze '{symbol}': {str(e)}", reply_markup=get_home_menu())
 
+
 async def send_silver_bullet_analysis(context, chat_id, symbol):
+    """ICT Silver Bullet analysis + optional ticket in Mobile Manual mode."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         analysis = run_silver_bullet_analysis(symbol)
         report = format_silver_bullet_report(analysis)
 
+        # Chart: reuse SMC map with FVGs + structure
         try:
             df = analysis.get("df")
             if df is not None and not df.empty:
@@ -762,6 +796,7 @@ async def send_silver_bullet_analysis(context, chat_id, symbol):
 
         await context.bot.send_message(chat_id=chat_id, text=report)
 
+        # Mobile Manual ticket when in COPY_TRADE mode and setup is valid
         if ts.state.get_mode() == ts.MODE_COPY_TRADE and analysis.get("valid"):
             from silver_bullet import build_silver_bullet_ticket
             ticket = build_silver_bullet_ticket(analysis)
@@ -786,13 +821,19 @@ async def send_silver_bullet_analysis(context, chat_id, symbol):
             reply_markup=get_home_menu(),
         )
 
+
 async def send_smart_analysis(context, chat_id, symbol):
+    """
+    Runs Single or Hybrid strategy engine and returns analysis + ticket
+    (ticket only when Mobile Manual / COPY_TRADE is active).
+    """
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         result = run_strategy_for_symbol(symbol)
         strategy = result.get("strategy", "")
         report = result.get("report") or "No report"
 
+        # Chart by strategy
         try:
             analysis = result.get("analysis") or {}
             if strategy == ts.STRATEGY_AMD and analysis.get("df_1h") is not None:
@@ -858,6 +899,7 @@ async def send_smart_analysis(context, chat_id, symbol):
             header += f"Why: {result['chosen_reason']}\n"
         await context.bot.send_message(chat_id=chat_id, text=header + "\n" + report)
 
+        # Mobile Manual ticket
         if ts.state.get_mode() == ts.MODE_COPY_TRADE and result.get("valid"):
             ticket_text = format_trade_ticket(result, symbol)
             await context.bot.send_message(chat_id=chat_id, text=ticket_text)
@@ -870,47 +912,20 @@ async def send_smart_analysis(context, chat_id, symbol):
             reply_markup=get_home_menu(),
         )
 
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global primary_chat_id
     chat_id = update.effective_chat.id
     primary_chat_id = chat_id
-    raw_symbol = update.message.text.strip().upper()
-    symbol = raw_symbol.replace("$", "").replace("/", "").strip()
-    
-    current_strat = ts.state.get_selected_strategy()
-    strat_mode = ts.state.get_strategy_mode()
-    
+    symbol = update.message.text.strip().upper()
     status_msg = await update.message.reply_text(
         f"Scanning {symbol} with {ts.state.strategy_label()}..."
     )
-    
     try:
-        # Fast direct execution mapping to prevent heavy multi-timeframe SMC timeouts
-        if strat_mode == ts.STRATEGY_MODE_SINGLE:
-            if current_strat == ts.STRATEGY_SILVER_BULLET:
-                await send_silver_bullet_analysis(context, chat_id, symbol)
-            elif current_strat == ts.STRATEGY_AMD:
-                await send_amd_analysis(context, chat_id, symbol)
-            elif current_strat == ts.STRATEGY_SMC:
-                await send_institutional_topdown(context, chat_id, symbol)
-            elif current_strat == ts.STRATEGY_TRENDLINE:
-                await send_full_analysis(context, chat_id, symbol, ts.state.get_watch_timeframe())
-            else:
-                await send_smart_analysis(context, chat_id, symbol)
-        else:
-            await send_smart_analysis(context, chat_id, symbol)
-            
-    except Exception as e:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"⚠️ Analysis error for '{symbol}': {str(e)}",
-            reply_markup=get_home_menu()
-        )
-    finally:
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
+        await status_msg.delete()
+    except Exception:
+        pass
+    await send_smart_analysis(context, chat_id, symbol)
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global primary_chat_id
@@ -931,6 +946,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=get_home_menu()
         )
 
+    # ---------------- Strategy Selector ----------------
     elif data == "menu_strategy":
         await query.edit_message_text(
             "🧠 STRATEGY SELECTOR\n\n"
@@ -966,6 +982,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=get_strategy_menu(),
         )
 
+    # ---------------- Mobile Control Panel ----------------
     elif data == "menu_mobile_panel":
         await query.edit_message_text("📱 MOBILE CONTROL PANEL", reply_markup=get_mobile_panel_menu())
 
@@ -977,6 +994,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         cur = ts.state.get_mode()
         if cur == ts.MODE_AUTO: ts.state.set_mode(ts.MODE_APPROVAL)
         elif cur == ts.MODE_APPROVAL: ts.state.set_mode(ts.MODE_AUTO)
+        # if currently OFF or COPY_TRADE, this button just sets AUTO as the baseline execution mode
         else: ts.state.set_mode(ts.MODE_AUTO)
         await query.edit_message_text("📱 MOBILE CONTROL PANEL", reply_markup=get_mobile_panel_menu())
 
@@ -991,6 +1009,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         ts.state.set_lot_mode("RISK" if ts.state.lot_mode == "MIN" else "MIN")
         await query.edit_message_text("📱 MOBILE CONTROL PANEL", reply_markup=get_mobile_panel_menu())
 
+    # ---------------- Watched asset selection (away-mode background scanner) ----------------
     elif data == "menu_watch_asset":
         watched = ts.state.get_watched_symbol()
         extra = [InlineKeyboardButton("⛔ Clear Selection (stop watching)", callback_data="watch_clear")] if watched else None
@@ -1010,12 +1029,15 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("watch_set|"):
         _, symbol = data.split("|", 1)
         ts.state.set_watched_symbol(symbol)
-        await query.edit_message_text(f"🎯 Now watching {symbol}.", reply_markup=get_mobile_panel_menu())
+        await query.edit_message_text(f"🎯 Now watching {symbol}. It'll stay focused on this until you change "
+                                      f"or clear it.", reply_markup=get_mobile_panel_menu())
 
     elif data == "watch_clear":
         ts.state.clear_watched_symbol()
-        await query.edit_message_text("🎯 Watch cleared.", reply_markup=get_mobile_panel_menu())
+        await query.edit_message_text("🎯 Watch cleared. Background scanner is idle until you pick a new asset.",
+                                       reply_markup=get_mobile_panel_menu())
 
+    # ---------------- Entry timeframe selection (background scanner + on-demand trendline) ----------------
     elif data == "menu_watch_tf":
         current = ts.state.get_watch_timeframe()
         rows = []
@@ -1030,6 +1052,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         rows.append([InlineKeyboardButton("« Back", callback_data="menu_mobile_panel")])
         await query.edit_message_text(
             f"⏱ Entry Timeframe (currently {ts.state.watch_timeframe_label()})\n\n"
+            "This is the candle timeframe used for:\n"
+            "• The background scanner (Copy Trade tickets while away)\n"
+            "• On-demand Trendline analysis\n\n"
             "Pick the timeframe your entries should be based on:",
             reply_markup=InlineKeyboardMarkup(rows),
         )
@@ -1070,7 +1095,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "show_pattern_stats":
         stats = mt5_data.get_pattern_win_rates(magic_number=778899, days=30)
         if not stats:
-            text = "No closed trades yet -- pattern win-rates will show up here once you have trade history."
+            text = "No closed trades yet (or MT5 not reachable) -- pattern win-rates will show up here once you have trade history."
         else:
             lines = ["PATTERN WIN RATES (last 30 days):"]
             for name, s in stats.items():
@@ -1079,6 +1104,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             text = "\n".join(lines)
         await query.edit_message_text(text, reply_markup=get_mobile_panel_menu())
 
+    # ---------------- Approval flow ----------------
     elif data.startswith("approve|") or data.startswith("reject|"):
         action, approval_id = data.split("|", 1)
         req, status = ts.state.resolve_approval(approval_id, approved=(action == "approve"))
@@ -1091,6 +1117,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         else:
             await query.edit_message_text(f"❌ Rejected:\n{req['summary']}")
 
+    # ---------------- On-demand AI commentary ----------------
     elif data.startswith("ai_commentary|"):
         _, symbol, timeframe = data.split("|", 2)
         try:
@@ -1102,6 +1129,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             await query.message.reply_text(f"Couldn't generate commentary: {e}")
 
+    # ---------------- Pattern Scanner / Analysis / Scalper (existing style) ----------------
     elif data == "menu_pattern_scanner":
         await query.edit_message_text("🔍 Pattern Scanner -- pick a category:", reply_markup=get_category_keyboard("scan_cat", "menu_home"))
     elif data.startswith("scan_cat|"):
@@ -1146,6 +1174,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_amd")]])
         )
 
+    # ---------------- ICT Silver Bullet ----------------
     elif data == "menu_silver_bullet":
         extra = [InlineKeyboardButton("🔍 Custom Ticker", callback_data="prompt_custom_ticker_sb")]
         await query.edit_message_text(
@@ -1167,6 +1196,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_silver_bullet")]])
         )
 
+    # ---------------- Trendline Strategy ----------------
     elif data == "menu_trendline":
         extra = [InlineKeyboardButton("🔍 Custom Ticker", callback_data="prompt_custom_ticker_tl")]
         await query.edit_message_text(
@@ -1188,6 +1218,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_trendline")]])
         )
 
+    # ---------------- Smart Strategy Run (uses selected / hybrid) ----------------
     elif data.startswith("run_smart|"):
         _, symbol = data.split("|", 1)
         await query.edit_message_text(f"Running {ts.state.strategy_label()} analysis for {symbol}...")
@@ -1218,12 +1249,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                "double/triple tops, ranges), weighted toward flags/continuation patterns.\n\n"
                "The EA only fires on a marubozu candle confirming the breakout -- near the trigger fires "
                "at market, stretched moves wait for a Fibonacci pullback instead of chasing.\n\n"
-               "Mobile Control Panel: Master ON/OFF, AUTO vs APPROVAL execution, Copy Trade (away mode), "
-               "and live account/PnL.")
+               "Mobile Control Panel: Master ON/OFF, AUTO vs APPROVAL execution, Copy Trade (away mode -- "
+               "EA halts, you get manual tickets instead), and live account/PnL.")
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_home")]]))
 
 # ==========================================
-# 5. NOTIFIER CALLBACKS
+# 6. NOTIFIER CALLBACKS (wired into engine.py so it can push Telegram
+#    messages without importing this file directly)
 # ==========================================
 def on_auto_fired(setup):
     fmt = f"{{:.{_decimals_for(setup['symbol'])}f}}"
@@ -1258,7 +1290,8 @@ engine.register_notifiers(auto_fired=on_auto_fired, approval_request=on_approval
 engine._notify_callbacks["report_event"] = on_report_event
 
 # ==========================================
-# 6. ENTRYPOINT
+# 7. ENTRYPOINT -- runs Flask (for the EA) and Telegram polling together,
+#    all local, no keep-alive ping needed since nothing sleeps on your PC.
 # ==========================================
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
