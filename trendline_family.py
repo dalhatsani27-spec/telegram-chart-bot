@@ -287,13 +287,36 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4) -> Dict[str, An
     support = _fit_primary(pivots, "support", n, df)
     resistance = _fit_primary(pivots, "resistance", n, df)
 
-    # Choose which family dominates (more touches + price respect)
+    # LOCKED RULE:
+    #   Uptrend  → map pivot LOWS  (ascending support)
+    #   Downtrend → map pivot HIGHS (descending resistance)
+    # Prefer the directional family that matches structure; do not mix.
     close = float(df["Close"].iloc[-1])
     primary = None
     family_kind = "none"
 
-    if support and resistance:
-        # Prefer the one price is currently interacting with / stronger touches
+    # Detect simple structure bias from recent non-ranging pivots
+    recent = pivots[-6:] if len(pivots) >= 4 else pivots
+    highs = [p for p in recent if p["type"] == "high"]
+    lows = [p for p in recent if p["type"] == "low"]
+    struct_bias = "NEUTRAL"
+    if len(highs) >= 2 and len(lows) >= 2:
+        hh = highs[-1]["price"] > highs[-2]["price"]
+        hl = lows[-1]["price"] > lows[-2]["price"]
+        lh = highs[-1]["price"] < highs[-2]["price"]
+        ll = lows[-1]["price"] < lows[-2]["price"]
+        if hh and hl:
+            struct_bias = "BULLISH"
+        elif lh and ll:
+            struct_bias = "BEARISH"
+
+    if struct_bias == "BULLISH" and support:
+        # Uptrend: only map pivot lows
+        primary, family_kind = support, "ascending"
+    elif struct_bias == "BEARISH" and resistance:
+        # Downtrend: only map pivot highs
+        primary, family_kind = resistance, "descending"
+    elif support and resistance:
         s_end = support["y_end"]
         r_end = resistance["y_end"]
         if support["touches"] >= resistance["touches"] and close >= s_end * 0.998:
