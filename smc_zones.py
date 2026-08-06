@@ -554,3 +554,50 @@ def summarise_smc_zones(fvgs, obs, max_show=5, inducements=None):
                 f"  IDM {z['bias']} [{status}]{tag_extra}: {z['bottom']:.5f} – {z['top']:.5f}"
             )
     return lines
+
+
+def detect_base_zones(df, max_zones=4):
+    """
+    Compatibility helper for base / consolidation zones.
+    Returns a small list of recent tight ranges (used by some analysis paths).
+    Kept for backward-compatible imports.
+    """
+    if df is None or len(df) < 20:
+        return []
+
+    atr = _atr_series(df)
+    n = len(df)
+    zones = []
+    window = 8
+
+    for i in range(window, n):
+        a = float(atr.iloc[i]) if not np.isnan(atr.iloc[i]) else 0.0
+        if a <= 0:
+            continue
+        seg_high = float(df["High"].iloc[i - window:i + 1].max())
+        seg_low = float(df["Low"].iloc[i - window:i + 1].min())
+        height = seg_high - seg_low
+        if height <= 0:
+            continue
+        # Tight base relative to ATR
+        if height <= 1.8 * a:
+            zones.append({
+                "type": "BASE",
+                "bias": "NEUTRAL",
+                "top": seg_high,
+                "bottom": seg_low,
+                "mid": (seg_high + seg_low) / 2.0,
+                "index": i,
+                "mitigated": False,
+            })
+
+    # Keep most recent unique-ish bases
+    zones.sort(key=lambda z: z["index"], reverse=True)
+    cleaned = []
+    for z in zones:
+        if any(abs(z["mid"] - c["mid"]) / max(abs(z["mid"]), 1e-9) < 0.0015 for c in cleaned):
+            continue
+        cleaned.append(z)
+        if len(cleaned) >= max_zones:
+            break
+    return cleaned
