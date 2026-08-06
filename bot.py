@@ -620,21 +620,45 @@ async def background_watchlist_scanner():
             print(f"[watchlist_scanner] outer loop failure (symbol={symbol}): {e!r}")
         await asyncio.sleep(WATCHLIST_SCAN_INTERVAL_SECONDS)
 
+ANALYSIS_TIMEOUT_SECONDS = 90.0
+CHART_TIMEOUT_SECONDS = 45.0
+
+async def _run_blocking(func, timeout=ANALYSIS_TIMEOUT_SECONDS):
+    """
+    Runs a zero-arg callable off the asyncio event loop with a hard timeout.
+    Every handler that calls into analysis/chart code (all of which are
+    synchronous, blocking, network + CPU heavy) MUST go through this --
+    otherwise that call runs directly on the same thread that polls
+    Telegram, freezing the ENTIRE bot (every user, every command) for as
+    long as it takes, with no timeout at all. This previously happened for
+    every handler except SMC Top-Down, which was the only one already
+    wrapped this way.
+    """
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(loop.run_in_executor(None, func), timeout=timeout)
+
+
 async def send_amd_analysis(context, chat_id, symbol):
     """AMD — 5-phase cycle map with TradingView-style session separators."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        analysis = run_amd_analysis(symbol)
+        try:
+            analysis = await _run_blocking(lambda: run_amd_analysis(symbol))
+        except asyncio.TimeoutError:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⏱ AMD analysis timed out for {symbol} (data provider slow). Try again.",
+                reply_markup=get_home_menu(),
+            )
+            return
         report = format_amd_report(analysis)
 
         try:
             df_1h = analysis.get("df_1h")
             if df_1h is not None and not df_1h.empty:
-                chart_img = generate_amd_map(
-                    df_1h,
-                    symbol,
-                    analysis,
-                    title_suffix=f"1H | {ts_str}",
+                chart_img = await _run_blocking(
+                    lambda: generate_amd_map(df_1h, symbol, analysis, title_suffix=f"1H | {ts_str}"),
+                    timeout=CHART_TIMEOUT_SECONDS,
                 )
                 await context.bot.send_photo(
                     chat_id=chat_id,
@@ -755,7 +779,15 @@ async def send_full_analysis(context, chat_id, symbol, timeframe):
     """Single-timeframe analysis (used by Scalper Mode & Pattern Scanner)."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        setup = build_display_setup(symbol, timeframe)
+        try:
+            setup = await _run_blocking(lambda: build_display_setup(symbol, timeframe))
+        except asyncio.TimeoutError:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⏱ Analysis timed out for {symbol} (data provider slow). Try again.",
+                reply_markup=get_home_menu(),
+            )
+            return
         # generate_trendline_map() reads chart-drawing keys (upper_line/
         # channel/pivots for channel mode, trigger_line/key_points for
         # pattern mode) from setup["family"]/setup["analysis"], falling back
@@ -765,11 +797,11 @@ async def send_full_analysis(context, chat_id, symbol, timeframe):
         # the actual detected pattern/channel ever drawn.
         setup["family"] = setup["geometry_data"]
         # Use new trendline / execution style map
-        chart_img = generate_trendline_map(
-            setup["geometry_data"]["df"],
-            symbol,
-            setup,
-            title_suffix=f"{timeframe} | {ts_str}",
+        chart_img = await _run_blocking(
+            lambda: generate_trendline_map(
+                setup["geometry_data"]["df"], symbol, setup, title_suffix=f"{timeframe} | {ts_str}",
+            ),
+            timeout=CHART_TIMEOUT_SECONDS,
         )
         memo_text = generate_memorandum(symbol, setup)
         fmt = f"{{:.{_decimals_for(symbol)}f}}"
@@ -801,7 +833,15 @@ async def send_silver_bullet_analysis(context, chat_id, symbol):
     """ICT Silver Bullet analysis + optional ticket in Mobile Manual mode."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        analysis = run_silver_bullet_analysis(symbol)
+        try:
+            analysis = await _run_blocking(lambda: run_silver_bullet_analysis(symbol))
+        except asyncio.TimeoutError:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⏱ Silver Bullet analysis timed out for {symbol} (data provider slow). Try again.",
+                reply_markup=get_home_menu(),
+            )
+            return
         report = format_silver_bullet_report(analysis)
 
         # Chart: reuse SMC map with FVGs + structure
@@ -813,12 +853,12 @@ async def send_silver_bullet_analysis(context, chat_id, symbol):
                     "order_blocks": analysis.get("order_blocks") or [],
                     "structure": analysis.get("structure") or {},
                 }
-                chart_img = generate_smc_map(
-                    df, symbol,
-                    title_suffix=f"Silver Bullet | {ts_str}",
-                    zones=zones,
-                    bias_label=analysis.get("direction", ""),
-                    show_sessions=True,
+                chart_img = await _run_blocking(
+                    lambda: generate_smc_map(
+                        df, symbol, title_suffix=f"Silver Bullet | {ts_str}",
+                        zones=zones, bias_label=analysis.get("direction", ""), show_sessions=True,
+                    ),
+                    timeout=CHART_TIMEOUT_SECONDS,
                 )
                 await context.bot.send_photo(
                     chat_id=chat_id, photo=chart_img,
@@ -862,7 +902,15 @@ async def send_smart_analysis(context, chat_id, symbol):
     """
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        result = run_strategy_for_symbol(symbol)
+        try:
+            result = await _run_blocking(lambda: run_strategy_for_symbol(symbol))
+        except asyncio.TimeoutError:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⏱ Analysis timed out for {symbol} (data provider slow). Try again.",
+                reply_markup=get_home_menu(),
+            )
+            return
         strategy = result.get("strategy", "")
         report = result.get("report") or "No report"
 
@@ -870,7 +918,10 @@ async def send_smart_analysis(context, chat_id, symbol):
         try:
             analysis = result.get("analysis") or {}
             if strategy == ts.STRATEGY_AMD and analysis.get("df_1h") is not None:
-                chart_img = generate_amd_map(analysis["df_1h"], symbol, analysis, title_suffix=ts_str)
+                chart_img = await _run_blocking(
+                    lambda: generate_amd_map(analysis["df_1h"], symbol, analysis, title_suffix=ts_str),
+                    timeout=CHART_TIMEOUT_SECONDS,
+                )
                 await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"{symbol} AMD | {ts_str}")
             elif strategy in (ts.STRATEGY_SMC, ts.STRATEGY_SILVER_BULLET):
                 df = None
@@ -904,9 +955,12 @@ async def send_smart_analysis(context, chat_id, symbol):
                             "position": result.get("position") or analysis.get("position"),
                         }
                 if df is not None:
-                    chart_img = generate_smc_map(
-                        df, symbol, title_suffix=f"{strategy} | {ts_str}",
-                        zones=zones, bias_label=result.get("direction", ""), show_sessions=True,
+                    chart_img = await _run_blocking(
+                        lambda: generate_smc_map(
+                            df, symbol, title_suffix=f"{strategy} | {ts_str}",
+                            zones=zones, bias_label=result.get("direction", ""), show_sessions=True,
+                        ),
+                        timeout=CHART_TIMEOUT_SECONDS,
                     )
                     await context.bot.send_photo(chat_id=chat_id, photo=chart_img, caption=f"{symbol} {strategy} | {ts_str}")
             elif strategy == ts.STRATEGY_TRENDLINE:
@@ -915,7 +969,10 @@ async def send_smart_analysis(context, chat_id, symbol):
                 if df_tl is not None and not getattr(df_tl, "empty", True):
                     chart_payload = dict(family)
                     chart_payload["position"] = result.get("position") or family.get("position")
-                    chart_img = generate_trendline_map(df_tl, symbol, chart_payload, title_suffix=ts_str)
+                    chart_img = await _run_blocking(
+                        lambda: generate_trendline_map(df_tl, symbol, chart_payload, title_suffix=ts_str),
+                        timeout=CHART_TIMEOUT_SECONDS,
+                    )
                     await context.bot.send_photo(
                         chat_id=chat_id, photo=chart_img,
                         caption=f"{symbol} Trendline Family | {ts_str}",
