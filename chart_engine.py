@@ -897,6 +897,32 @@ def generate_trendline_map(
                         ax.scatter([px], [float(tl[ay_key])], s=55, c=rail_color,
                                    edgecolors="#ffffff", linewidths=1.0, zorder=11, marker="D")
 
+    # Converging wedge/triangle: two independent-slope rails, NOT the
+    # same-slope parallel family above. Rendered separately because they
+    # represent a different structure (rails meeting at an apex) than a
+    # parallel channel, and the old code had no path for this at all.
+    wedge = family.get("wedge")
+    if wedge:
+        for rail, color in ((wedge["lower"], "#26a69a"), (wedge["upper"], "#ef5350")):
+            x0 = max(0, int(rail["x0"]) - offset)
+            # Extend to the apex (or chart edge, whichever comes first) so
+            # the convergence is visible, matching how it's drawn by hand.
+            apex = wedge.get("apex_index")
+            x1 = chart_len - 1
+            if apex is not None:
+                apex_local = apex - offset
+                if 0 < apex_local < chart_len * 1.15:
+                    x1 = min(chart_len - 1, max(0, apex_local))
+            y0 = _line_at(rail, max(int(rail["x0"]), 0))
+            y1 = _line_at(rail, x1 + offset)
+            if x0 < chart_len:
+                ax.plot([x0, x1], [y0, y1], color=color, linewidth=1.8, alpha=0.95, zorder=4)
+        label_x = max(0, int(wedge["lower"]["x0"]) - offset)
+        label_y = wedge["lower"]["y0"]
+        ax.text(label_x, label_y, wedge["pattern"], fontsize=8, color="#ffffff",
+                fontweight="bold", va="top", zorder=12,
+                bbox=dict(boxstyle="round,pad=0.2", fc="#1c202a", ec="none", alpha=0.8))
+
     # M/W neckline (double top / double bottom)
     mw = family.get("mw_pattern")
     if mw and mw.get("neckline") is not None:
@@ -939,17 +965,31 @@ def generate_trendline_map(
                 ax.annotate(label, (px, py), fontsize=6.5, color="#ffe0b2",
                             xytext=(4, 4), textcoords="offset points")
 
-    # Horizontal Support / Resistance from recent non-ranging pivots (bounce expectations)
+    # Horizontal Support / Resistance -- clustered from the FULL pivot
+    # history (see _detect_horizontal_levels), not just the last 6 swings.
+    # A flip zone that's been tested repeatedly over the life of the chart
+    # stays on the map even if its most recent touch has aged out of a
+    # short recency window, which is what a trader marking levels by eye
+    # actually does.
     try:
-        recent_piv = [p for p in (pivots or []) if 0 <= int(p.get("index", -1)) - offset < chart_len][-6:]
-        highs = sorted([float(p["price"]) for p in recent_piv if p.get("type") == "high"], reverse=True)
-        lows = sorted([float(p["price"]) for p in recent_piv if p.get("type") == "low"])
-        for price in highs[:2]:
-            ax.axhline(price, color="#ef5350", linestyle="--", linewidth=1.0, alpha=0.55, zorder=3)
-            ax.text(chart_len * 0.01, price, "R", fontsize=7, color="#ef5350", va="bottom", fontweight="bold")
-        for price in lows[:2]:
-            ax.axhline(price, color="#26a69a", linestyle="--", linewidth=1.0, alpha=0.55, zorder=3)
-            ax.text(chart_len * 0.01, price, "S", fontsize=7, color="#26a69a", va="top", fontweight="bold")
+        hz = family.get("horizontal_levels") or []
+        for lvl in hz:
+            color = "#ef5350" if lvl["side"] == "resistance" else "#26a69a"
+            tag = "R" if lvl["side"] == "resistance" else "S"
+            ax.axhline(lvl["price"], color=color, linestyle="--", linewidth=1.0, alpha=0.6, zorder=3)
+            ax.text(chart_len * 0.01, lvl["price"], f"{tag} ({lvl['touches']}x)",
+                    fontsize=7, color=color, va="bottom" if tag == "R" else "top", fontweight="bold")
+        if not hz:
+            # Fallback to the old recent-pivot read only if clustering found nothing
+            recent_piv = [p for p in (pivots or []) if 0 <= int(p.get("index", -1)) - offset < chart_len][-6:]
+            highs = sorted([float(p["price"]) for p in recent_piv if p.get("type") == "high"], reverse=True)
+            lows = sorted([float(p["price"]) for p in recent_piv if p.get("type") == "low"])
+            for price in highs[:2]:
+                ax.axhline(price, color="#ef5350", linestyle="--", linewidth=1.0, alpha=0.55, zorder=3)
+                ax.text(chart_len * 0.01, price, "R", fontsize=7, color="#ef5350", va="bottom", fontweight="bold")
+            for price in lows[:2]:
+                ax.axhline(price, color="#26a69a", linestyle="--", linewidth=1.0, alpha=0.55, zorder=3)
+                ax.text(chart_len * 0.01, price, "S", fontsize=7, color="#26a69a", va="top", fontweight="bold")
     except Exception:
         pass
 
