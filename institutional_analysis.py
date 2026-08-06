@@ -162,19 +162,49 @@ def _analyse_single_tf(symbol, tf_code, tf_label):
 
 
 
+import concurrent.futures
+
+
+def _fetch_ladder_parallel(symbol, ladder):
+    """
+    Fetches every timeframe in `ladder` concurrently instead of serially.
+    Each _analyse_single_tf call can take up to ~30s in the worst case
+    (Twelve Data timeout + yfinance fallback timeout stacked, which is
+    common for symbols like BTCUSD that aren't on the free Twelve Data
+    tier). Fetching 3 timeframes serially could take up to ~90s -- and if
+    the ladder came up short and ALT_LADDER had to run too, that doubled
+    to ~180s, blowing past the 120s outer timeout in bot.py. Running them
+    in parallel bounds total wait to roughly the single slowest fetch.
+    """
+    frames = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(ladder)) as ex:
+        futures = {
+            ex.submit(_analyse_single_tf, symbol, tf_code, tf_label): tf_code
+            for tf_code, tf_label in ladder
+        }
+        results = {}
+        for fut in concurrent.futures.as_completed(futures):
+            tf_code = futures[fut]
+            try:
+                snap = fut.result()
+            except Exception as e:
+                print(f"[institutional_analysis] {symbol} {tf_code} failed: {e!r}")
+                snap = None
+            if snap:
+                results[tf_code] = snap
+    # Preserve ladder order (HTF first) regardless of completion order --
+    # downstream code assumes frames[0] is the highest timeframe.
+    for tf_code, _ in ladder:
+        if tf_code in results:
+            frames.append(results[tf_code])
+    return frames
+
+
 def run_topdown_analysis(symbol):
     symbol = symbol.strip().upper()
-    frames = []
-    for tf_code, tf_label in TOPDOWN_LADDER:
-        snap = _analyse_single_tf(symbol, tf_code, tf_label)
-        if snap:
-            frames.append(snap)
+    frames = _fetch_ladder_parallel(symbol, TOPDOWN_LADDER)
     if len(frames) < 2:
-        frames = []
-        for tf_code, tf_label in ALT_LADDER:
-            snap = _analyse_single_tf(symbol, tf_code, tf_label)
-            if snap:
-                frames.append(snap)
+        frames = _fetch_ladder_parallel(symbol, ALT_LADDER)
     if not frames:
         return {
             "error": (
