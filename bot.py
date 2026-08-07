@@ -477,6 +477,7 @@ def get_home_menu():
          InlineKeyboardButton("🕯  AMD Cycle", callback_data="menu_amd")],
         [InlineKeyboardButton("⚡  Silver Bullet", callback_data="menu_silver_bullet"),
          InlineKeyboardButton("📐  Trendline", callback_data="menu_trendline")],
+        [InlineKeyboardButton("📊  OTE (Fib Fan+Exp)", callback_data="menu_ote")],
         [InlineKeyboardButton("🔍  Pattern Scanner", callback_data="menu_pattern_scanner"),
          InlineKeyboardButton("🎯  Custom Ticker", callback_data="prompt_custom_ticker")],
         [InlineKeyboardButton("📱  CONTROL PANEL", callback_data="menu_mobile_panel")],
@@ -1232,6 +1233,30 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(
             "Type any ticker for Trendline analysis.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_trendline")]])
+        )
+
+    # ---------------- OTE Strategy (Fib Fan + Expansion) ----------------
+    elif data == "menu_ote":
+        extra = [InlineKeyboardButton("🔍 Custom Ticker", callback_data="prompt_custom_ticker_ote")]
+        await query.edit_message_text(
+            "📊 OTE STRATEGY (Fib Fan + Expansion)\nOptimal Trade Entry: 61.8%-79% retracement, fib fan confluence, expansion targets",
+            reply_markup=get_category_keyboard("cat_ote", "menu_home", extra_row=extra)
+        )
+    elif data.startswith("cat_ote|"):
+        _, cat = data.split("|", 1)
+        await query.edit_message_text(f"{cat}:", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_ote", "menu_ote"))
+    elif data.startswith("run_ote|"):
+        _, symbol = data.split("|", 1)
+        ts.state.set_selected_strategy(ts.STRATEGY_OTE)
+        ts.state.set_strategy_mode(ts.STRATEGY_MODE_SINGLE)
+        await query.edit_message_text(f"Running OTE analysis for {symbol}...")
+        await send_smart_analysis(context, chat_id, symbol)
+    elif data == "prompt_custom_ticker_ote":
+        ts.state.set_selected_strategy(ts.STRATEGY_OTE)
+        ts.state.set_strategy_mode(ts.STRATEGY_MODE_SINGLE)
+        await query.edit_message_text(
+            "Type any ticker for OTE analysis.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_ote")]])
         )
 
     # ---------------- Smart Strategy Run (uses selected / hybrid) ----------------
