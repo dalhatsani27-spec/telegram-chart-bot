@@ -909,26 +909,43 @@ async def send_smart_analysis(context, chat_id, symbol):
                     )
             elif strategy == ts.STRATEGY_DESK:
                 from chart_engine import generate_ote_map
-                # DESK reuses OTE visual (Fan + Expansion) because that is the entry model
-                ote_payload = (analysis.get("ote") or analysis) if isinstance(analysis, dict) else {}
-                df_desk = analysis.get("df") or ote_payload.get("df")
+                # Prefer top-level df from desk result, then nested analysis
+                df_desk = result.get("df") or analysis.get("df")
+                ote_raw = analysis.get("ote") or {}
+                if not isinstance(ote_raw, dict):
+                    ote_raw = {}
                 chart_data = {
-                    "impulse": ote_payload.get("impulse") or analysis.get("impulse"),
-                    "fans": ote_payload.get("fans") or analysis.get("fans") or [],
-                    "expansions": ote_payload.get("expansions") or analysis.get("expansions") or [],
+                    "impulse": ote_raw.get("impulse") or analysis.get("impulse"),
+                    "fans": ote_raw.get("fans") or analysis.get("fans") or [],
+                    "expansions": (
+                        ote_raw.get("expansions")
+                        or analysis.get("expansions")
+                        or (result.get("entry") or {}).get("expansions")
+                        or []
+                    ),
                     "position": result.get("position") or analysis.get("position"),
                     "ticket": result.get("ticket") or analysis.get("ticket"),
-                    "direction": result.get("direction"),
-                    "score": result.get("score"),
+                    "direction": result.get("direction") or analysis.get("direction"),
+                    "score": result.get("score") or analysis.get("score"),
                 }
                 if df_desk is not None and not getattr(df_desk, "empty", True):
-                    chart_img = generate_ote_map(df_desk, symbol, chart_data, title_suffix=f"DESK | {ts_str}")
-                    await context.bot.send_photo(
-                        chat_id=chat_id, photo=chart_img,
-                        caption=f"{symbol} DESK (Strict) | {ts_str}",
+                    chart_img = generate_ote_map(
+                        df_desk, symbol, chart_data, title_suffix=f"DESK | {ts_str}"
                     )
-        except Exception:
-            pass
+                    await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=chart_img,
+                        caption=f"{symbol} DESK (Strict) | Score {result.get('score', 0)} | {ts_str}",
+                    )
+        except Exception as chart_err:
+            # Still send text report even if chart fails; log reason for debugging
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"(Chart skipped: {type(chart_err).__name__}: {chart_err})",
+                )
+            except Exception:
+                pass
 
         header = (
             f"Strategy: {strategy}\n"
