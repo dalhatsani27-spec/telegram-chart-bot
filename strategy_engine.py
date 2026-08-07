@@ -24,6 +24,7 @@ from ote_strategy import (
     format_ote_report,
     build_ote_ticket,
 )
+from desk_engine import run_desk_analysis
 from chart_engine import generate_smc_map, generate_amd_map, generate_trendline_map, generate_ticket_chart
 import mt5_data
 
@@ -445,6 +446,9 @@ def run_single_strategy(symbol: str, strategy: Optional[str] = None) -> Dict[str
         }
         return result
 
+    if strategy == ts.STRATEGY_DESK:
+        return run_desk_analysis(symbol)
+
     return {
         "strategy": strategy,
         "direction": "NEUTRAL",
@@ -480,6 +484,9 @@ def run_hybrid(symbol: str) -> Dict[str, Any]:
 
     if ts.STRATEGY_OTE in enabled:
         candidates.append(run_single_strategy(symbol, ts.STRATEGY_OTE))
+
+    if ts.STRATEGY_DESK in enabled:
+        candidates.append(run_single_strategy(symbol, ts.STRATEGY_DESK))
 
     if not candidates:
         return {
