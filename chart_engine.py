@@ -1235,7 +1235,10 @@ def generate_ote_map(
 
     direction = analysis.get("direction", "")
     score = analysis.get("score", 0)
-    title = f"{symbol}  OTE (Fib Fan + Expansion)  |  {direction}  |  Score {score}"
+    if title_suffix and "DESK" in str(title_suffix).upper():
+        title = f"{symbol}  DESK (Strict)  |  {direction}  |  Score {score}"
+    else:
+        title = f"{symbol}  OTE (Fib Fan + Expansion)  |  {direction}  |  Score {score}"
     if title_suffix:
         title += f"  |  {title_suffix}"
     ax.set_title(title, color=COLORS["text"], fontsize=10, fontweight="bold", pad=10)
