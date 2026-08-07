@@ -19,6 +19,11 @@ from silver_bullet import (
     format_silver_bullet_report,
     build_silver_bullet_ticket,
 )
+from ote_strategy import (
+    run_ote_analysis,
+    format_ote_report,
+    build_ote_ticket,
+)
 from chart_engine import generate_smc_map, generate_amd_map, generate_trendline_map, generate_ticket_chart
 import mt5_data
 
@@ -425,6 +430,21 @@ def run_single_strategy(symbol: str, strategy: Optional[str] = None) -> Dict[str
             )
         return result
 
+    if strategy == ts.STRATEGY_OTE:
+        analysis = run_ote_analysis(symbol)
+        result = {
+            "strategy": ts.STRATEGY_OTE,
+            "direction": analysis.get("direction", "NEUTRAL"),
+            "score": analysis.get("score", 0),
+            "reasons": analysis.get("reasons") or [],
+            "analysis": analysis,
+            "position": analysis.get("position"),
+            "ticket": analysis.get("ticket"),
+            "valid": bool(analysis.get("valid")),
+            "report": format_ote_report(analysis),
+        }
+        return result
+
     return {
         "strategy": strategy,
         "direction": "NEUTRAL",
@@ -457,6 +477,9 @@ def run_hybrid(symbol: str) -> Dict[str, Any]:
 
     if ts.STRATEGY_TRENDLINE in enabled:
         candidates.append(run_single_strategy(symbol, ts.STRATEGY_TRENDLINE))
+
+    if ts.STRATEGY_OTE in enabled:
+        candidates.append(run_single_strategy(symbol, ts.STRATEGY_OTE))
 
     if not candidates:
         return {
