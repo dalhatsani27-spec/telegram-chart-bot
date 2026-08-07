@@ -473,13 +473,14 @@ def get_home_menu():
     strat_label = ts.state.strategy_label()
     keyboard = [
         [InlineKeyboardButton(f"🧠 STRATEGY: {strat_label}", callback_data="menu_strategy")],
+        [InlineKeyboardButton("🏛  DESK (Strict Decision)", callback_data="menu_desk")],
         [InlineKeyboardButton("🏛  SMC (Top-Down)", callback_data="menu_analysis"),
          InlineKeyboardButton("🕯  AMD Cycle", callback_data="menu_amd")],
         [InlineKeyboardButton("⚡  Silver Bullet", callback_data="menu_silver_bullet"),
          InlineKeyboardButton("📐  Trendline", callback_data="menu_trendline")],
-        [InlineKeyboardButton("📊  OTE (Fib Fan+Exp)", callback_data="menu_ote")],
-        [InlineKeyboardButton("🔍  Pattern Scanner", callback_data="menu_pattern_scanner"),
-         InlineKeyboardButton("🎯  Custom Ticker", callback_data="prompt_custom_ticker")],
+        [InlineKeyboardButton("📐  OTE (Fib Fan+Exp)", callback_data="menu_ote"),
+         InlineKeyboardButton("🔍  Pattern Scanner", callback_data="menu_pattern_scanner")],
+        [InlineKeyboardButton("🎯  Custom Ticker", callback_data="prompt_custom_ticker")],
         [InlineKeyboardButton("📱  CONTROL PANEL", callback_data="menu_mobile_panel")],
         [InlineKeyboardButton("ℹ️  HELP & GUIDE", callback_data="menu_help")],
     ]
@@ -506,7 +507,10 @@ def get_strategy_menu():
             callback_data="set_strategy|TRENDLINE")],
         [InlineKeyboardButton(
             f"{'✅' if selected == ts.STRATEGY_OTE else '⚪'} OTE (Fib Fan+Exp)",
-            callback_data="set_strategy|OTE")],
+            callback_data="set_strategy|OTE"),
+         InlineKeyboardButton(
+            f"{'✅' if selected == ts.STRATEGY_DESK else '⚪'} DESK (Strict)",
+            callback_data="set_strategy|DESK")],
         [InlineKeyboardButton("« Back", callback_data="menu_home")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -903,6 +907,26 @@ async def send_smart_analysis(context, chat_id, symbol):
                         chat_id=chat_id, photo=chart_img,
                         caption=f"{symbol} OTE (Fib Fan + Expansion) | {ts_str}",
                     )
+            elif strategy == ts.STRATEGY_DESK:
+                from chart_engine import generate_ote_map
+                # DESK reuses OTE visual (Fan + Expansion) because that is the entry model
+                ote_payload = (analysis.get("ote") or analysis) if isinstance(analysis, dict) else {}
+                df_desk = analysis.get("df") or ote_payload.get("df")
+                chart_data = {
+                    "impulse": ote_payload.get("impulse") or analysis.get("impulse"),
+                    "fans": ote_payload.get("fans") or analysis.get("fans") or [],
+                    "expansions": ote_payload.get("expansions") or analysis.get("expansions") or [],
+                    "position": result.get("position") or analysis.get("position"),
+                    "ticket": result.get("ticket") or analysis.get("ticket"),
+                    "direction": result.get("direction"),
+                    "score": result.get("score"),
+                }
+                if df_desk is not None and not getattr(df_desk, "empty", True):
+                    chart_img = generate_ote_map(df_desk, symbol, chart_data, title_suffix=f"DESK | {ts_str}")
+                    await context.bot.send_photo(
+                        chat_id=chat_id, photo=chart_img,
+                        caption=f"{symbol} DESK (Strict) | {ts_str}",
+                    )
         except Exception:
             pass
 
@@ -990,6 +1014,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             "SILVER_BULLET": ts.STRATEGY_SILVER_BULLET,
             "TRENDLINE": ts.STRATEGY_TRENDLINE,
             "OTE": ts.STRATEGY_OTE,
+            "DESK": ts.STRATEGY_DESK,
         }
         if name in mapping:
             ts.state.set_selected_strategy(mapping[name])
@@ -1235,27 +1260,60 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_trendline")]])
         )
 
+    # ---------------- DESK (Strict Institutional Decision) ----------------
+    elif data == "menu_desk":
+        extra = [InlineKeyboardButton("🔍 Custom Ticker", callback_data="prompt_custom_ticker_desk")]
+        await query.edit_message_text(
+            "🏛 INSTITUTIONAL DESK\n"
+            "Strict gates: HTF bias → Structure → OTE entry zone → R:R\n"
+            "Only VALID setups are shown. Everything else is WAIT.",
+            reply_markup=get_category_keyboard("cat_desk", "menu_home", extra_row=extra)
+        )
+    elif data.startswith("cat_desk|"):
+        _, cat = data.split("|", 1)
+        await query.edit_message_text(
+            f"{cat}:",
+            reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_desk", "menu_desk")
+        )
+    elif data.startswith("run_desk|"):
+        _, symbol = data.split("|", 1)
+        ts.state.set_selected_strategy(ts.STRATEGY_DESK)
+        ts.state.set_strategy_mode(ts.STRATEGY_MODE_SINGLE)
+        await query.edit_message_text(f"Running DESK analysis for {symbol}...")
+        await send_smart_analysis(context, chat_id, symbol)
+    elif data == "prompt_custom_ticker_desk":
+        ts.state.set_selected_strategy(ts.STRATEGY_DESK)
+        ts.state.set_strategy_mode(ts.STRATEGY_MODE_SINGLE)
+        await query.edit_message_text(
+            "Type any ticker for DESK analysis (e.g. XAUUSD, NAS100, EURUSD).",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_desk")]])
+        )
+
     # ---------------- OTE Strategy (Fib Fan + Expansion) ----------------
     elif data == "menu_ote":
         extra = [InlineKeyboardButton("🔍 Custom Ticker", callback_data="prompt_custom_ticker_ote")]
         await query.edit_message_text(
-            "📊 OTE STRATEGY (Fib Fan + Expansion)\nOptimal Trade Entry: 61.8%-79% retracement, fib fan confluence, expansion targets",
+            "📐 OTE STRATEGY\nFibonacci Fan (38.2 / 50 / 61.8) for entry\n"
+            "Fibonacci Expansion (127.2 / 161.8 / 200 / 261.8) for targets",
             reply_markup=get_category_keyboard("cat_ote", "menu_home", extra_row=extra)
         )
     elif data.startswith("cat_ote|"):
         _, cat = data.split("|", 1)
-        await query.edit_message_text(f"{cat}:", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_ote", "menu_ote"))
+        await query.edit_message_text(
+            f"{cat}:",
+            reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_ote", "menu_ote")
+        )
     elif data.startswith("run_ote|"):
         _, symbol = data.split("|", 1)
         ts.state.set_selected_strategy(ts.STRATEGY_OTE)
         ts.state.set_strategy_mode(ts.STRATEGY_MODE_SINGLE)
-        await query.edit_message_text(f"Running OTE analysis for {symbol}...")
+        await query.edit_message_text(f"Running OTE (Fib Fan + Expansion) for {symbol}...")
         await send_smart_analysis(context, chat_id, symbol)
     elif data == "prompt_custom_ticker_ote":
         ts.state.set_selected_strategy(ts.STRATEGY_OTE)
         ts.state.set_strategy_mode(ts.STRATEGY_MODE_SINGLE)
         await query.edit_message_text(
-            "Type any ticker for OTE analysis.",
+            "Type any ticker for OTE analysis (e.g. XAUUSD, NAS100, EURUSD).",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_ote")]])
         )
 
