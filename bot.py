@@ -503,6 +503,9 @@ def get_strategy_menu():
          InlineKeyboardButton(
             f"{'✅' if selected == ts.STRATEGY_TRENDLINE else '⚪'} Trendline",
             callback_data="set_strategy|TRENDLINE")],
+        [InlineKeyboardButton(
+            f"{'✅' if selected == ts.STRATEGY_OTE else '⚪'} OTE (Fib Fan+Exp)",
+            callback_data="set_strategy|OTE")],
         [InlineKeyboardButton("« Back", callback_data="menu_home")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -890,6 +893,15 @@ async def send_smart_analysis(context, chat_id, symbol):
                         chat_id=chat_id, photo=chart_img,
                         caption=f"{symbol} Trendline Family | {ts_str}",
                     )
+            elif strategy == ts.STRATEGY_OTE:
+                from chart_engine import generate_ote_map
+                df_ote = analysis.get("df")
+                if df_ote is not None and not getattr(df_ote, "empty", True):
+                    chart_img = generate_ote_map(df_ote, symbol, analysis, title_suffix=ts_str)
+                    await context.bot.send_photo(
+                        chat_id=chat_id, photo=chart_img,
+                        caption=f"{symbol} OTE (Fib Fan + Expansion) | {ts_str}",
+                    )
         except Exception:
             pass
 
@@ -976,6 +988,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             "AMD": ts.STRATEGY_AMD,
             "SILVER_BULLET": ts.STRATEGY_SILVER_BULLET,
             "TRENDLINE": ts.STRATEGY_TRENDLINE,
+            "OTE": ts.STRATEGY_OTE,
         }
         if name in mapping:
             ts.state.set_selected_strategy(mapping[name])
