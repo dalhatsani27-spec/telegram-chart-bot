@@ -909,26 +909,27 @@ async def send_smart_analysis(context, chat_id, symbol):
                     )
             elif strategy == ts.STRATEGY_DESK:
                 from chart_engine import generate_ote_map
-                # Prefer top-level df from desk result, then nested analysis
-                df_desk = result.get("df") or analysis.get("df")
-                ote_raw = analysis.get("ote") or {}
-                if not isinstance(ote_raw, dict):
-                    ote_raw = {}
+                # Never use "df or x" — DataFrame truth value is ambiguous in pandas
+                df_desk = result.get("df")
+                if df_desk is None and isinstance(analysis, dict):
+                    df_desk = analysis.get("df")
+                ote_raw = {}
+                if isinstance(analysis, dict) and isinstance(analysis.get("ote"), dict):
+                    ote_raw = analysis.get("ote") or {}
+                entry_info = result.get("entry") if isinstance(result.get("entry"), dict) else {}
                 chart_data = {
-                    "impulse": ote_raw.get("impulse") or analysis.get("impulse"),
-                    "fans": ote_raw.get("fans") or analysis.get("fans") or [],
-                    "expansions": (
-                        ote_raw.get("expansions")
-                        or analysis.get("expansions")
-                        or (result.get("entry") or {}).get("expansions")
-                        or []
-                    ),
-                    "position": result.get("position") or analysis.get("position"),
-                    "ticket": result.get("ticket") or analysis.get("ticket"),
-                    "direction": result.get("direction") or analysis.get("direction"),
-                    "score": result.get("score") or analysis.get("score"),
+                    "impulse": ote_raw.get("impulse") or (analysis.get("impulse") if isinstance(analysis, dict) else None),
+                    "fans": ote_raw.get("fans") or (analysis.get("fans") if isinstance(analysis, dict) else None) or [],
+                    "expansions": ote_raw.get("expansions")
+                        or (analysis.get("expansions") if isinstance(analysis, dict) else None)
+                        or entry_info.get("expansions")
+                        or [],
+                    "position": result.get("position") if result.get("position") is not None else (analysis.get("position") if isinstance(analysis, dict) else None),
+                    "ticket": result.get("ticket") if result.get("ticket") is not None else (analysis.get("ticket") if isinstance(analysis, dict) else None),
+                    "direction": result.get("direction") or (analysis.get("direction") if isinstance(analysis, dict) else None),
+                    "score": result.get("score") if result.get("score") is not None else (analysis.get("score") if isinstance(analysis, dict) else 0),
                 }
-                if df_desk is not None and not getattr(df_desk, "empty", True):
+                if df_desk is not None and hasattr(df_desk, "empty") and (not df_desk.empty):
                     chart_img = generate_ote_map(
                         df_desk, symbol, chart_data, title_suffix=f"DESK | {ts_str}"
                     )
