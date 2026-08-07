@@ -28,11 +28,13 @@ STRATEGY_TRENDLINE = "TRENDLINE"
 STRATEGY_SMC = "SMC"
 STRATEGY_AMD = "AMD"
 STRATEGY_SILVER_BULLET = "SILVER_BULLET"
+STRATEGY_OTE = "OTE"
 VALID_STRATEGIES = {
     STRATEGY_TRENDLINE,
     STRATEGY_SMC,
     STRATEGY_AMD,
     STRATEGY_SILVER_BULLET,
+    STRATEGY_OTE,
 }
 
 STRATEGY_MODE_SINGLE = "SINGLE"
@@ -65,6 +67,7 @@ class TradeStateManager:
             STRATEGY_SMC: True,
             STRATEGY_AMD: True,
             STRATEGY_SILVER_BULLET: True,
+            STRATEGY_OTE: True,
         }
         self.min_confluence_score = 65
         self.prefer_silver_bullet = True
