@@ -1145,3 +1145,118 @@ def generate_ticket_chart(
     img_buf.seek(0)
     plt.close(fig)
     return img_buf
+
+
+def generate_ote_map(
+    df: pd.DataFrame,
+    symbol: str,
+    analysis: Dict[str, Any],
+    title_suffix: str = "",
+) -> io.BytesIO:
+    """
+    OTE visual map:
+      - Candlesticks
+      - Fibonacci Fan rays (38.2 / 50 / 61.8) in green
+      - Fibonacci Expansion levels (127.2 / 161.8 / 200 / 261.8)
+      - Impulse start / end markers
+      - Position container (Entry / SL / TP) when available
+    """
+    chart_df, chart_len = _prepare_ohlc(df, max_bars=160)
+    offset = len(df) - chart_len
+
+    mc = mpf.make_marketcolors(up=COLORS["bull"], down=COLORS["bear"], edge="inherit", wick="inherit")
+    style = mpf.make_mpf_style(
+        marketcolors=mc,
+        gridstyle=":",
+        gridcolor=COLORS["grid"],
+        y_on_right=True,
+        facecolor=COLORS["bg"],
+        figcolor=COLORS["bg"],
+        rc={"axes.labelcolor": COLORS["text"], "xtick.color": COLORS["text"], "ytick.color": COLORS["text"]},
+    )
+
+    fig, axlist = mpf.plot(
+        chart_df,
+        type="candle",
+        style=style,
+        volume=False,
+        returnfig=True,
+        figsize=(12, 6.8),
+        warn_too_much_data=10000,
+    )
+    ax = axlist[0]
+
+    # --- Impulse anchors ---
+    impulse = analysis.get("impulse") or {}
+    start = impulse.get("start")
+    end = impulse.get("end")
+    if start:
+        x = start["index"] - offset
+        if 0 <= x < chart_len:
+            ax.scatter([x], [start["price"]], color="#00e676", s=55, zorder=8, marker="o")
+            ax.text(x, start["price"], "  Start", fontsize=7, color="#00e676", va="bottom")
+    if end:
+        x = end["index"] - offset
+        if 0 <= x < chart_len:
+            ax.scatter([x], [end["price"]], color="#ffab00", s=55, zorder=8, marker="o")
+            ax.text(x, end["price"], "  End", fontsize=7, color="#ffab00", va="bottom")
+
+    # --- Fibonacci Fan rays ---
+    fans = analysis.get("fans") or []
+    fan_colors = ["#69f0ae", "#00e676", "#00c853"]
+    for i, fan in enumerate(fans):
+        x0 = fan["x0"] - offset
+        x1 = chart_len - 1
+        if x0 >= chart_len:
+            continue
+        y0 = fan["y0"]
+        y1 = fan["y0"] + fan["slope"] * ((offset + chart_len - 1) - fan["x0"])
+        color = fan_colors[i % len(fan_colors)]
+        y_left = y0 if x0 >= 0 else (fan["y0"] + fan["slope"] * (offset - fan["x0"]))
+        ax.plot([max(0, x0), x1], [y_left, y1],
+                color=color, linewidth=1.6, alpha=0.90, zorder=5)
+        ax.text(chart_len - 2, y1, f" {fan['label']}", fontsize=7,
+                color=color, va="center", fontweight="bold")
+
+    # --- Expansion levels ---
+    expansions = analysis.get("expansions") or []
+    exp_colors = ["#26c6da", "#00bcd4", "#0097a7", "#00838f"]
+    for i, exp in enumerate(expansions):
+        price = exp["price"]
+        color = exp_colors[i % len(exp_colors)]
+        ax.axhline(price, color=color, linestyle="--", linewidth=1.25, alpha=0.85, zorder=4)
+        ax.text(chart_len * 0.72, price, f" Exp {exp['label']}", fontsize=7,
+                color=color, va="bottom")
+
+    # --- Position container ---
+    pos = analysis.get("position") or analysis.get("ticket")
+    if pos:
+        _draw_position_container(ax, pos, chart_len)
+
+    direction = analysis.get("direction", "")
+    score = analysis.get("score", 0)
+    title = f"{symbol}  OTE (Fib Fan + Expansion)  |  {direction}  |  Score {score}"
+    if title_suffix:
+        title += f"  |  {title_suffix}"
+    ax.set_title(title, color=COLORS["text"], fontsize=10, fontweight="bold", pad=10)
+
+    # Price padding
+    prices = list(chart_df["High"]) + list(chart_df["Low"])
+    for f in fans:
+        prices.append(f.get("y_at_end", f["y0"]))
+    for e in expansions:
+        prices.append(e["price"])
+    if prices:
+        pmin, pmax = min(prices), max(prices)
+        pad = (pmax - pmin) * 0.08
+        ax.set_ylim(pmin - pad, pmax + pad)
+
+    img_buf = io.BytesIO()
+    fig.savefig(img_buf, dpi=180, bbox_inches="tight", facecolor=fig.get_facecolor())
+    img_buf.seek(0)
+    plt.close(fig)
+    return img_buf
+
+
+def _line_price_at(fan: Dict, x_abs: float) -> float:
+    return fan["y0"] + fan["slope"] * (x_abs - fan["x0"])
