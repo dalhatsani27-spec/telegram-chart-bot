@@ -120,6 +120,7 @@ def _draw_position_container(ax, pos, chart_len: int):
     sl = pos.get("sl")
     tp1 = pos.get("tp1")
     tp2 = pos.get("tp2")
+    tp3 = pos.get("tp3")
     if entry is None:
         return
 
@@ -139,12 +140,12 @@ def _draw_position_container(ax, pos, chart_len: int):
         ax.axhline(sl, color="#ff1744", linestyle="-", linewidth=2.0, xmin=x0_frac, zorder=4)
         ax.text(x0 + 1, sl, "SL", fontsize=8, color="#ff1744", fontweight="bold", va="top", zorder=12)
         span_vals.append(sl)
-    for tp, tp_label, tp_alpha in ((tp1, "TP1", 1.0), (tp2, "TP2", 0.7)):
+    for tp, tp_label, tp_alpha in ((tp1, "TP1", 1.0), (tp2, "TP2", 0.75), (tp3, "TP3", 0.55)):
         if tp is None:
             continue
         ax.axhspan(min(entry, tp), max(entry, tp), xmin=x0_frac, xmax=1.0,
                    facecolor="#00e676", alpha=0.28 * tp_alpha, zorder=2)
-        ax.axhline(tp, color="#00e676", linestyle=":", linewidth=1.8, xmin=x0_frac, alpha=max(tp_alpha, 0.6), zorder=4)
+        ax.axhline(tp, color="#00e676", linestyle=":", linewidth=1.8, xmin=x0_frac, alpha=max(tp_alpha, 0.55), zorder=4)
         ax.text(x0 + 1, tp, tp_label, fontsize=8, color="#00e676", fontweight="bold", va="bottom", zorder=12)
         span_vals.append(tp)
 
@@ -269,13 +270,13 @@ def generate_trendline_map(
     for p in (family.get("projections") or []):
         price_min = min(price_min, float(p["price"]))
         price_max = max(price_max, float(p["price"]))
-    for key in ("entry", "sl", "tp1", "tp2"):
+    for key in ("entry", "sl", "tp1", "tp2", "tp3"):
         if setup.get(key) is not None:
             price_min = min(price_min, float(setup[key]))
             price_max = max(price_max, float(setup[key]))
     pos = setup.get("position") or family.get("position")
     if pos:
-        for key in ("entry", "sl", "tp1", "tp2"):
+        for key in ("entry", "sl", "tp1", "tp2", "tp3"):
             if pos.get(key) is not None:
                 price_min = min(price_min, float(pos[key]))
                 price_max = max(price_max, float(pos[key]))
