@@ -1,0 +1,8 @@
+python-telegram-bot>=20.0
+flask
+requests
+numpy
+pandas
+mplfinance
+matplotlib
+yfinance
