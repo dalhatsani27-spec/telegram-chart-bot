@@ -9,8 +9,8 @@ chart (the geometry/entry engine), and finally gate/score that 30M read
 against the top-down bias so Trendline and OTE never disagree with the
 bigger picture without saying so.
 
-  - Trendline: parallel-channel trendline family + measured-move /
-    liquidity targets, entry on 30M, full 4H -> 1H -> 30M cascade.
+  - Trendline: classic educational rules (wicks, 2-3+ touches, retest,
+    candlestick confirmation, TradingView-style position template).
   - OTE: Fibonacci Fan + Expansion off the most recent clean impulse leg,
     entry on 30M, gated by the same 4H -> 1H top-down read.
 """
@@ -27,12 +27,26 @@ from market_analysis import zigzag_swings, find_swings, compute_volume_profile
 from topdown_engine import get_topdown_bias, format_topdown_summary
 
 
+
 # ============================================================
-# TRENDLINE GEOMETRY ENGINE -- parallel-channel family, wedges,
-# horizontal S/R clustering, measured-move & liquidity targets,
-# breakout grading. Operates on whatever df is passed in (the
-# orchestration at the bottom of this file always passes the 30M
-# chart).
+# TRENDLINE STRATEGY  (Educational Image Rules)
+# ============================================================
+# Follows the classic rules from the "Trendline Strategy – Full
+# Context & Complete Guide" educational image:
+#
+#   1. Draw valid trendlines connecting WICKS (not bodies)
+#   2. Minimum 2 touch points (3+ = stronger / confirmed)
+#   3. Clear and unbroken line
+#   4. Trade in the direction of the higher-timeframe trend
+#   5. Wait for confirmation before entry (candlestick + BOS)
+#   6. Prefer entry on retest of the trendline
+#   7. TradingView-style position template (Entry / SL / TP1-3)
+#   8. Risk only 1-2%, minimum 1:2 RR, move SL to BE after TP1
+#
+# Timeframe cascade (kept compatible with existing bot):
+#   4H  → macro bias
+#   1H  → structure permission
+#   30M → trendline geometry + entry
 # ============================================================
 
 
@@ -43,7 +57,8 @@ def _line_value(x0: float, y0: float, x1: float, y1: float, x: float) -> float:
 
 
 def _count_touches(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
-                   kind: str, tol_atr: float = 0.40) -> int:
+                   kind: str, tol_atr: float = 0.35) -> int:
+    """Count how many times price wicks touched the line (classic rule)."""
     if df is None or len(df) < 5:
         return 0
     atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
@@ -62,89 +77,49 @@ def _count_touches(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
     return touches
 
 
-def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
-    """Best 2-point primary line of given kind (support=lows, resistance=highs).
-
-    Professional validation standard: a 2-point line is only a *candidate* --
-    it takes a 3rd touch for traders to actually respect it as real structure.
-    We still return 2-touch lines (better than nothing), but tag them
-    "unconfirmed" so downstream scoring/reporting can be honest about it.
-    5+ touches is flagged "crowded": the level has been tested so many times
-    the order flow defending it is likely used up, and the next test is
-    statistically more likely to fail than hold.
+def _fit_trendline(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
+    """
+    Fit a classic trendline from swing pivots.
+    - Uptrend support  = higher lows (connect wicks)
+    - Downtrend resistance = lower highs (connect wicks)
+    Quality tags follow the educational image:
+      unconfirmed (<3 touches), confirmed (3-4), crowded (5+)
     """
     pts = [p for p in pivots if p["type"] == ("low" if kind == "support" else "high")]
     if len(pts) < 2:
         return None
+
     best = None
-    best_score = -1
+    best_score = -1.0
+
     for i in range(len(pts) - 1):
         for j in range(i + 1, len(pts)):
             a, b = pts[i], pts[j]
             if b["index"] <= a["index"]:
                 continue
-            # Uptrend support needs higher low; downtrend resistance needs lower high
+            # Classic structural requirement
             if kind == "support" and b["price"] <= a["price"]:
-                continue
+                continue  # must be higher low
             if kind == "resistance" and b["price"] >= a["price"]:
-                continue
+                continue  # must be lower high
+
             slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
-            touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind)
-            # Prefer more touches + more recent + longer span, but back off once
-            # touches go past the 3-4 "sweet spot" -- a crowded level scores
-            # slightly lower than a freshly-confirmed one at the same touch count.
-            touch_score = touches * 10
-            if touches >= 5:
-                touch_score -= (touches - 4) * 3  # fatigue penalty, doesn't erase the line
-            score = touch_score + (b["index"] / max(n, 1)) * 5 + (b["index"] - a["index"]) * 0.05
-            if score > best_score:
-                best_score = score
-                y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
-                if touches < 3:
-                    quality = "unconfirmed"
-                elif touches <= 4:
-                    quality = "confirmed"
-                else:
-                    quality = "crowded"
-                best = {
-                    "x0": a["index"], "y0": a["price"],
-                    "x1": b["index"], "y1": b["price"],
-                    "y_end": y_end,
-                    "slope": slope,
-                    "touches": touches,
-                    "confirmed": touches >= 3,
-                    "quality": quality,
-                    "kind": kind,
-                }
-    return best
-
-
-def _fit_line_any_slope(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
-    """Best 2-point line through swing highs or lows, ANY slope direction.
-
-    _fit_primary locks support to rising / resistance to falling only, which
-    is correct for a parallel channel but can never produce the two
-    independent-slope rails a trader draws by hand for a wedge or triangle
-    (e.g. an ascending-highs line paired with a steeper ascending-lows line
-    = rising wedge). This is the same touch-scored 2-point fit, just without
-    that directional constraint.
-    """
-    pts = [p for p in pivots if p["type"] == ("low" if kind == "support" else "high")]
-    if len(pts) < 2:
-        return None
-    best = None
-    best_score = -1
-    for i in range(len(pts) - 1):
-        for j in range(i + 1, len(pts)):
-            a, b = pts[i], pts[j]
-            if b["index"] <= a["index"]:
+            # Reject almost-flat lines (not useful as trendlines)
+            if abs(slope) < 1e-8:
                 continue
-            slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
+
             touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind)
-            touch_score = touches * 10
+            if touches < 2:
+                continue
+
+            # Prefer more recent + more touches, mild penalty for crowded levels
+            touch_score = touches * 12
             if touches >= 5:
-                touch_score -= (touches - 4) * 3
-            score = touch_score + (b["index"] / max(n, 1)) * 5 + (b["index"] - a["index"]) * 0.05
+                touch_score -= (touches - 4) * 4
+            recency = (b["index"] / max(n, 1)) * 8
+            span = (b["index"] - a["index"]) * 0.04
+            score = touch_score + recency + span
+
             if score > best_score:
                 best_score = score
                 y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
@@ -152,540 +127,227 @@ def _fit_line_any_slope(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame)
                 best = {
                     "x0": a["index"], "y0": a["price"],
                     "x1": b["index"], "y1": b["price"],
-                    "y_end": y_end, "slope": slope, "touches": touches,
-                    "confirmed": touches >= 3, "quality": quality, "kind": kind,
+                    "y_end": y_end, "slope": slope,
+                    "touches": touches, "confirmed": touches >= 3,
+                    "quality": quality, "kind": kind,
                 }
     return best
 
 
-def _detect_converging_wedge(pivots: List[Dict], df: pd.DataFrame, n: int) -> Optional[Dict]:
-    """
-    Detect two independent-slope trendlines (one off the lows, one off the
-    highs) that converge toward an apex -- wedges and triangles. This is
-    distinct from _build_parallel_family, which only ever produces rails
-    that share the primary's slope. A hand-drawn chart very often shows
-    exactly this shape (two lines of different steepness meeting), and the
-    old single-family logic could never reproduce it.
-    """
-    lower = _fit_line_any_slope(pivots, "support", n, df)
-    upper = _fit_line_any_slope(pivots, "resistance", n, df)
-    if not lower or not upper or lower["touches"] < 2 or upper["touches"] < 2:
+def _detect_channel(primary: Dict, pivots: List[Dict], n: int) -> Optional[Dict]:
+    """Build a simple parallel channel from the primary trendline (image style)."""
+    if not primary:
+        return None
+    opposite = "high" if primary["kind"] == "support" else "low"
+    pts = [p for p in pivots if p["type"] == opposite]
+    if len(pts) < 1:
         return None
 
-    start_x = max(min(lower["x0"], upper["x0"]), 0)
-    gap_start = (_line_value(upper["x0"], upper["y0"], upper["x1"], upper["y1"], start_x) -
-                 _line_value(lower["x0"], lower["y0"], lower["x1"], lower["y1"], start_x))
-    gap_end = upper["y_end"] - lower["y_end"]
-    if gap_start <= 0 or gap_end <= 0:
-        return None  # lines have already crossed -- not a clean wedge anymore
-    if gap_end >= gap_start * 0.92:
-        return None  # not meaningfully converging -- let the parallel-channel path handle it
+    # Find the pivot that creates the best parallel rail
+    best_rail = None
+    best_dist = 0.0
+    for p in pts:
+        # Project primary to this x and measure distance
+        lv = _line_value(primary["x0"], primary["y0"], primary["x1"], primary["y1"], p["index"])
+        dist = abs(p["price"] - lv)
+        if dist > best_dist:
+            best_dist = dist
+            best_rail = p
 
-    slope_l, slope_u = lower["slope"], upper["slope"]
-    flat = lambda s: abs(s) < 1e-9
-    if slope_l > 0 and slope_u > 0 and slope_l > slope_u:
-        pattern, bias = "Rising Wedge", "SELL"
-    elif slope_l < 0 and slope_u < 0 and slope_u < slope_l:
-        pattern, bias = "Falling Wedge", "BUY"
-    elif slope_l > 0 and slope_u < 0:
-        pattern, bias = "Symmetrical Triangle", "NEUTRAL"
-    elif flat(slope_l) and slope_u < 0:
-        pattern, bias = "Descending Triangle", "SELL"
-    elif slope_l > 0 and flat(slope_u):
-        pattern, bias = "Ascending Triangle", "BUY"
-    else:
-        pattern, bias = "Converging Channel", "NEUTRAL"
+    if not best_rail or best_dist <= 0:
+        return None
 
-    apex_x = None
-    if abs(slope_l - slope_u) > 1e-9:
-        apex_x = (n - 1) + (upper["y_end"] - lower["y_end"]) / (slope_l - slope_u)
-
-    return {
-        "pattern": pattern, "bias": bias,
-        "lower": lower, "upper": upper,
-        "gap_start": round(gap_start, 5), "gap_end": round(gap_end, 5),
-        "apex_index": apex_x,
-    }
-
-
-def _detect_horizontal_levels(df: pd.DataFrame, pivots: List[Dict], n: int,
-                               max_levels: int = 4, tol_atr: float = 0.45) -> List[Dict]:
-    """
-    Cluster ALL swing pivots across the full chart history by price
-    proximity, not just the last few swings. A level a trader marks by eye
-    usually earned that mark by getting tested repeatedly over the *life*
-    of the chart -- a flip zone from weeks ago that's still respected is
-    exactly the kind of line the old "last 6 pivots, top 2 highs/lows"
-    logic would silently drop once it aged out of that recent window.
-    """
-    if not pivots or df is None or len(df) < 10:
-        return []
-    atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
-    avg_atr = float(np.nanmean(atr[-50:])) if len(atr) else 0.0
-    tol = max(avg_atr * tol_atr, 1e-9)
-
-    clusters: List[Dict] = []
-    for p in pivots:
-        price = float(p["price"])
-        placed = False
-        for c in clusters:
-            if abs(price - c["price"]) <= tol:
-                c["touches"].append(p)
-                c["price"] = float(np.mean([t["price"] for t in c["touches"]]))
-                placed = True
-                break
-        if not placed:
-            clusters.append({"price": price, "touches": [p]})
-
-    close = float(df["Close"].iloc[-1])
-    levels = []
-    for c in clusters:
-        n_touch = len(c["touches"])
-        if n_touch < 2:
-            continue
-        first_idx = min(t["index"] for t in c["touches"])
-        last_idx = max(t["index"] for t in c["touches"])
-        span = last_idx - first_idx
-        recency = last_idx / max(n, 1)
-        # Durability (span) and touch count matter more than raw recency --
-        # this is what lets an older, well-tested zone outscore a level
-        # that just happened to form in the last handful of candles.
-        score = n_touch * 10 + span * 0.08 + recency * 5
-        quality = "unconfirmed" if n_touch < 3 else ("confirmed" if n_touch <= 4 else "crowded")
-        levels.append({
-            "price": c["price"], "touches": n_touch, "span": span,
-            "first_index": first_idx, "last_index": last_idx,
-            "side": "resistance" if c["price"] >= close else "support",
-            "quality": quality, "score": round(score, 2),
-        })
-    levels.sort(key=lambda l: l["score"], reverse=True)
-    return levels[:max_levels]
-
-
-def _build_parallel_family(primary: Dict, pivots: List[Dict], n: int, max_members: int = 4) -> List[Dict]:
-    """
-    True parallel family: same slope as primary, each member anchored
-    through a swing on the opposite side (or further on same side).
-    This is what your MT5 screenshots show — one slope, multiple rails.
-    """
+    # Parallel line = same slope, anchored on the opposite pivot
     slope = primary["slope"]
-    kind = primary["kind"]
-    members = [primary]
+    y0 = best_rail["price"]
+    x0 = best_rail["index"]
+    y_end = y0 + slope * (n - 1 - x0)
 
-    # Candidate anchors: swings that are not the primary anchors
-    anchors = []
-    for p in pivots:
-        if p["index"] == primary["x0"] or p["index"] == primary["x1"]:
-            continue
-        anchors.append(p)
-
-    # Offset of each anchor relative to primary line at that x
-    seen_offsets = [0.0]  # primary offset = 0
-    for p in anchors:
-        y_on_primary = _line_value(primary["x0"], primary["y0"], primary["x1"], primary["y1"], p["index"])
-        offset = p["price"] - y_on_primary
-        # Skip near-duplicates
-        # Require meaningful spacing vs primary (avoid cluttered near-duplicates)
-        if any(abs(offset - o) / max(abs(y_on_primary) * 0.002, abs(o), 1e-9) < 0.35 for o in seen_offsets):
-            continue
-        if abs(offset) < abs(y_on_primary) * 0.0015:  # too tight to primary
-            continue
-        seen_offsets.append(offset)
-        y0 = primary["y0"] + offset
-        y1 = primary["y1"] + offset
-        y_end = primary["y_end"] + offset
-        members.append({
-            "x0": primary["x0"], "y0": y0,
-            "x1": primary["x1"], "y1": y1,
-            "y_end": y_end,
-            "slope": slope,
-            "offset": offset,
-            "kind": "parallel",
-            "touches": 0,
-        })
-        if len(members) >= max_members:
-            break
-
-    # Sort by price level at chart end (lowest to highest)
-    members.sort(key=lambda m: m["y_end"])
-    return members
-
-
-
-def _detect_mw_pattern(pivots, df):
-    """
-    Detect simple M (double top) or W (double bottom) and neckline.
-    M: two swing highs near same price, neckline = swing low between them.
-    W: two swing lows near same price, neckline = swing high between them.
-    """
-    if not pivots or len(pivots) < 3 or df is None or len(df) < 20:
-        return None
-    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
-    tol = max(atr * 0.35, 1e-9)
-    highs = [p for p in pivots if p["type"] == "high"]
-    lows = [p for p in pivots if p["type"] == "low"]
-
-    # Double top (M) — last two significant highs
-    if len(highs) >= 2:
-        for i in range(len(highs) - 1, 0, -1):
-            h2, h1 = highs[i], highs[i - 1]
-            if abs(h2["price"] - h1["price"]) <= tol and h2["index"] > h1["index"]:
-                between = [p for p in lows if h1["index"] < p["index"] < h2["index"]]
-                if between:
-                    neck = min(between, key=lambda p: p["price"])
-                    return {
-                        "pattern": "M",
-                        "name": "Double Top (M)",
-                        "left": h1, "right": h2,
-                        "neckline": neck["price"],
-                        "neck_index": neck["index"],
-                        "bias": "SELL",
-                        "note": f"M pattern — neckline at {neck['price']:.5f}",
-                    }
-
-    # Double bottom (W)
-    if len(lows) >= 2:
-        for i in range(len(lows) - 1, 0, -1):
-            l2, l1 = lows[i], lows[i - 1]
-            if abs(l2["price"] - l1["price"]) <= tol and l2["index"] > l1["index"]:
-                between = [p for p in highs if l1["index"] < p["index"] < l2["index"]]
-                if between:
-                    neck = max(between, key=lambda p: p["price"])
-                    return {
-                        "pattern": "W",
-                        "name": "Double Bottom (W)",
-                        "left": l1, "right": l2,
-                        "neckline": neck["price"],
-                        "neck_index": neck["index"],
-                        "bias": "BUY",
-                        "note": f"W pattern — neckline at {neck['price']:.5f}",
-                    }
-    return None
-
-def _grade_breakout(df: pd.DataFrame, line: Dict, kind: str, n: int) -> Dict[str, Any]:
-    """
-    Grade how much to trust a close beyond the family rail, instead of
-    treating every cross as an equal, instant signal (the #1 cause of
-    trendline whipsaws per standard breakout-trading practice):
-
-      - penetration_atr : how far beyond the line the close is, in ATR --
-        a close that's barely beyond (wick-through territory) is graded
-        weak even though it technically "broke" the line.
-      - consecutive      : how many bars in a row have closed beyond it --
-        1 bar is a first break, 2+ is starting to look real.
-      - body_ratio       : candle body vs full range on the break bar --
-        a small body with long wicks against the break direction is a
-        classic fakeout signature.
-      - retest_level     : the rail's current price -- where a limit order
-        would sit if waiting for the break-and-retest entry instead of
-        chasing the break at market.
-    """
-    close = df["Close"].values
-    open_ = df["Open"].values
-    high = df["High"].values
-    low = df["Low"].values
-    atr_col = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
-    last = n - 1
-    line_val = _line_value(line["x0"], line["y0"], line["x1"], line["y1"], last)
-    atr = float(atr_col[last]) if atr_col[last] and atr_col[last] > 0 else abs(high[last] - low[last]) or 1e-9
-
-    beyond = (close[last] > line_val) if kind == "resistance_break_up" or kind == "support_break_up" else (close[last] < line_val)
-    penetration_atr = abs(close[last] - line_val) / atr
-
-    rng = max(high[last] - low[last], 1e-9)
-    body_ratio = abs(close[last] - open_[last]) / rng
-
-    consecutive = 0
-    for i in range(last, max(last - 5, -1), -1):
-        lv_i = _line_value(line["x0"], line["y0"], line["x1"], line["y1"], i)
-        beyond_i = (close[i] > lv_i) if kind.endswith("break_up") else (close[i] < lv_i)
-        if beyond_i:
-            consecutive += 1
-        else:
-            break
-
-    if penetration_atr >= 0.35 and body_ratio >= 0.45 and consecutive >= 2:
-        strength = "confirmed"
-    elif penetration_atr >= 0.15 and consecutive >= 1:
-        strength = "developing"
-    else:
-        strength = "weak"
-
-    return {
-        "strength": strength,
-        "penetration_atr": round(penetration_atr, 2),
-        "consecutive_closes": consecutive,
-        "body_ratio": round(body_ratio, 2),
-        "retest_level": line_val,
+    upper = primary if primary["kind"] == "resistance" else {
+        "x0": x0, "y0": y0, "x1": n - 1, "y1": y_end, "y_end": y_end, "slope": slope, "kind": "resistance"
     }
+    lower = primary if primary["kind"] == "support" else {
+        "x0": x0, "y0": y0, "x1": n - 1, "y1": y_end, "y_end": y_end, "slope": slope, "kind": "support"
+    }
+    if primary["kind"] == "support":
+        lower = primary
+    else:
+        upper = primary
+
+    width = abs(upper["y_end"] - lower["y_end"])
+    return {"upper": upper, "lower": lower, "width": width}
+
+
+def _last_candle_pattern(df: pd.DataFrame) -> Dict[str, Any]:
+    """Detect classic candlestick confirmations used in the educational image."""
+    if df is None or len(df) < 3:
+        return {"bullish": False, "bearish": False, "name": None}
+
+    c0 = df.iloc[-1]
+    c1 = df.iloc[-2]
+    o, h, l, c = float(c0["Open"]), float(c0["High"]), float(c0["Low"]), float(c0["Close"])
+    body = abs(c - o)
+    full = h - l if h > l else 1e-9
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+
+    # Bullish patterns
+    if c > o and body > 0.6 * full and c > float(c1["High"]):          # Bullish Engulfing-ish
+        return {"bullish": True, "bearish": False, "name": "Bullish Engulfing"}
+    if lower_wick > 2 * body and upper_wick < body * 0.5 and c >= o:   # Hammer / Bullish Pin
+        return {"bullish": True, "bearish": False, "name": "Hammer / Bullish Pin Bar"}
+    if c > o and body > 0.55 * full:
+        return {"bullish": True, "bearish": False, "name": "Bullish Candle"}
+
+    # Bearish patterns
+    if c < o and body > 0.6 * full and c < float(c1["Low"]):
+        return {"bearish": True, "bullish": False, "name": "Bearish Engulfing"}
+    if upper_wick > 2 * body and lower_wick < body * 0.5 and c <= o:
+        return {"bearish": True, "bullish": False, "name": "Shooting Star / Bearish Pin Bar"}
+    if c < o and body > 0.55 * full:
+        return {"bearish": True, "bullish": False, "name": "Bearish Candle"}
+
+    return {"bullish": False, "bearish": False, "name": None}
+
+
+def _rsi(series: pd.Series, period: int = 14) -> float:
+    if len(series) < period + 1:
+        return 50.0
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / loss.replace(0, 1e-9)
+    rsi = 100 - (100 / (1 + rs))
+    val = float(rsi.iloc[-1])
+    return val if not np.isnan(val) else 50.0
 
 
 def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: int = 90) -> Dict[str, Any]:
     """
-    Build one clean parallel family (ascending OR descending), not both mixed.
-    Market reveals direction: price relative to the family rails.
-
-    lookback_bars: diagonal trendlines (and the wedge detector) only
-    consider pivots from the most recent `lookback_bars` candles. Without
-    this, a long flat chop zone from days ago can out-score the swing that
-    actually shapes the current move -- a flat zone sits near dozens of
-    candles' lows just by being flat and old, racking up touch count, while
-    a real recent diagonal (the thing a trader actually draws) only grazes
-    a handful of candles because it's moving fast. Scoring by raw touch
-    count alone then picks the stale flat line and the rails end up
-    running almost horizontal across the whole chart -- indistinguishable
-    from a moving average -- instead of hugging the live structure.
-    Horizontal S/R intentionally stays full-history (older well-tested
-    flip zones ARE still relevant); only the diagonal fit is windowed.
+    Classic Trendline engine matching the educational image rules.
+    Produces one primary trendline (support or resistance) + optional channel.
     """
     if df is None or len(df) < 30:
         return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}
 
     n = len(df)
-    # LOCKED: only non-ranging swings (zigzag_swings now filters ranging legs)
-    # Prefer cleaner, larger pivots so lines follow real directional structure
-    pivots = zigzag_swings(df, depth=4, deviation_atr=0.30)
+    pivots = zigzag_swings(df, depth=4, deviation_atr=0.28)
     if len(pivots) < 4:
-        pivots = zigzag_swings(df, depth=3, deviation_atr=0.25)
+        pivots = zigzag_swings(df, depth=3, deviation_atr=0.22)
     if len(pivots) < 3:
         pivots = zigzag_swings(df, depth=3, deviation_atr=0.18)
 
-    # Recent-only candidate pool for the DIAGONAL fit (see docstring).
     cutoff = max(0, n - lookback_bars)
-    recent_pivots = [p for p in pivots if p["index"] >= cutoff]
-    if len(recent_pivots) < 3:
-        # Not enough recent structure -- widen gradually rather than
-        # snapping straight back to the full, stale-prone history.
-        recent_pivots = [p for p in pivots if p["index"] >= max(0, n - lookback_bars * 2)]
-    if len(recent_pivots) < 2:
-        recent_pivots = pivots
+    recent = [p for p in pivots if p["index"] >= cutoff]
+    if len(recent) < 3:
+        recent = [p for p in pivots if p["index"] >= max(0, n - lookback_bars * 2)]
+    if len(recent) < 2:
+        recent = pivots
 
-    support = _fit_primary(recent_pivots, "support", n, df)
-    resistance = _fit_primary(recent_pivots, "resistance", n, df)
+    support = _fit_trendline(recent, "support", n, df)
+    resistance = _fit_trendline(recent, "resistance", n, df)
 
-    # Reject a candidate diagonal line whose actual price movement across
-    # its own span is too shallow to be a meaningful trend -- e.g. two
-    # swing lows that are technically "rising" by a few points over three
-    # days. That's a range, not an uptrend, and drawing it as a diagonal
-    # "ascending" rail is misleading -- it should be left for the
-    # horizontal S/R clustering below (_detect_horizontal_levels) to pick
-    # up instead, which is exactly what that layer is for.
-    MIN_TREND_MOVE_ATR = 1.8  # total rise/fall across the line's full span, in ATRs
-    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
-
-    def _has_meaningful_slope(line):
-        if not line:
-            return False
-        if not atr_now or atr_now <= 0:
-            return True  # can't measure -- don't reject on a technicality
-        total_move = abs(line["y1"] - line["y0"])
-        return total_move >= MIN_TREND_MOVE_ATR * atr_now
-
-    if support and not _has_meaningful_slope(support):
-        support = None
-        shallow_rejected = True
-    else:
-        shallow_rejected = False
-    if resistance and not _has_meaningful_slope(resistance):
-        resistance = None
-        shallow_rejected = True
-
-    # LOCKED RULE:
-    #   Uptrend  → map pivot LOWS  (ascending support)
-    #   Downtrend → map pivot HIGHS (descending resistance)
-    # Prefer the directional family that matches structure; do not mix.
-    close = float(df["Close"].iloc[-1])
+    # Decide primary direction from which line is more valid / recent
     primary = None
-    family_kind = "none"
-
-    # Detect simple structure bias from recent non-ranging pivots
-    recent = pivots[-6:] if len(pivots) >= 4 else pivots
-    highs = [p for p in recent if p["type"] == "high"]
-    lows = [p for p in recent if p["type"] == "low"]
-    struct_bias = "NEUTRAL"
-    if len(highs) >= 2 and len(lows) >= 2:
-        hh = highs[-1]["price"] > highs[-2]["price"]
-        hl = lows[-1]["price"] > lows[-2]["price"]
-        lh = highs[-1]["price"] < highs[-2]["price"]
-        ll = lows[-1]["price"] < lows[-2]["price"]
-        if hh and hl:
-            struct_bias = "BULLISH"
-        elif lh and ll:
-            struct_bias = "BEARISH"
-
-    if struct_bias == "BULLISH" and support:
-        # Uptrend: only map pivot lows
-        primary, family_kind = support, "ascending"
-    elif struct_bias == "BEARISH" and resistance:
-        # Downtrend: only map pivot highs
-        primary, family_kind = resistance, "descending"
-    elif support and resistance:
-        s_end = support["y_end"]
-        r_end = resistance["y_end"]
-        if support["touches"] >= resistance["touches"] and close >= s_end * 0.998:
+    family_kind = None
+    if support and resistance:
+        if support["touches"] >= resistance["touches"] and support["confirmed"]:
             primary, family_kind = support, "ascending"
-        elif resistance["touches"] > support["touches"] and close <= r_end * 1.002:
+        elif resistance["touches"] > support["touches"] and resistance["confirmed"]:
             primary, family_kind = resistance, "descending"
-        elif close > (s_end + r_end) / 2:
-            primary, family_kind = support, "ascending"
         else:
-            primary, family_kind = resistance, "descending"
+            # Prefer the one whose y_end is closer to current price (more relevant)
+            close = float(df["Close"].iloc[-1])
+            if abs(support["y_end"] - close) <= abs(resistance["y_end"] - close):
+                primary, family_kind = support, "ascending"
+            else:
+                primary, family_kind = resistance, "descending"
     elif support:
         primary, family_kind = support, "ascending"
     elif resistance:
         primary, family_kind = resistance, "descending"
 
-    family_lines = []
-    channel = None
-    if primary:
-        family_lines = _build_parallel_family(primary, recent_pivots, n, max_members=min(2, max_lines))
-        if len(family_lines) >= 2:
-            channel = {
-                "lower": family_lines[0],
-                "upper": family_lines[-1],
-                "mid_end": (family_lines[0]["y_end"] + family_lines[-1]["y_end"]) / 2.0,
-                "width": abs(family_lines[-1]["y_end"] - family_lines[0]["y_end"]),
-                "members": family_lines,
-            }
+    channel = _detect_channel(primary, recent, n) if primary else None
 
-    # Direction from family geometry (price reveals it)
+    # Direction from structure
     direction = "NEUTRAL"
     strength = 40
     reasons = []
-    if shallow_rejected and not primary:
-        reasons.append(
-            "No diagonal trendline met the minimum slope -- price is "
-            "ranging rather than trending here; see horizontal S/R levels instead"
-        )
-    breakout_grade = None
 
-    if primary and family_lines:
-        lower = family_lines[0]["y_end"]
-        upper = family_lines[-1]["y_end"]
-        mid = (lower + upper) / 2.0
-        touch_note = {
-            "unconfirmed": "⚠️ only 2 touches -- unconfirmed, treat as tentative",
-            "confirmed": f"{primary['touches']} touches -- validated structure",
-            "crowded": f"{primary['touches']} touches -- crowded level, order flow may be depleted",
-        }.get(primary.get("quality"), f"{primary['touches']} touches")
+    if family_kind == "ascending":
+        direction = "BUY"
+        strength = 55 + min(30, (primary["touches"] - 2) * 8)
+        reasons.append(f"Uptrend line (support) with {primary['touches']} touches — price respects as support")
+    elif family_kind == "descending":
+        direction = "SELL"
+        strength = 55 + min(30, (primary["touches"] - 2) * 8)
+        reasons.append(f"Downtrend line (resistance) with {primary['touches']} touches — price respects as resistance")
 
-        if family_kind == "ascending":
-            if close >= lower:
-                direction = "BUY"
-                strength = 55 + min(25, primary["touches"] * 7)
-                reasons.append(f"Ascending family · {touch_note}")
-                if primary.get("quality") == "unconfirmed":
-                    strength -= 12
-                elif primary.get("quality") == "crowded":
-                    strength -= 6
-                if close > mid:
-                    reasons.append("Price in upper half of channel — bullish control")
-                    strength += 10
-                else:
-                    reasons.append("Price near support rail — watch bounce / break")
-            else:
-                brk = _grade_breakout(df, primary, "support_break_down", n)
-                direction = "SELL"
-                if brk["strength"] == "confirmed":
-                    strength = 68
-                    reasons.append(f"Confirmed break below ascending support — "
-                                    f"{brk['penetration_atr']} ATR beyond, {brk['consecutive_closes']} closes, "
-                                    f"body {brk['body_ratio']}")
-                elif brk["strength"] == "developing":
-                    strength = 52
-                    reasons.append(f"Developing break below support ({brk['consecutive_closes']} close(s), "
-                                    f"{brk['penetration_atr']} ATR) — not yet confirmed, watch for retest "
-                                    f"at {brk['retest_level']:.5f}")
-                else:
-                    strength = 38
-                    reasons.append(f"Weak/wick break below support ({brk['penetration_atr']} ATR, "
-                                    f"body {brk['body_ratio']}) — likely noise, high fakeout risk")
-                reasons.append(touch_note)
-                breakout_grade = brk
-        else:  # descending
-            if close <= upper:
-                direction = "SELL"
-                strength = 55 + min(25, primary["touches"] * 7)
-                reasons.append(f"Descending family · {touch_note}")
-                if primary.get("quality") == "unconfirmed":
-                    strength -= 12
-                elif primary.get("quality") == "crowded":
-                    strength -= 6
-                if close < mid:
-                    reasons.append("Price in lower half of channel — bearish control")
-                    strength += 10
-                else:
-                    reasons.append("Price near resistance rail — watch reject / break")
-            else:
-                brk = _grade_breakout(df, primary, "resistance_break_up", n)
-                direction = "BUY"
-                if brk["strength"] == "confirmed":
-                    strength = 68
-                    reasons.append(f"Confirmed break above descending resistance — "
-                                    f"{brk['penetration_atr']} ATR beyond, {brk['consecutive_closes']} closes, "
-                                    f"body {brk['body_ratio']}")
-                elif brk["strength"] == "developing":
-                    strength = 52
-                    reasons.append(f"Developing break above resistance ({brk['consecutive_closes']} close(s), "
-                                    f"{brk['penetration_atr']} ATR) — not yet confirmed, watch for retest "
-                                    f"at {brk['retest_level']:.5f}")
-                else:
-                    strength = 38
-                    reasons.append(f"Weak/wick break above resistance ({brk['penetration_atr']} ATR, "
-                                    f"body {brk['body_ratio']}) — likely noise, high fakeout risk")
-                reasons.append(touch_note)
-                breakout_grade = brk
+    if primary:
+        reasons.append(f"Quality: {primary['quality']} · Slope: {primary['slope']:.6f}")
 
-    # Converging wedge/triangle (independent-slope rails) and full-history
-    # horizontal S/R -- computed off the FULL pivot list, before it gets
-    # truncated to the last 16 below, so an older well-tested level or a
-    # wedge anchored further back doesn't silently drop out.
-    wedge = _detect_converging_wedge(recent_pivots, df, n)
-    horizontal_levels = _detect_horizontal_levels(df, pivots, n)
-    if wedge and direction == "NEUTRAL" and wedge["bias"] != "NEUTRAL":
-        direction = wedge["bias"]
-        strength = max(strength, 58)
-        reasons.append(f"{wedge['pattern']} — rails converging toward apex")
-
-    projections = _measured_move_projections(df, pivots, direction)
-    vp = compute_volume_profile(df.iloc[:-1])
-    mw = _detect_mw_pattern(pivots, df)
-    if mw:
-        reasons.append(mw["note"])
-        if direction == "NEUTRAL":
-            direction = mw["bias"]
-            strength = max(strength, 65)
-        elif direction == mw["bias"]:
-            strength = min(100, strength + 12)
-    else:
-        mw = None
-
-    # Series for chart (only the parallel family — clean)
+    # Series for chart rendering (compatible with existing chart_engine)
     upper_line = np.full(n, np.nan)
     lower_line = np.full(n, np.nan)
     mid_line = np.full(n, np.nan)
+
     if channel:
         u, lo = channel["upper"], channel["lower"]
         for i in range(n):
             upper_line[i] = _line_value(u["x0"], u["y0"], u["x1"], u["y1"], i)
             lower_line[i] = _line_value(lo["x0"], lo["y0"], lo["x1"], lo["y1"], i)
             mid_line[i] = (upper_line[i] + lower_line[i]) / 2.0
+    elif primary:
+        for i in range(n):
+            val = _line_value(primary["x0"], primary["y0"], primary["x1"], primary["y1"], i)
+            if primary["kind"] == "support":
+                lower_line[i] = val
+            else:
+                upper_line[i] = val
+
+    # Break / Retest detection (core of the educational image)
+    close = float(df["Close"].iloc[-1])
+    breakout_grade = None
+    if primary:
+        line_val = primary["y_end"]
+        atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
+        if primary["kind"] == "support" and close < line_val - atr * 0.15:
+            breakout_grade = {
+                "side": "support_break_down",
+                "strength": "confirmed" if close < line_val - atr * 0.4 else "developing",
+                "penetration_atr": round((line_val - close) / max(atr, 1e-9), 2),
+            }
+            reasons.append("Price closed below support trendline — potential bearish break")
+        elif primary["kind"] == "resistance" and close > line_val + atr * 0.15:
+            breakout_grade = {
+                "side": "resistance_break_up",
+                "strength": "confirmed" if close > line_val + atr * 0.4 else "developing",
+                "penetration_atr": round((close - line_val) / max(atr, 1e-9), 2),
+            }
+            reasons.append("Price closed above resistance trendline — potential bullish break")
+
+    # Candlestick + RSI confirmation
+    candle = _last_candle_pattern(df)
+    rsi_val = _rsi(df["Close"])
+    reasons.append(f"RSI(14): {rsi_val:.1f}")
+    if candle["name"]:
+        reasons.append(f"Candle: {candle['name']}")
 
     return {
         "direction": direction,
         "strength": max(0, min(100, int(strength))),
         "reasons": reasons,
         "family_kind": family_kind,
-        "family_lines": family_lines,  # the clean parallel set
+        "family_lines": [primary] if primary else [],
         "uptrends": [primary] if family_kind == "ascending" and primary else [],
         "downtrends": [primary] if family_kind == "descending" and primary else [],
         "channel": channel,
-        "wedge": wedge,
-        "horizontal_levels": horizontal_levels,
-        "projections": projections,
-        "mw_pattern": mw,
+        "wedge": None,
+        "horizontal_levels": [],
+        "projections": [],
+        "mw_pattern": None,
         "pivots": pivots[-16:],
-        "volume_profile": vp,
+        "volume_profile": {},
         "upper_line": upper_line,
         "lower_line": lower_line,
         "middle_line": mid_line,
@@ -694,298 +356,227 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         "breakout_grade": breakout_grade,
         "primary_quality": primary.get("quality") if primary else None,
         "primary_touches": primary.get("touches") if primary else 0,
+        "candle": candle,
+        "rsi": rsi_val,
+        "primary": primary,
     }
-
-
-def _measured_move_projections(df, pivots, direction) -> List[Dict[str, Any]]:
-    if not pivots or len(pivots) < 2:
-        return []
-    last, prev = pivots[-1], pivots[-2]
-    d = abs(last["price"] - prev["price"])
-    if d <= 0:
-        return []
-    close = float(df["Close"].iloc[-1])
-    projs = []
-    mults = [(1.0, "P1 1.0x"), (1.618, "P2 1.618x"), (2.618, "P3 2.618x")]
-    if direction == "BUY":
-        base = last["price"] if last["type"] == "low" else close
-        for m, label in mults:
-            projs.append({"price": base + d * m, "label": label, "mult": m, "side": "BUY"})
-    elif direction == "SELL":
-        base = last["price"] if last["type"] == "high" else close
-        for m, label in mults:
-            projs.append({"price": base - d * m, "label": label, "mult": m, "side": "SELL"})
-    return projs
-
-
-def _liquidity_targets(pivots, direction: str, entry: float) -> List[float]:
-    """
-    External liquidity pools price is drawn to:
-      BUY  → swing highs above entry (BSL)
-      SELL → swing lows below entry (SSL)
-    Sorted nearest → farthest.
-    """
-    if not pivots:
-        return []
-    targets = []
-    for p in pivots:
-        px = float(p["price"])
-        if direction == "BUY" and p.get("type") == "high" and px > entry:
-            targets.append(px)
-        elif direction == "SELL" and p.get("type") == "low" and px < entry:
-            targets.append(px)
-    if direction == "BUY":
-        targets.sort()  # nearest high first
-    else:
-        targets.sort(reverse=True)  # nearest low first
-    # unique with small tolerance
-    cleaned = []
-    for t in targets:
-        if not cleaned or abs(t - cleaned[-1]) / max(abs(t), 1e-9) > 0.0003:
-            cleaned.append(t)
-    return cleaned
 
 
 def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -> Optional[Dict[str, Any]]:
     """
-    Position box with DYNAMIC R:R from real liquidity distance.
+    TradingView-style Long / Short position template
+    (exactly as shown in the educational image).
 
-    Entry  : nearest structure rail / close
-    SL     : beyond invalidation (last opposing swing or rail break)
-    TP1/TP2: nearest / next liquidity pools (swing highs or lows)
-    R:R    : |TP1 - Entry| / |Entry - SL|  (not a fixed multiple)
+    Entry  : on trendline (retest) or after confirmed break + retest
+    SL     : beyond recent swing low/high or beyond the trendline
+    TP1    : previous structure / nearest liquidity
+    TP2    : next structure
+    TP3    : measured RR 1:3
     """
     if not family or family.get("error"):
         return None
     df = family.get("df")
     if df is None or df.empty:
         return None
+
     close = float(df["Close"].iloc[-1])
     atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
     direction = family.get("direction", "NEUTRAL")
     if direction not in ("BUY", "SELL"):
         return None
 
+    primary = family.get("primary")
     pivots = family.get("pivots") or []
-    lines = family.get("family_lines") or []
     channel = family.get("channel")
-    mw = family.get("mw_pattern")
-    projs = family.get("projections") or []
-    vp = family.get("volume_profile") or {}
+    candle = family.get("candle") or {}
+    rsi_val = family.get("rsi", 50.0)
     brk = family.get("breakout_grade")
 
+    # ---------- BUY (Long) template ----------
     if direction == "BUY":
-        # Entry: support rail or close
+        # Entry preference: retest of support trendline / lower channel rail
         entry = close
-        if lines:
-            below = [m["y_end"] for m in lines if m["y_end"] <= close]
-            if below:
-                entry = max(below)
-        elif channel and channel.get("lower"):
+        if channel and channel.get("lower"):
             entry = float(channel["lower"].get("y_end", close))
+        elif primary and primary.get("kind") == "support":
+            entry = float(primary.get("y_end", close))
 
-        # SL: below last swing low under entry (structural invalidation)
+        # If we have a confirmed bullish break of resistance, entry above the line
+        if brk and brk.get("side") == "resistance_break_up" and brk.get("strength") == "confirmed":
+            entry = max(entry, close)
+
+        # SL below recent swing low / trendline (classic rule)
         swing_lows = [float(p["price"]) for p in pivots if p.get("type") == "low" and p["price"] < entry]
         if swing_lows:
-            sl = min(swing_lows[-2:], default=min(swing_lows))  # recent low
-            sl = min(swing_lows) if len(swing_lows) == 1 else sorted(swing_lows)[-1]
-            # use nearest swing low below entry
-            below_entry = [x for x in swing_lows if x < entry]
-            sl = max(below_entry) if below_entry else entry - atr * atr_mult_sl
-            sl = sl - atr * 0.15  # buffer beyond liquidity
+            sl = min(swing_lows[-3:]) if len(swing_lows) >= 3 else min(swing_lows)
         else:
             sl = entry - atr * atr_mult_sl
-
-        # Targets = buy-side liquidity (swing highs above) + neckline if W + POC if above
-        liq = _liquidity_targets(pivots, "BUY", entry)
-        if mw and mw.get("pattern") == "W" and mw.get("neckline", 0) > entry:
-            liq = sorted(set(liq + [float(mw["neckline"])]))
-        if vp.get("poc_price") and vp["poc_price"] > entry:
-            liq = sorted(set(liq + [float(vp["poc_price"])]))
-        # fallback measured move only if no swing liquidity
-        if not liq and projs:
-            liq = [float(p["price"]) for p in projs if p["price"] > entry]
-
-        tp1 = liq[0] if liq else entry + atr * 1.5
-        tp2 = liq[1] if len(liq) > 1 else (liq[0] if liq else entry + atr * 2.5)
-
-        order_type = "LIMIT" if entry < close - atr * 0.08 else "MARKET"
-        entry_note = None
-        # A breakout that isn't confirmed yet (weak/developing) shouldn't be
-        # chased at market -- route the entry to the break-and-retest zone
-        # instead, per standard breakout-trading practice.
-        if brk and brk["strength"] != "confirmed":
-            entry = brk["retest_level"]
-            order_type = "LIMIT"
-            entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
-                          f"broken rail at {entry:.5f} instead of chasing at market")
-            sl = min(sl, entry - atr * 0.5)
+        # Also respect the trendline itself
+        if primary and primary.get("kind") == "support":
+            sl = min(sl, float(primary["y_end"]) - atr * 0.25)
 
         risk = abs(entry - sl)
-        reward = abs(tp1 - entry)
-        rr = (reward / risk) if risk > 0 else 0.0
+        if risk <= 0:
+            return None
+
+        # TPs from structure (previous highs) + RR multiples
+        swing_highs = sorted([float(p["price"]) for p in pivots if p.get("type") == "high" and p["price"] > entry])
+        tp1 = swing_highs[0] if swing_highs else entry + risk * 1.5
+        tp2 = swing_highs[1] if len(swing_highs) > 1 else entry + risk * 2.5
+        tp3 = entry + risk * 3.0  # RR 1:3 as shown in the image
+
+        # Confirmation filter
+        conf_ok = False
+        conf_notes = []
+        if candle.get("bullish"):
+            conf_ok = True
+            conf_notes.append(candle.get("name", "Bullish candle"))
+        if rsi_val > 50:
+            conf_notes.append(f"RSI > 50 ({rsi_val:.1f})")
+            conf_ok = True
+        if brk and brk.get("side") == "resistance_break_up":
+            conf_notes.append("Bullish trendline break")
+            conf_ok = True
+
+        rr = abs(tp1 - entry) / risk if risk > 0 else 0
 
         return {
-            "side": "LONG",
-            "direction": "BUY",
-            "entry": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
+            "side": "BUY",
+            "entry": round(entry, 5),
+            "sl": round(sl, 5),
+            "tp1": round(tp1, 5),
+            "tp2": round(tp2, 5),
+            "tp3": round(tp3, 5),
+            "risk": round(risk, 5),
+            "reward": round(abs(tp1 - entry), 5),
             "rr": round(rr, 2),
-            "risk": risk,
-            "reward": reward,
-            "liquidity_tp1": "swing high / BSL" if liq else "measured move",
-            "order_type": order_type,
-            "entry_note": entry_note,
-            "breakout_grade": brk,
+            "confirmation": conf_ok,
+            "conf_notes": conf_notes,
+            "entry_note": "Buy above / on trendline after bullish confirmation" if conf_ok else "Waiting for bullish confirmation",
         }
 
-    else:  # SELL
+    # ---------- SELL (Short) template ----------
+    else:
         entry = close
-        if lines:
-            above = [m["y_end"] for m in lines if m["y_end"] >= close]
-            if above:
-                entry = min(above)
-        elif channel and channel.get("upper"):
+        if channel and channel.get("upper"):
             entry = float(channel["upper"].get("y_end", close))
+        elif primary and primary.get("kind") == "resistance":
+            entry = float(primary.get("y_end", close))
+
+        if brk and brk.get("side") == "support_break_down" and brk.get("strength") == "confirmed":
+            entry = min(entry, close)
 
         swing_highs = [float(p["price"]) for p in pivots if p.get("type") == "high" and p["price"] > entry]
         if swing_highs:
-            above_entry = [x for x in swing_highs if x > entry]
-            sl = min(above_entry) if above_entry else entry + atr * atr_mult_sl
-            sl = sl + atr * 0.15
+            sl = max(swing_highs[-3:]) if len(swing_highs) >= 3 else max(swing_highs)
         else:
             sl = entry + atr * atr_mult_sl
-
-        # Sell-side liquidity (swing lows below) + M neckline + POC
-        liq = _liquidity_targets(pivots, "SELL", entry)
-        if mw and mw.get("pattern") == "M" and mw.get("neckline", 0) < entry:
-            liq_set = list(liq) + [float(mw["neckline"])]
-            liq = sorted(liq_set, reverse=True)
-        if vp.get("poc_price") and vp["poc_price"] < entry:
-            liq = sorted(set(list(liq) + [float(vp["poc_price"])]), reverse=True)
-        if not liq and projs:
-            liq = [float(p["price"]) for p in projs if p["price"] < entry]
-
-        tp1 = liq[0] if liq else entry - atr * 1.5
-        tp2 = liq[1] if len(liq) > 1 else (liq[0] if liq else entry - atr * 2.5)
-
-        order_type = "LIMIT" if entry > close + atr * 0.08 else "MARKET"
-        entry_note = None
-        if brk and brk["strength"] != "confirmed":
-            entry = brk["retest_level"]
-            order_type = "LIMIT"
-            entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
-                          f"broken rail at {entry:.5f} instead of chasing at market")
-            sl = max(sl, entry + atr * 0.5)
+        if primary and primary.get("kind") == "resistance":
+            sl = max(sl, float(primary["y_end"]) + atr * 0.25)
 
         risk = abs(sl - entry)
-        reward = abs(entry - tp1)
-        rr = (reward / risk) if risk > 0 else 0.0
+        if risk <= 0:
+            return None
+
+        swing_lows = sorted([float(p["price"]) for p in pivots if p.get("type") == "low" and p["price"] < entry], reverse=True)
+        tp1 = swing_lows[0] if swing_lows else entry - risk * 1.5
+        tp2 = swing_lows[1] if len(swing_lows) > 1 else entry - risk * 2.5
+        tp3 = entry - risk * 3.0
+
+        conf_ok = False
+        conf_notes = []
+        if candle.get("bearish"):
+            conf_ok = True
+            conf_notes.append(candle.get("name", "Bearish candle"))
+        if rsi_val < 50:
+            conf_notes.append(f"RSI < 50 ({rsi_val:.1f})")
+            conf_ok = True
+        if brk and brk.get("side") == "support_break_down":
+            conf_notes.append("Bearish trendline break")
+            conf_ok = True
+
+        rr = abs(entry - tp1) / risk if risk > 0 else 0
 
         return {
-            "side": "SHORT",
-            "direction": "SELL",
-            "entry": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
+            "side": "SELL",
+            "entry": round(entry, 5),
+            "sl": round(sl, 5),
+            "tp1": round(tp1, 5),
+            "tp2": round(tp2, 5),
+            "tp3": round(tp3, 5),
+            "risk": round(risk, 5),
+            "reward": round(abs(entry - tp1), 5),
             "rr": round(rr, 2),
-            "risk": risk,
-            "reward": reward,
-            "liquidity_tp1": "swing low / SSL" if liq else "measured move",
-            "order_type": order_type,
-            "entry_note": entry_note,
-            "breakout_grade": brk,
+            "confirmation": conf_ok,
+            "conf_notes": conf_notes,
+            "entry_note": "Sell below / on trendline after bearish confirmation" if conf_ok else "Waiting for bearish confirmation",
         }
 
 
 def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
+    """Human-readable report matching the educational image language."""
     if family.get("error"):
-        return family["error"]
-    quality = family.get("primary_quality")
-    quality_tag = {
-        "unconfirmed": "⚠️ UNCONFIRMED (2 touches)",
-        "confirmed": "✅ CONFIRMED",
-        "crowded": "⚠️ CROWDED (5+ touches)",
-    }.get(quality, "")
+        return f"📐 TRENDLINE | {symbol}\n{family['error']}"
+
     lines = [
-        f"📐 TRENDLINE  |  {symbol}  (4H → 1H → 30M top-down)",
+        f"📐 TRENDLINE STRATEGY  |  {symbol}  (4H → 1H → 30M)",
+        "─" * 42,
     ]
-    topdown = family.get("topdown")
-    if topdown:
-        lines.append(format_topdown_summary(topdown))
-        lines.append("—")
-    lines.append(
-        f"30M Family: {family.get('family_kind', '—').upper()}  |  "
-        f"Direction: {family.get('direction')}  |  Strength: {family.get('strength', 0)}/100"
-    )
-    if quality_tag:
-        lines.append(f"Trendline validation: {quality_tag} · {family.get('primary_touches', 0)} touches")
-    for r in family.get("gating_notes") or []:
-        lines.append(f"  • {r}")
-    for r in family.get("reasons") or []:
-        lines.append(f"  • {r}")
-    n_rails = len(family.get("family_lines") or [])
-    lines.append(f"Parallel rails: {n_rails}")
-    wedge = family.get("wedge")
-    if wedge:
-        lines.append(
-            f"Structure: {wedge['pattern']} · lower rail {wedge['lower']['touches']} touches, "
-            f"upper rail {wedge['upper']['touches']} touches · converging (gap {wedge['gap_end']:.5f})"
-        )
-    hz = family.get("horizontal_levels") or []
-    if hz:
-        lines.append("Horizontal levels: " + " · ".join(
-            f"{l['side'][0].upper()} {l['price']:.5f} ({l['touches']}x)" for l in hz))
-    mw = family.get("mw_pattern")
-    if mw:
-        lines.append(f"Pattern: {mw['name']} · neckline {mw['neckline']:.5f}")
+
+    direction = family.get("direction", "NEUTRAL")
+    strength = family.get("strength", 0)
+    lines.append(f"Direction: {direction}   Strength: {strength}/100")
+
+    quality = family.get("primary_quality")
+    touches = family.get("primary_touches", 0)
+    if quality:
+        lines.append(f"Trendline: {quality.upper()} · {touches} touches (wicks)")
+
     if family.get("channel"):
         w = family["channel"].get("width")
         if w:
             lines.append(f"Channel width: {w:.5f}")
-    projs = family.get("projections") or []
-    if projs:
-        lines.append("Projections: " + " · ".join(f"{p['label']} {p['price']:.5f}" for p in projs))
-    vp = family.get("volume_profile")
-    if vp:
-        lines.append(f"POC {vp['poc_price']:.5f} | VA {vp['value_area_low']:.5f}–{vp['value_area_high']:.5f}")
-    brk = family.get("breakout_grade")
-    if brk:
-        grade_tag = {"confirmed": "✅ CONFIRMED", "developing": "🟡 DEVELOPING",
-                     "weak": "🔴 WEAK / LIKELY FAKEOUT"}.get(brk["strength"], brk["strength"])
-        lines.append(
-            f"Breakout grade: {grade_tag} · {brk['penetration_atr']} ATR beyond · "
-            f"{brk['consecutive_closes']} consecutive close(s) · body {brk['body_ratio']}"
-        )
-        lines.append(f"Retest zone: {brk['retest_level']:.5f}")
-    pos = build_position_container(family)
-    if pos:
-        lines.append(
-            f"Position: {pos['side']}  Entry {pos['entry']:.5f}  SL {pos['sl']:.5f}  "
-            f"TP1 {pos['tp1']:.5f}  TP2 {pos['tp2']:.5f}"
-        )
-        lines.append(
-            f"R:R 1:{pos.get('rr', 0):.2f}  (risk {pos.get('risk', 0):.5f} → reward {pos.get('reward', 0):.5f})"
-        )
-        if pos.get("liquidity_tp1"):
-            lines.append(f"TP1 liquidity: {pos['liquidity_tp1']}")
-        if pos.get("entry_note"):
-            lines.append(f"⚠️ {pos['entry_note']}")
-    return "\n".join(lines)
 
+    for r in (family.get("reasons") or [])[:6]:
+        lines.append(f"• {r}")
+
+    # Top-down gating notes
+    for g in (family.get("gating_notes") or []):
+        lines.append(g)
+
+    # Position template
+    pos = family.get("position") or build_position_container(family)
+    if pos:
+        family["position"] = pos  # cache
+        side = pos["side"]
+        lines.append("─" * 42)
+        lines.append(f"{'🟢 LONG' if side == 'BUY' else '🔴 SHORT'} POSITION (TradingView style)")
+        lines.append(f"Entry : {pos['entry']}")
+        lines.append(f"SL    : {pos['sl']}")
+        lines.append(f"TP1   : {pos['tp1']}   (structure)")
+        lines.append(f"TP2   : {pos['tp2']}")
+        lines.append(f"TP3   : {pos['tp3']}   (RR 1:3)")
+        lines.append(f"R:R   : 1:{pos['rr']:.2f}")
+        if pos.get("conf_notes"):
+            lines.append("Confirmation: " + ", ".join(pos["conf_notes"]))
+        if pos.get("entry_note"):
+            lines.append(f"→ {pos['entry_note']}")
+        lines.append("Risk rule: 1-2% of capital · Move SL to BE after TP1")
+
+    return "\n".join(lines)
 
 # ============================================================
 # OTE STRATEGY -- Fibonacci Fan + Fibonacci Expansion
+# (Aligned with the educational OTE image)
 #
-#   1. Get 4H -> 1H top-down bias (topdown_engine.get_topdown_bias)
+#   1. Get 4H → 1H top-down bias
 #   2. Detect the most recent clear impulse swing on the 30M chart
 #   3. Draw Fibonacci Fan (38.2 / 50 / 61.8) from the impulse origin
-#   4. Entry zone = deeper fan lines (50-61.8%) acting as dynamic OTE
-#   5. Project Fibonacci Expansion targets (127.2 / 161.8 / 200 / 261.8)
-#   6. Gate/score the setup against the 4H/1H top-down bias
+#   4. PRIME entry zone = 50% – 61.8% (deeper Fan levels)
+#   5. Require candlestick confirmation (Engulfing / Pin / Hammer / Shooting Star)
+#   6. Project Fibonacci Expansion targets (127.2 / 161.8 / 200 / 261.8)
+#   7. TradingView-style position template (Entry / SL / TP1 / TP2 / TP3)
+#   8. Gate/score against the 4H/1H top-down bias
 #
 # Always runs and displays on the 30M timeframe.
 # ============================================================
@@ -1124,112 +715,191 @@ def _evaluate_entry(
     topdown: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Decide if price is currently in a valid OTE entry zone on the Fan,
-    gate the score against the 4H/1H top-down bias, and build the ticket.
+    Educational-image OTE entry logic:
+      - Prime zone = 50% – 61.8% Fibonacci Fan
+      - Require price interaction with the zone
+      - Candlestick confirmation (Engulfing / Pin / Hammer / Shooting Star)
+      - RSI filter
+      - TradingView-style position (Entry / SL / TP1 / TP2 / TP3)
+      - Gate against 4H→1H top-down bias
     """
     n = len(df)
     close = float(df["Close"].iloc[-1])
     atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(impulse["leg_size"]) * 0.1
     direction = impulse["direction"]
 
+    # Current fan prices at the right edge of the chart
     fan_prices = sorted(
         [{"ratio": f["ratio"], "label": f["label"], "price": _fan_price_at(f, n - 1)} for f in fans],
         key=lambda x: x["price"],
     )
 
+    # Identify the deeper (prime) OTE zone: 50% and 61.8%
+    prime_fans = [fp for fp in fan_prices if fp["ratio"] >= 0.50]
+    shallow_fans = [fp for fp in fan_prices if fp["ratio"] < 0.50]
+
     in_zone = False
+    in_prime_zone = False
     nearest_fan = None
     min_dist = 1e18
+
     for fp in fan_prices:
         dist = abs(close - fp["price"])
         if dist < min_dist:
             min_dist = dist
             nearest_fan = fp
-        if dist <= atr * 0.45:
+        if dist <= atr * 0.50:
             in_zone = True
+            if fp["ratio"] >= 0.50:
+                in_prime_zone = True
+
+    # Also treat price sitting between the 50 and 61.8 rays as inside the zone
+    if len(prime_fans) >= 2:
+        lo = min(p["price"] for p in prime_fans)
+        hi = max(p["price"] for p in prime_fans)
+        if lo - atr * 0.25 <= close <= hi + atr * 0.25:
+            in_zone = True
+            in_prime_zone = True
 
     reasons = []
-    score = 40
+    score = 35
 
-    if impulse["leg_size"] >= 2.0 * atr:
-        score += 15
-        reasons.append(f"Strong impulse ({impulse['leg_size']/atr:.1f} ATR)")
-    else:
-        reasons.append(f"Moderate impulse ({impulse['leg_size']/atr:.1f} ATR)")
-
-    if in_zone:
-        score += 25
-        reasons.append(f"Price interacting with Fan {nearest_fan['label']}")
-    else:
-        lowest = fan_prices[0]["price"]
-        highest = fan_prices[-1]["price"]
-        if direction == "BUY" and lowest <= close <= highest + atr * 0.3:
-            score += 10
-            reasons.append("Price inside Fan channel")
-        elif direction == "SELL" and highest >= close >= lowest - atr * 0.3:
-            score += 10
-            reasons.append("Price inside Fan channel")
-
-    if nearest_fan and nearest_fan["ratio"] >= 0.50:
+    # --- Impulse quality ---
+    leg_atr = impulse["leg_size"] / max(atr, 1e-9)
+    if leg_atr >= 2.5:
+        score += 18
+        reasons.append(f"Strong impulse ({leg_atr:.1f} ATR) — high quality")
+    elif leg_atr >= 1.5:
         score += 12
-        reasons.append(f"Deep Fan zone ({nearest_fan['label']}) — OTE quality")
+        reasons.append(f"Solid impulse ({leg_atr:.1f} ATR)")
+    else:
+        score += 5
+        reasons.append(f"Moderate impulse ({leg_atr:.1f} ATR)")
+
+    # --- Zone interaction (core of the educational image) ---
+    if in_prime_zone:
+        score += 28
+        reasons.append(f"Price in PRIME OTE zone (50–61.8%) near {nearest_fan['label'] if nearest_fan else '?'}")
+    elif in_zone:
+        score += 15
+        reasons.append(f"Price interacting with Fan {nearest_fan['label'] if nearest_fan else '?'}")
+    else:
+        reasons.append("Price not yet in OTE zone — waiting for pullback")
+
+    # --- Candlestick confirmation (same patterns as the educational image) ---
+    candle = _last_candle_pattern(df)
+    if direction == "BUY" and candle.get("bullish"):
+        score += 12
+        reasons.append(f"Bullish confirmation: {candle.get('name')}")
+    elif direction == "SELL" and candle.get("bearish"):
+        score += 12
+        reasons.append(f"Bearish confirmation: {candle.get('name')}")
+    elif candle.get("name"):
+        reasons.append(f"Candle: {candle.get('name')} (not yet aligned)")
+
+    # --- RSI filter ---
+    rsi_val = _rsi(df["Close"])
+    if direction == "BUY" and rsi_val > 45:
+        score += 6
+        reasons.append(f"RSI supportive ({rsi_val:.1f})")
+    elif direction == "SELL" and rsi_val < 55:
+        score += 6
+        reasons.append(f"RSI supportive ({rsi_val:.1f})")
+    else:
+        reasons.append(f"RSI: {rsi_val:.1f}")
 
     if expansions:
-        score += 8
-        reasons.append(f"{len(expansions)} Expansion targets projected")
+        score += 6
+        reasons.append(f"{len(expansions)} Expansion targets projected (127.2 / 161.8 / 200 / 261.8)")
 
-    # --- gate against the 4H/1H top-down bias ---
+    # --- Gate against 4H → 1H top-down bias ---
     td_dir = (topdown or {}).get("direction", "NEUTRAL")
     td_allowed = bool((topdown or {}).get("allowed"))
     if td_dir in ("BUY", "SELL"):
         if td_dir == direction and td_allowed:
             score += 15
-            reasons.append(f"✅ Aligned with 4H/1H top-down bias ({td_dir}) -- structure permission granted")
+            reasons.append(f"✅ Aligned with 4H/1H top-down bias ({td_dir}) — structure permission granted")
         elif td_dir == direction and not td_allowed:
             reasons.append(f"Aligned with top-down direction ({td_dir}) but 1H structure permission not yet granted")
         else:
-            score -= 25
-            reasons.append(f"⚠️ 30M impulse direction ({direction}) conflicts with 4H/1H top-down bias ({td_dir})")
+            score -= 28
+            reasons.append(f"⚠️ 30M impulse ({direction}) conflicts with 4H/1H bias ({td_dir}) — high risk")
     else:
-        reasons.append("4H/1H top-down read is NEUTRAL -- 30M impulse direction stands on its own")
+        reasons.append("4H/1H top-down is NEUTRAL — 30M impulse stands on its own")
 
-    # Build ticket
+    # ---------- TradingView-style position template ----------
     entry = close
+
     if direction == "BUY":
+        # SL beyond the deepest fan / impulse origin (classic rule)
         sl_candidates = [fp["price"] for fp in fan_prices] + [impulse["start"]["price"]]
-        sl = min(sl_candidates) - atr * 0.35
+        sl = min(sl_candidates) - atr * 0.30
+        # Prefer entry near the prime zone if we are in it
+        if in_prime_zone and nearest_fan:
+            entry = min(close, nearest_fan["price"] + atr * 0.15)
         tps = sorted([e["price"] for e in expansions if e["price"] > entry])
     else:
         sl_candidates = [fp["price"] for fp in fan_prices] + [impulse["start"]["price"]]
-        sl = max(sl_candidates) + atr * 0.35
+        sl = max(sl_candidates) + atr * 0.30
+        if in_prime_zone and nearest_fan:
+            entry = max(close, nearest_fan["price"] - atr * 0.15)
         tps = sorted([e["price"] for e in expansions if e["price"] < entry], reverse=True)
 
     tp1 = tps[0] if tps else (entry + atr * 1.8 if direction == "BUY" else entry - atr * 1.8)
-    tp2 = tps[1] if len(tps) > 1 else (entry + atr * 3.0 if direction == "BUY" else entry - atr * 3.0)
+    tp2 = tps[1] if len(tps) > 1 else (entry + atr * 2.8 if direction == "BUY" else entry - atr * 2.8)
+    tp3 = tps[2] if len(tps) > 2 else (entry + atr * 4.0 if direction == "BUY" else entry - atr * 4.0)
 
     risk = abs(entry - sl)
     reward = abs(tp1 - entry)
     rr = (reward / risk) if risk > 0 else 0.0
 
-    score = max(0, min(100, score))
-    valid = direction in ("BUY", "SELL") and score >= 58 and in_zone and rr >= 1.2 and not (
-        td_dir in ("BUY", "SELL") and td_dir != direction
+    score = max(0, min(100, int(score)))
+
+    # Validity: must be in zone, decent score, positive RR, no hard conflict with higher TF
+    conf_ok = (direction == "BUY" and candle.get("bullish")) or (direction == "SELL" and candle.get("bearish"))
+    valid = (
+        direction in ("BUY", "SELL")
+        and score >= 55
+        and in_zone
+        and rr >= 1.2
+        and not (td_dir in ("BUY", "SELL") and td_dir != direction)
     )
 
     ticket = {
         "side": "LONG" if direction == "BUY" else "SHORT",
         "direction": direction,
-        "entry": float(entry), "sl": float(sl), "tp1": float(tp1), "tp2": float(tp2),
-        "rr": round(rr, 2), "risk": float(risk), "reward": float(reward),
+        "entry": round(float(entry), 5),
+        "sl": round(float(sl), 5),
+        "tp1": round(float(tp1), 5),
+        "tp2": round(float(tp2), 5),
+        "tp3": round(float(tp3), 5),
+        "rr": round(rr, 2),
+        "risk": round(float(risk), 5),
+        "reward": round(float(reward), 5),
         "order_type": "MARKET",
         "nearest_fan": nearest_fan["label"] if nearest_fan else None,
+        "in_prime_zone": in_prime_zone,
+        "confirmation": conf_ok,
+        "candle": candle.get("name"),
+        "entry_note": (
+            f"{'Buy' if direction == 'BUY' else 'Sell'} in OTE zone"
+            + (f" after {candle.get('name')}" if conf_ok else " — waiting for candle confirmation")
+        ),
     }
 
     return {
-        "in_zone": in_zone, "nearest_fan": nearest_fan, "score": score,
-        "reasons": reasons, "valid": valid,
-        "ticket": ticket if valid else None, "fan_prices": fan_prices,
+        "in_zone": in_zone,
+        "in_prime_zone": in_prime_zone,
+        "nearest_fan": nearest_fan,
+        "score": score,
+        "reasons": reasons,
+        "valid": valid,
+        "ticket": ticket,          # always return the template; validity is separate
+        "fan_prices": fan_prices,
+        "candle": candle,
+        "rsi": rsi_val,
     }
+
 
 
 def run_ote_analysis(symbol: str, df: pd.DataFrame = None) -> Dict[str, Any]:
@@ -1287,8 +957,11 @@ def run_ote_analysis(symbol: str, df: pd.DataFrame = None) -> Dict[str, Any]:
         "fan_prices": entry_eval["fan_prices"],
         "nearest_fan": entry_eval["nearest_fan"],
         "in_zone": entry_eval["in_zone"],
+        "in_prime_zone": entry_eval.get("in_prime_zone", False),
         "position": entry_eval["ticket"],
         "ticket": entry_eval["ticket"],
+        "candle": entry_eval.get("candle"),
+        "rsi": entry_eval.get("rsi"),
         "df": df,
         "timeframe": timeframe,
         "symbol": symbol,
@@ -1297,9 +970,10 @@ def run_ote_analysis(symbol: str, df: pd.DataFrame = None) -> Dict[str, Any]:
 
 
 def format_ote_report(analysis: Dict[str, Any]) -> str:
+    """Human-readable report matching the educational OTE image language."""
     symbol = analysis.get("symbol", "")
     if analysis.get("error"):
-        lines = [f"🎯 OTE  (Fib Fan + Expansion)  |  {symbol}  (4H → 1H → 30M top-down)"]
+        lines = [f"🎯 OTE STRATEGY  |  {symbol}  (4H → 1H → 30M)"]
         topdown = analysis.get("topdown")
         if topdown:
             lines.append(format_topdown_summary(topdown))
@@ -1313,49 +987,70 @@ def format_ote_report(analysis: Dict[str, Any]) -> str:
     impulse = analysis.get("impulse") or {}
     fans = analysis.get("fans") or []
     expansions = analysis.get("expansions") or []
-    ticket = analysis.get("ticket")
+    ticket = analysis.get("ticket") or analysis.get("position")
     nearest = analysis.get("nearest_fan")
     topdown = analysis.get("topdown")
+    in_prime = analysis.get("in_prime_zone", False)
 
-    lines = [f"🎯 OTE  (Fib Fan + Expansion)  |  {symbol}  (4H → 1H → 30M top-down)"]
+    lines = [
+        f"🎯 OTE STRATEGY  |  {symbol}  (4H → 1H → 30M)",
+        "─" * 44,
+    ]
     if topdown:
         lines.append(format_topdown_summary(topdown))
         lines.append("—")
-    lines.append(f"30M Direction: {direction}  |  Score: {score}/100  |  {'✅ VALID' if valid else '⏳ WAIT'}")
-    lines.append(
-        f"Impulse: {impulse.get('start', {}).get('type', '?')} → {impulse.get('end', {}).get('type', '?')}  "
-        f"({impulse.get('leg_size', 0):.5f})"
-    )
+
+    status = "✅ VALID SETUP" if valid else "⏳ WAITING / WATCH"
+    lines.append(f"30M Direction: {direction}  |  Score: {score}/100  |  {status}")
+
+    start_t = impulse.get("start", {}).get("type", "?")
+    end_t = impulse.get("end", {}).get("type", "?")
+    leg = impulse.get("leg_size", 0)
+    lines.append(f"Impulse: {start_t} → {end_t}  (leg {leg:.5f})")
 
     if fans:
-        lines.append("Fan rays: " + " · ".join(f["label"] for f in fans))
+        lines.append("Fan rays: " + " · ".join(f["label"] for f in fans) + "  (prime zone = 50–61.8%)")
     if nearest:
-        lines.append(f"Nearest Fan: {nearest.get('label')} @ {nearest.get('price', 0):.5f}")
+        zone_tag = "PRIME ZONE" if in_prime else "near Fan"
+        lines.append(f"Nearest: {nearest.get('label')} @ {nearest.get('price', 0):.5f}  ({zone_tag})")
     if expansions:
-        lines.append("Expansion targets: " + " · ".join(f"{e['label']} {e['price']:.5f}" for e in expansions[:3]))
+        lines.append("Expansion targets: " + " · ".join(
+            f"{e['label']} {e['price']:.5f}" for e in expansions[:4]
+        ))
 
-    for r in analysis.get("reasons") or []:
+    for r in (analysis.get("reasons") or [])[:7]:
         lines.append(f"  • {r}")
 
     if ticket:
-        lines.append(
-            f"Ticket: {ticket['side']}  Entry {ticket['entry']:.5f}  "
-            f"SL {ticket['sl']:.5f}  TP1 {ticket['tp1']:.5f}  TP2 {ticket['tp2']:.5f}"
-        )
-        lines.append(f"R:R 1:{ticket.get('rr', 0):.2f}")
+        side = ticket.get("side", ticket.get("direction", ""))
+        lines.append("─" * 44)
+        lines.append(f"{'🟢 LONG' if 'LONG' in str(side).upper() or side == 'BUY' else '🔴 SHORT'} POSITION (TradingView style)")
+        lines.append(f"Entry : {ticket.get('entry')}")
+        lines.append(f"SL    : {ticket.get('sl')}   (beyond OTE zone / swing)")
+        lines.append(f"TP1   : {ticket.get('tp1')}   (Expansion)")
+        lines.append(f"TP2   : {ticket.get('tp2')}")
+        if ticket.get("tp3") is not None:
+            lines.append(f"TP3   : {ticket.get('tp3')}   (RR extension)")
+        lines.append(f"R:R   : 1:{ticket.get('rr', 0):.2f}")
+        if ticket.get("candle"):
+            lines.append(f"Candle: {ticket['candle']}")
+        if ticket.get("entry_note"):
+            lines.append(f"→ {ticket['entry_note']}")
+        lines.append("Risk rule: 1–2% of capital · Move SL to BE after TP1 · Trail for Expansion targets")
 
     return "\n".join(lines)
+
 
 
 def build_ote_ticket(analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return analysis.get("ticket")
 
 
+
+
 # ============================================================
-# TRENDLINE STRATEGY ORCHESTRATION -- full top-down cascade:
-#   4H bias (EMA200 + structure) -> 1H structure permission -> 30M entry
-# The 30M trendline family supplies the entry/SL/TP geometry; the 4H/1H
-# read gates and scores it (see topdown_engine.get_topdown_bias).
+# TRENDLINE STRATEGY ORCHESTRATION -- full top-down cascade
+#   4H bias → 1H structure permission → 30M classic trendline entry
 # ============================================================
 
 def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
@@ -1374,6 +1069,17 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     if family.get("error"):
         return family
 
+    # Attach TradingView-style position
+    pos = build_position_container(family)
+    if pos:
+        family["position"] = pos
+        # also expose flat keys for chart_engine compatibility
+        family["entry"] = pos["entry"]
+        family["sl"] = pos["sl"]
+        family["tp1"] = pos["tp1"]
+        family["tp2"] = pos["tp2"]
+        family["tp3"] = pos.get("tp3")
+
     direction = family.get("direction", "NEUTRAL")
     strength = family.get("strength", 0)
     td_dir = topdown.get("direction", "NEUTRAL")
@@ -1382,19 +1088,17 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     if direction in ("BUY", "SELL"):
         if td_dir == direction and topdown.get("allowed"):
             strength = min(100, strength + 15)
-            gating_notes.append(f"✅ Aligned with 4H/1H top-down bias ({td_dir}) -- structure permission granted")
+            gating_notes.append(f"✅ Aligned with 4H/1H top-down bias ({td_dir}) — structure permission granted")
         elif td_dir == direction and not topdown.get("allowed"):
             gating_notes.append(
-                f"Aligned with top-down direction ({td_dir}) but 1H structure permission not yet "
-                f"granted -- treat as lower conviction"
+                f"Aligned with top-down direction ({td_dir}) but 1H structure permission not yet granted — lower conviction"
             )
         elif td_dir == "NEUTRAL":
-            gating_notes.append("4H/1H top-down read is NEUTRAL -- 30M trendline direction stands on its own")
+            gating_notes.append("4H/1H top-down read is NEUTRAL — 30M trendline direction stands on its own")
         else:
             strength = max(0, strength - 25)
             gating_notes.append(
-                f"⚠️ 30M trendline direction ({direction}) conflicts with 4H/1H top-down bias "
-                f"({td_dir}) -- high risk of counter-trend trade"
+                f"⚠️ 30M trendline direction ({direction}) conflicts with 4H/1H top-down bias ({td_dir}) — high risk of counter-trend trade"
             )
 
     family["strength"] = strength
