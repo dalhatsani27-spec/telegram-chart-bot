@@ -28,16 +28,25 @@ from topdown_engine import get_topdown_bias, format_topdown_summary
 
 
 
-
 # ============================================================
-# TRENDLINE STRATEGY
-# Simple human-style drawing (matches MT5 hand-drawn lines)
+# TRENDLINE STRATEGY  (Educational Image Rules)
+# ============================================================
+# Follows the classic rules from the "Trendline Strategy – Full
+# Context & Complete Guide" educational image:
 #
-# 1. Find clean swing pivots (line-chart style)
-# 2. Connect the pivots that define the latest impulse
-# 3. Count touches for strength
-# 4. Direction = price above or below the line
-# 5. Entry only on retest + confirmation + decent R:R
+#   1. Draw valid trendlines connecting WICKS (not bodies)
+#   2. Minimum 2 touch points (3+ = stronger / confirmed)
+#   3. Clear and unbroken line
+#   4. Trade in the direction of the higher-timeframe trend
+#   5. Wait for confirmation before entry (candlestick + BOS)
+#   6. Prefer entry on retest of the trendline
+#   7. TradingView-style position template (Entry / SL / TP1-3)
+#   8. Risk only 1-2%, minimum 1:2 RR, move SL to BE after TP1
+#
+# Timeframe cascade (kept compatible with existing bot):
+#   4H  → macro bias
+#   1H  → structure permission
+#   30M → trendline geometry + entry
 # ============================================================
 
 
@@ -48,8 +57,8 @@ def _line_value(x0: float, y0: float, x1: float, y1: float, x: float) -> float:
 
 
 def _count_touches(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
-                   kind: str, tol_atr: float = 0.40) -> int:
-    """How many times price touched the line (wicks)."""
+                   kind: str, tol_atr: float = 0.35) -> int:
+    """Count how many times price wicks touched the line (classic rule)."""
     if df is None or len(df) < 5:
         return 0
     atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
@@ -57,7 +66,7 @@ def _count_touches(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
     lows = df["Low"].values
     touches = 0
     lo, hi = min(x0, x1), max(x0, x1)
-    for i in range(max(0, lo), min(hi + 1, len(df))):
+    for i in range(lo, min(hi + 1, len(df))):
         lv = _line_value(x0, y0, x1, y1, i)
         a = float(atr[i]) if i < len(atr) and atr[i] > 0 else abs(y1 - y0) * 0.05
         tol = max(a * tol_atr, 1e-9)
@@ -68,94 +77,169 @@ def _count_touches(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
     return touches
 
 
-def _get_clean_pivots(df: pd.DataFrame) -> List[Dict]:
+def _fit_trendline(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
     """
-    Clean swing pivots the way a trader sees them on a line chart.
-    Prefer significant swings only.
-    """
-    pivots = zigzag_swings(df, depth=4, deviation_atr=0.30)
-    if len(pivots) < 4:
-        pivots = zigzag_swings(df, depth=3, deviation_atr=0.22)
-    if len(pivots) < 3:
-        pivots = zigzag_swings(df, depth=3, deviation_atr=0.18)
-    return pivots
-
-
-def _draw_simple_trendline(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
-    """
-    Human-style trendline:
-      - Uptrend   = last clear higher lows (support)
-      - Downtrend = last clear lower highs (resistance)
-    Connects the two most recent valid pivots that form the impulse structure.
+    Fit a classic trendline from swing pivots.
+    - Uptrend support  = higher lows (connect wicks)
+    - Downtrend resistance = lower highs (connect wicks)
+    Quality tags follow the educational image:
+      unconfirmed (<3 touches), confirmed (3-4), crowded (5+)
     """
     pts = [p for p in pivots if p["type"] == ("low" if kind == "support" else "high")]
     if len(pts) < 2:
         return None
 
-    # Walk from most recent backwards to find a clean pair
-    # Prefer the most recent pair that still forms a proper higher-low / lower-high
     best = None
-    for j in range(len(pts) - 1, 0, -1):
-        for i in range(j - 1, -1, -1):
+    best_score = -1.0
+
+    for i in range(len(pts) - 1):
+        for j in range(i + 1, len(pts)):
             a, b = pts[i], pts[j]
             if b["index"] <= a["index"]:
                 continue
-            # Structural requirement
+            # Classic structural requirement
             if kind == "support" and b["price"] <= a["price"]:
                 continue  # must be higher low
             if kind == "resistance" and b["price"] >= a["price"]:
                 continue  # must be lower high
 
-            # Prefer pairs that span a meaningful distance
-            span = b["index"] - a["index"]
-            if span < 5:
+            slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
+            # Reject almost-flat lines (not useful as trendlines)
+            if abs(slope) < 1e-8:
                 continue
 
-            slope = (b["price"] - a["price"]) / max(span, 1)
             touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind)
             if touches < 2:
                 continue
 
-            y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
-            quality = "unconfirmed" if touches < 3 else ("confirmed" if touches <= 4 else "crowded")
+            # Prefer more recent + more touches, mild penalty for crowded levels
+            touch_score = touches * 12
+            if touches >= 5:
+                touch_score -= (touches - 4) * 4
+            recency = (b["index"] / max(n, 1)) * 8
+            span = (b["index"] - a["index"]) * 0.04
+            score = touch_score + recency + span
 
-            candidate = {
-                "x0": a["index"], "y0": a["price"],
-                "x1": b["index"], "y1": b["price"],
-                "y_end": y_end, "slope": slope,
-                "touches": touches, "confirmed": touches >= 3,
-                "quality": quality, "kind": kind,
-                "span": span,
-            }
-
-            # Prefer more recent + more touches + reasonable span
-            # Most recent valid pair wins (human draws the latest structure)
-            if best is None:
-                best = candidate
-            else:
-                # Prefer the one whose second pivot is more recent
-                if b["index"] > best["x1"]:
-                    best = candidate
-                elif b["index"] == best["x1"] and touches > best["touches"]:
-                    best = candidate
-            break  # take the nearest valid partner for this j, then move on
-        if best and best["x1"] == pts[j]["index"]:
-            break  # already found a good recent pair
-
+            if score > best_score:
+                best_score = score
+                y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
+                quality = "unconfirmed" if touches < 3 else ("confirmed" if touches <= 4 else "crowded")
+                best = {
+                    "x0": a["index"], "y0": a["price"],
+                    "x1": b["index"], "y1": b["price"],
+                    "y_end": y_end, "slope": slope,
+                    "touches": touches, "confirmed": touches >= 3,
+                    "quality": quality, "kind": kind,
+                }
     return best
 
 
-def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: int = 120) -> Dict[str, Any]:
-    """
-    Simple trendline engine that draws like a human on MT5.
+def _detect_channel(primary: Dict, pivots: List[Dict], n: int) -> Optional[Dict]:
+    """Build a simple parallel channel from the primary trendline (image style)."""
+    if not primary:
+        return None
+    opposite = "high" if primary["kind"] == "support" else "low"
+    pts = [p for p in pivots if p["type"] == opposite]
+    if len(pts) < 1:
+        return None
 
-    - Find clean pivots
-    - Draw one primary uptrend line (higher lows) and/or downtrend line (lower highs)
-    - Pick the one price is currently interacting with
-    - Direction from price vs line (above = hold uptrend, below = break, etc.)
+    # Find the pivot that creates the best parallel rail
+    best_rail = None
+    best_dist = 0.0
+    for p in pts:
+        # Project primary to this x and measure distance
+        lv = _line_value(primary["x0"], primary["y0"], primary["x1"], primary["y1"], p["index"])
+        dist = abs(p["price"] - lv)
+        if dist > best_dist:
+            best_dist = dist
+            best_rail = p
+
+    if not best_rail or best_dist <= 0:
+        return None
+
+    # Parallel line = same slope, anchored on the opposite pivot
+    slope = primary["slope"]
+    y0 = best_rail["price"]
+    x0 = best_rail["index"]
+    y_end = y0 + slope * (n - 1 - x0)
+
+    upper = primary if primary["kind"] == "resistance" else {
+        "x0": x0, "y0": y0, "x1": n - 1, "y1": y_end, "y_end": y_end, "slope": slope, "kind": "resistance"
+    }
+    lower = primary if primary["kind"] == "support" else {
+        "x0": x0, "y0": y0, "x1": n - 1, "y1": y_end, "y_end": y_end, "slope": slope, "kind": "support"
+    }
+    if primary["kind"] == "support":
+        lower = primary
+    else:
+        upper = primary
+
+    width = abs(upper["y_end"] - lower["y_end"])
+    return {"upper": upper, "lower": lower, "width": width}
+
+
+def _last_candle_pattern(df: pd.DataFrame) -> Dict[str, Any]:
+    """Detect classic candlestick confirmations used in the educational image."""
+    if df is None or len(df) < 3:
+        return {"bullish": False, "bearish": False, "name": None}
+
+    c0 = df.iloc[-1]
+    c1 = df.iloc[-2]
+    o, h, l, c = float(c0["Open"]), float(c0["High"]), float(c0["Low"]), float(c0["Close"])
+    body = abs(c - o)
+    full = h - l if h > l else 1e-9
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+
+    # Bullish patterns
+    if c > o and body > 0.6 * full and c > float(c1["High"]):          # Bullish Engulfing-ish
+        return {"bullish": True, "bearish": False, "name": "Bullish Engulfing"}
+    if lower_wick > 2 * body and upper_wick < body * 0.5 and c >= o:   # Hammer / Bullish Pin
+        return {"bullish": True, "bearish": False, "name": "Hammer / Bullish Pin Bar"}
+    if c > o and body > 0.55 * full:
+        return {"bullish": True, "bearish": False, "name": "Bullish Candle"}
+
+    # Bearish patterns
+    if c < o and body > 0.6 * full and c < float(c1["Low"]):
+        return {"bearish": True, "bullish": False, "name": "Bearish Engulfing"}
+    if upper_wick > 2 * body and lower_wick < body * 0.5 and c <= o:
+        return {"bearish": True, "bullish": False, "name": "Shooting Star / Bearish Pin Bar"}
+    if c < o and body > 0.55 * full:
+        return {"bearish": True, "bullish": False, "name": "Bearish Candle"}
+
+    return {"bullish": False, "bearish": False, "name": None}
+
+
+def _rsi(series: pd.Series, period: int = 14) -> float:
+    if len(series) < period + 1:
+        return 50.0
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / loss.replace(0, 1e-9)
+    rsi = 100 - (100 / (1 + rs))
+    val = float(rsi.iloc[-1])
+    return val if not np.isnan(val) else 50.0
+
+
+def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: int = 90) -> Dict[str, Any]:
+    """
+    Classic Trendline engine matching the educational image + MT5 style mapping:
+
+      - Uptrend line (higher lows) = support
+      - Downtrend line (lower highs) = resistance
+      - Direction from WHERE PRICE IS relative to the line:
+
+          Price ABOVE uptrend support     → BUY  (holding the trend)
+          Price BELOW uptrend support     → SELL (trend break)
+          Price BELOW downtrend resistance → SELL (holding the trend)
+          Price ABOVE downtrend resistance → BUY  (trend break)
+
+      - Prefer the line that price is currently interacting with
+      - Optional parallel channel when clean
     """
     if df is None or len(df) < 30:
-        return {"error": "Insufficient data for trendline", "direction": "NEUTRAL", "pivots": []}
+        return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}
 
     n = len(df)
     close = float(df["Close"].iloc[-1])
@@ -163,27 +247,42 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     if atr <= 0:
         atr = abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1])) or close * 0.002
 
-    pivots = _get_clean_pivots(df)
+    pivots = zigzag_swings(df, depth=4, deviation_atr=0.28)
+    if len(pivots) < 4:
+        pivots = zigzag_swings(df, depth=3, deviation_atr=0.22)
+    if len(pivots) < 3:
+        pivots = zigzag_swings(df, depth=3, deviation_atr=0.18)
 
-    # Only use relatively recent pivots for the active line
     cutoff = max(0, n - lookback_bars)
     recent = [p for p in pivots if p["index"] >= cutoff]
     if len(recent) < 3:
+        recent = [p for p in pivots if p["index"] >= max(0, n - lookback_bars * 2)]
+    if len(recent) < 2:
         recent = pivots
 
-    support = _draw_simple_trendline(recent, "support", n, df)      # rising line
-    resistance = _draw_simple_trendline(recent, "resistance", n, df)  # falling line
+    support = _fit_trendline(recent, "support", n, df)      # uptrend line
+    resistance = _fit_trendline(recent, "resistance", n, df)  # downtrend line
 
-    # Choose the line price is closest to / interacting with
+    # Score each candidate by: touches + how close price is to the line
+    def _relevance(line):
+        if not line:
+            return -1e9
+        dist = abs(close - line["y_end"])
+        touch_score = line["touches"] * 15
+        if line["confirmed"]:
+            touch_score += 10
+        # Prefer lines price is near (actively interacting)
+        proximity = max(0, 40 - (dist / atr) * 12)
+        return touch_score + proximity
+
     primary = None
     family_kind = None
 
-    def _dist(line):
-        return abs(close - line["y_end"]) if line else 1e18
+    s_score = _relevance(support)
+    r_score = _relevance(resistance)
 
     if support and resistance:
-        # Prefer the line that price is nearer to (active structure)
-        if _dist(support) <= _dist(resistance) * 1.15:
+        if s_score >= r_score:
             primary, family_kind = support, "ascending"
         else:
             primary, family_kind = resistance, "descending"
@@ -192,35 +291,11 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     elif resistance:
         primary, family_kind = resistance, "descending"
 
-    # Optional simple parallel channel (only if clean)
-    channel = None
-    if primary:
-        opposite_type = "high" if primary["kind"] == "support" else "low"
-        opp = [p for p in recent if p["type"] == opposite_type]
-        if opp:
-            # Use the opposite pivot furthest from the primary line
-            best_opp = None
-            best_d = 0
-            for p in opp:
-                lv = _line_value(primary["x0"], primary["y0"], primary["x1"], primary["y1"], p["index"])
-                d = abs(p["price"] - lv)
-                if d > best_d:
-                    best_d = d
-                    best_opp = p
-            if best_opp and best_d > atr * 0.8:
-                slope = primary["slope"]
-                y_end = best_opp["price"] + slope * (n - 1 - best_opp["index"])
-                rail = {
-                    "x0": best_opp["index"], "y0": best_opp["price"],
-                    "x1": n - 1, "y1": y_end, "y_end": y_end,
-                    "slope": slope, "kind": "resistance" if primary["kind"] == "support" else "support",
-                }
-                if primary["kind"] == "support":
-                    channel = {"lower": primary, "upper": rail, "width": abs(rail["y_end"] - primary["y_end"])}
-                else:
-                    channel = {"upper": primary, "lower": rail, "width": abs(primary["y_end"] - rail["y_end"])}
+    channel = _detect_channel(primary, recent, n) if primary else None
 
-    # ---------- Direction (price vs line) ----------
+    # ============================================================
+    # DIRECTION — pure price-vs-line logic (matches MT5 mapping)
+    # ============================================================
     direction = "NEUTRAL"
     strength = 40
     reasons = []
@@ -228,49 +303,61 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
 
     if primary:
         line_val = float(primary["y_end"])
-        dist_atr = (close - line_val) / atr
+        dist_atr = (close - line_val) / atr   # positive = price above the line
 
-        if primary["kind"] == "support":  # rising trendline
-            reasons.append(f"Rising trendline · {primary['touches']} touches · {primary['quality']}")
-            if close >= line_val - atr * 0.12:
+        if primary["kind"] == "support":  # UPTREND line
+            reasons.append(
+                f"Uptrend line (support) · {primary['touches']} touches · {primary['quality']}"
+            )
+            if close >= line_val - atr * 0.10:
+                # Price still above / on the line → trend intact → BUY
                 direction = "BUY"
-                strength = 55 + min(28, (primary["touches"] - 2) * 8)
-                if abs(dist_atr) <= 1.0:
-                    reasons.append("Price holding ABOVE rising trendline")
-                    strength = min(100, strength + 10)
+                strength = 55 + min(30, (primary["touches"] - 2) * 8)
+                if abs(dist_atr) <= 0.80:
+                    reasons.append("Price holding ABOVE uptrend line (respecting support)")
+                    strength = min(100, strength + 8)
                 else:
-                    reasons.append("Price ABOVE rising trendline — trend intact")
+                    reasons.append("Price ABOVE uptrend line — trend intact")
             else:
+                # Price clearly below the uptrend line → break
                 direction = "SELL"
-                strength = 52 + min(20, int(abs(dist_atr) * 6))
+                strength = 50 + min(25, int(abs(dist_atr) * 8))
                 breakout_grade = {
                     "side": "support_break_down",
                     "strength": "confirmed" if close < line_val - atr * 0.35 else "developing",
                     "penetration_atr": round(abs(dist_atr), 2),
                 }
-                reasons.append(f"Price BELOW rising trendline — break ({breakout_grade['penetration_atr']} ATR)")
+                reasons.append(
+                    f"Price BELOW uptrend line — trendline break ({breakout_grade['penetration_atr']} ATR)"
+                )
 
-        else:  # falling trendline
-            reasons.append(f"Falling trendline · {primary['touches']} touches · {primary['quality']}")
-            if close <= line_val + atr * 0.12:
+        else:  # RESISTANCE / DOWNTREND line
+            reasons.append(
+                f"Downtrend line (resistance) · {primary['touches']} touches · {primary['quality']}"
+            )
+            if close <= line_val + atr * 0.10:
+                # Price still below / on the line → trend intact → SELL
                 direction = "SELL"
-                strength = 55 + min(28, (primary["touches"] - 2) * 8)
-                if abs(dist_atr) <= 1.0:
-                    reasons.append("Price holding BELOW falling trendline")
-                    strength = min(100, strength + 10)
+                strength = 55 + min(30, (primary["touches"] - 2) * 8)
+                if abs(dist_atr) <= 0.80:
+                    reasons.append("Price holding BELOW downtrend line (respecting resistance)")
+                    strength = min(100, strength + 8)
                 else:
-                    reasons.append("Price BELOW falling trendline — trend intact")
+                    reasons.append("Price BELOW downtrend line — trend intact")
             else:
+                # Price clearly above the downtrend line → break
                 direction = "BUY"
-                strength = 52 + min(20, int(abs(dist_atr) * 6))
+                strength = 50 + min(25, int(abs(dist_atr) * 8))
                 breakout_grade = {
                     "side": "resistance_break_up",
                     "strength": "confirmed" if close > line_val + atr * 0.35 else "developing",
                     "penetration_atr": round(abs(dist_atr), 2),
                 }
-                reasons.append(f"Price ABOVE falling trendline — break ({breakout_grade['penetration_atr']} ATR)")
+                reasons.append(
+                    f"Price ABOVE downtrend line — trendline break ({breakout_grade['penetration_atr']} ATR)"
+                )
 
-    # Chart series
+    # Chart series (single clean line preferred — MT5 style)
     upper_line = np.full(n, np.nan)
     lower_line = np.full(n, np.nan)
     mid_line = np.full(n, np.nan)
@@ -289,6 +376,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
             else:
                 upper_line[i] = val
 
+    # Candlestick + RSI
     candle = _last_candle_pattern(df)
     rsi_val = _rsi(df["Close"])
     reasons.append(f"RSI(14): {rsi_val:.1f}")
