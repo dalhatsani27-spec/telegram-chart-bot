@@ -224,13 +224,29 @@ def _rsi(series: pd.Series, period: int = 14) -> float:
 
 def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: int = 90) -> Dict[str, Any]:
     """
-    Classic Trendline engine matching the educational image rules.
-    Produces one primary trendline (support or resistance) + optional channel.
+    Classic Trendline engine matching the educational image + MT5 style mapping:
+
+      - Uptrend line (higher lows) = support
+      - Downtrend line (lower highs) = resistance
+      - Direction from WHERE PRICE IS relative to the line:
+
+          Price ABOVE uptrend support     → BUY  (holding the trend)
+          Price BELOW uptrend support     → SELL (trend break)
+          Price BELOW downtrend resistance → SELL (holding the trend)
+          Price ABOVE downtrend resistance → BUY  (trend break)
+
+      - Prefer the line that price is currently interacting with
+      - Optional parallel channel when clean
     """
     if df is None or len(df) < 30:
         return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}
 
     n = len(df)
+    close = float(df["Close"].iloc[-1])
+    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
+    if atr <= 0:
+        atr = abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1])) or close * 0.002
+
     pivots = zigzag_swings(df, depth=4, deviation_atr=0.28)
     if len(pivots) < 4:
         pivots = zigzag_swings(df, depth=3, deviation_atr=0.22)
@@ -244,24 +260,32 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     if len(recent) < 2:
         recent = pivots
 
-    support = _fit_trendline(recent, "support", n, df)
-    resistance = _fit_trendline(recent, "resistance", n, df)
+    support = _fit_trendline(recent, "support", n, df)      # uptrend line
+    resistance = _fit_trendline(recent, "resistance", n, df)  # downtrend line
 
-    # Decide primary direction from which line is more valid / recent
+    # Score each candidate by: touches + how close price is to the line
+    def _relevance(line):
+        if not line:
+            return -1e9
+        dist = abs(close - line["y_end"])
+        touch_score = line["touches"] * 15
+        if line["confirmed"]:
+            touch_score += 10
+        # Prefer lines price is near (actively interacting)
+        proximity = max(0, 40 - (dist / atr) * 12)
+        return touch_score + proximity
+
     primary = None
     family_kind = None
+
+    s_score = _relevance(support)
+    r_score = _relevance(resistance)
+
     if support and resistance:
-        if support["touches"] >= resistance["touches"] and support["confirmed"]:
+        if s_score >= r_score:
             primary, family_kind = support, "ascending"
-        elif resistance["touches"] > support["touches"] and resistance["confirmed"]:
-            primary, family_kind = resistance, "descending"
         else:
-            # Prefer the one whose y_end is closer to current price (more relevant)
-            close = float(df["Close"].iloc[-1])
-            if abs(support["y_end"] - close) <= abs(resistance["y_end"] - close):
-                primary, family_kind = support, "ascending"
-            else:
-                primary, family_kind = resistance, "descending"
+            primary, family_kind = resistance, "descending"
     elif support:
         primary, family_kind = support, "ascending"
     elif resistance:
@@ -269,24 +293,71 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
 
     channel = _detect_channel(primary, recent, n) if primary else None
 
-    # Direction from structure
+    # ============================================================
+    # DIRECTION — pure price-vs-line logic (matches MT5 mapping)
+    # ============================================================
     direction = "NEUTRAL"
     strength = 40
     reasons = []
-
-    if family_kind == "ascending":
-        direction = "BUY"
-        strength = 55 + min(30, (primary["touches"] - 2) * 8)
-        reasons.append(f"Uptrend line (support) with {primary['touches']} touches — price respects as support")
-    elif family_kind == "descending":
-        direction = "SELL"
-        strength = 55 + min(30, (primary["touches"] - 2) * 8)
-        reasons.append(f"Downtrend line (resistance) with {primary['touches']} touches — price respects as resistance")
+    breakout_grade = None
 
     if primary:
-        reasons.append(f"Quality: {primary['quality']} · Slope: {primary['slope']:.6f}")
+        line_val = float(primary["y_end"])
+        dist_atr = (close - line_val) / atr   # positive = price above the line
 
-    # Series for chart rendering (compatible with existing chart_engine)
+        if primary["kind"] == "support":  # UPTREND line
+            reasons.append(
+                f"Uptrend line (support) · {primary['touches']} touches · {primary['quality']}"
+            )
+            if close >= line_val - atr * 0.10:
+                # Price still above / on the line → trend intact → BUY
+                direction = "BUY"
+                strength = 55 + min(30, (primary["touches"] - 2) * 8)
+                if abs(dist_atr) <= 0.80:
+                    reasons.append("Price holding ABOVE uptrend line (respecting support)")
+                    strength = min(100, strength + 8)
+                else:
+                    reasons.append("Price ABOVE uptrend line — trend intact")
+            else:
+                # Price clearly below the uptrend line → break
+                direction = "SELL"
+                strength = 50 + min(25, int(abs(dist_atr) * 8))
+                breakout_grade = {
+                    "side": "support_break_down",
+                    "strength": "confirmed" if close < line_val - atr * 0.35 else "developing",
+                    "penetration_atr": round(abs(dist_atr), 2),
+                }
+                reasons.append(
+                    f"Price BELOW uptrend line — trendline break ({breakout_grade['penetration_atr']} ATR)"
+                )
+
+        else:  # RESISTANCE / DOWNTREND line
+            reasons.append(
+                f"Downtrend line (resistance) · {primary['touches']} touches · {primary['quality']}"
+            )
+            if close <= line_val + atr * 0.10:
+                # Price still below / on the line → trend intact → SELL
+                direction = "SELL"
+                strength = 55 + min(30, (primary["touches"] - 2) * 8)
+                if abs(dist_atr) <= 0.80:
+                    reasons.append("Price holding BELOW downtrend line (respecting resistance)")
+                    strength = min(100, strength + 8)
+                else:
+                    reasons.append("Price BELOW downtrend line — trend intact")
+            else:
+                # Price clearly above the downtrend line → break
+                direction = "BUY"
+                strength = 50 + min(25, int(abs(dist_atr) * 8))
+                breakout_grade = {
+                    "side": "resistance_break_up",
+                    "strength": "confirmed" if close > line_val + atr * 0.35 else "developing",
+                    "penetration_atr": round(abs(dist_atr), 2),
+                }
+                reasons.append(
+                    f"Price ABOVE downtrend line — trendline break ({breakout_grade['penetration_atr']} ATR)"
+                )
+
+    # Chart series (single clean line preferred — MT5 style)
     upper_line = np.full(n, np.nan)
     lower_line = np.full(n, np.nan)
     mid_line = np.full(n, np.nan)
@@ -305,32 +376,11 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
             else:
                 upper_line[i] = val
 
-    # Break / Retest detection (core of the educational image)
-    close = float(df["Close"].iloc[-1])
-    breakout_grade = None
-    if primary:
-        line_val = primary["y_end"]
-        atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
-        if primary["kind"] == "support" and close < line_val - atr * 0.15:
-            breakout_grade = {
-                "side": "support_break_down",
-                "strength": "confirmed" if close < line_val - atr * 0.4 else "developing",
-                "penetration_atr": round((line_val - close) / max(atr, 1e-9), 2),
-            }
-            reasons.append("Price closed below support trendline — potential bearish break")
-        elif primary["kind"] == "resistance" and close > line_val + atr * 0.15:
-            breakout_grade = {
-                "side": "resistance_break_up",
-                "strength": "confirmed" if close > line_val + atr * 0.4 else "developing",
-                "penetration_atr": round((close - line_val) / max(atr, 1e-9), 2),
-            }
-            reasons.append("Price closed above resistance trendline — potential bullish break")
-
-    # Candlestick + RSI confirmation
+    # Candlestick + RSI
     candle = _last_candle_pattern(df)
     rsi_val = _rsi(df["Close"])
     reasons.append(f"RSI(14): {rsi_val:.1f}")
-    if candle["name"]:
+    if candle.get("name"):
         reasons.append(f"Candle: {candle['name']}")
 
     return {
@@ -362,16 +412,17 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     }
 
 
+
 def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -> Optional[Dict[str, Any]]:
     """
     TradingView-style Long / Short position template
-    (exactly as shown in the educational image).
+    following the educational image rules STRICTLY:
 
-    Entry  : on trendline (retest) or after confirmed break + retest
-    SL     : beyond recent swing low/high or beyond the trendline
-    TP1    : previous structure / nearest liquidity
-    TP2    : next structure
-    TP3    : measured RR 1:3
+      Entry  : only when price is near the trendline (retest) or after confirmed break
+      SL     : beyond recent swing + beyond the trendline, minimum 0.6 ATR risk
+      TP1    : at least 1.5–2× risk (structure or measured)
+      TP2/TP3: further structure / 1:3 RR
+      Reject  : any setup with R:R < 1.5 (never force a bad trade)
     """
     if not family or family.get("error"):
         return None
@@ -380,7 +431,12 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
         return None
 
     close = float(df["Close"].iloc[-1])
-    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
+    high = float(df["High"].iloc[-1])
+    low = float(df["Low"].iloc[-1])
+    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(high - low)
+    if atr <= 0:
+        atr = abs(high - low) or close * 0.002
+
     direction = family.get("direction", "NEUTRAL")
     if direction not in ("BUY", "SELL"):
         return None
@@ -392,53 +448,82 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
     rsi_val = family.get("rsi", 50.0)
     brk = family.get("breakout_grade")
 
-    # ---------- BUY (Long) template ----------
+    min_risk = atr * 0.60          # never risk less than 0.6 ATR
+    min_rr = 1.50                  # educational rule: never worse than ~1:1.5
+
+    # ---------- BUY (Long) ----------
     if direction == "BUY":
-        # Entry preference: retest of support trendline / lower channel rail
-        entry = close
+        # Ideal entry = support trendline / lower channel rail
+        line_price = None
         if channel and channel.get("lower"):
-            entry = float(channel["lower"].get("y_end", close))
+            line_price = float(channel["lower"].get("y_end", close))
         elif primary and primary.get("kind") == "support":
-            entry = float(primary.get("y_end", close))
+            line_price = float(primary.get("y_end", close))
 
-        # If we have a confirmed bullish break of resistance, entry above the line
-        if brk and brk.get("side") == "resistance_break_up" and brk.get("strength") == "confirmed":
-            entry = max(entry, close)
-
-        # SL below recent swing low / trendline (classic rule)
-        swing_lows = [float(p["price"]) for p in pivots if p.get("type") == "low" and p["price"] < entry]
-        if swing_lows:
-            sl = min(swing_lows[-3:]) if len(swing_lows) >= 3 else min(swing_lows)
+        # Only treat as valid retest if price is close to the line
+        # (within ~1.2 ATR). Otherwise wait — do not chase.
+        if line_price is not None and abs(close - line_price) <= atr * 1.20:
+            entry = min(close, line_price + atr * 0.15)
+        elif brk and brk.get("side") == "resistance_break_up":
+            # Breakout entry — use current close
+            entry = close
         else:
-            sl = entry - atr * atr_mult_sl
-        # Also respect the trendline itself
-        if primary and primary.get("kind") == "support":
-            sl = min(sl, float(primary["y_end"]) - atr * 0.25)
+            # Price too far from the trendline → no forced entry
+            return None
 
-        risk = abs(entry - sl)
+        # SL: recent swing low below entry, or below the trendline
+        swing_lows = sorted(
+            [float(p["price"]) for p in pivots if p.get("type") == "low" and p["price"] < entry]
+        )
+        if swing_lows:
+            # Use the most recent meaningful low (last 1–3)
+            sl = swing_lows[-1] if len(swing_lows) == 1 else swing_lows[-min(3, len(swing_lows))]
+            # Prefer the lowest of the recent ones for safety
+            sl = min(swing_lows[-min(3, len(swing_lows)):])
+        else:
+            sl = entry - atr * 1.0
+
+        if line_price is not None:
+            sl = min(sl, line_price - atr * 0.35)
+
+        # Enforce minimum risk distance
+        if (entry - sl) < min_risk:
+            sl = entry - min_risk
+
+        risk = entry - sl
         if risk <= 0:
             return None
 
-        # TPs from structure (previous highs) + RR multiples
-        swing_highs = sorted([float(p["price"]) for p in pivots if p.get("type") == "high" and p["price"] > entry])
-        tp1 = swing_highs[0] if swing_highs else entry + risk * 1.5
-        tp2 = swing_highs[1] if len(swing_highs) > 1 else entry + risk * 2.5
-        tp3 = entry + risk * 3.0  # RR 1:3 as shown in the image
+        # TPs: structure highs first, then measured RR
+        swing_highs = sorted(
+            [float(p["price"]) for p in pivots if p.get("type") == "high" and p["price"] > entry + risk * 0.8]
+        )
+        tp1 = swing_highs[0] if swing_highs else entry + risk * 2.0
+        # Ensure TP1 meets minimum RR
+        if (tp1 - entry) < risk * min_rr:
+            tp1 = entry + risk * 2.0
 
-        # Confirmation filter
+        tp2 = swing_highs[1] if len(swing_highs) > 1 else entry + risk * 2.8
+        if (tp2 - entry) <= (tp1 - entry):
+            tp2 = entry + risk * 2.8
+
+        tp3 = entry + risk * 3.0
+
         conf_ok = False
         conf_notes = []
         if candle.get("bullish"):
             conf_ok = True
             conf_notes.append(candle.get("name", "Bullish candle"))
-        if rsi_val > 50:
-            conf_notes.append(f"RSI > 50 ({rsi_val:.1f})")
-            conf_ok = True
+        if rsi_val >= 48:
+            conf_notes.append(f"RSI {rsi_val:.1f}")
+            conf_ok = conf_ok or rsi_val > 52
         if brk and brk.get("side") == "resistance_break_up":
             conf_notes.append("Bullish trendline break")
             conf_ok = True
 
-        rr = abs(tp1 - entry) / risk if risk > 0 else 0
+        rr = (tp1 - entry) / risk
+        if rr < min_rr:
+            return None  # never force a bad R:R trade
 
         return {
             "side": "BUY",
@@ -448,39 +533,62 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             "tp2": round(tp2, 5),
             "tp3": round(tp3, 5),
             "risk": round(risk, 5),
-            "reward": round(abs(tp1 - entry), 5),
+            "reward": round(tp1 - entry, 5),
             "rr": round(rr, 2),
             "confirmation": conf_ok,
             "conf_notes": conf_notes,
-            "entry_note": "Buy above / on trendline after bullish confirmation" if conf_ok else "Waiting for bullish confirmation",
+            "entry_note": (
+                "Buy on trendline retest after bullish confirmation"
+                if conf_ok else
+                "Potential long — waiting for bullish confirmation"
+            ),
         }
 
-    # ---------- SELL (Short) template ----------
+    # ---------- SELL (Short) ----------
     else:
-        entry = close
+        line_price = None
         if channel and channel.get("upper"):
-            entry = float(channel["upper"].get("y_end", close))
+            line_price = float(channel["upper"].get("y_end", close))
         elif primary and primary.get("kind") == "resistance":
-            entry = float(primary.get("y_end", close))
+            line_price = float(primary.get("y_end", close))
 
-        if brk and brk.get("side") == "support_break_down" and brk.get("strength") == "confirmed":
-            entry = min(entry, close)
-
-        swing_highs = [float(p["price"]) for p in pivots if p.get("type") == "high" and p["price"] > entry]
-        if swing_highs:
-            sl = max(swing_highs[-3:]) if len(swing_highs) >= 3 else max(swing_highs)
+        if line_price is not None and abs(close - line_price) <= atr * 1.20:
+            entry = max(close, line_price - atr * 0.15)
+        elif brk and brk.get("side") == "support_break_down":
+            entry = close
         else:
-            sl = entry + atr * atr_mult_sl
-        if primary and primary.get("kind") == "resistance":
-            sl = max(sl, float(primary["y_end"]) + atr * 0.25)
+            return None
 
-        risk = abs(sl - entry)
+        swing_highs = sorted(
+            [float(p["price"]) for p in pivots if p.get("type") == "high" and p["price"] > entry]
+        )
+        if swing_highs:
+            sl = max(swing_highs[-min(3, len(swing_highs)):])
+        else:
+            sl = entry + atr * 1.0
+
+        if line_price is not None:
+            sl = max(sl, line_price + atr * 0.35)
+
+        if (sl - entry) < min_risk:
+            sl = entry + min_risk
+
+        risk = sl - entry
         if risk <= 0:
             return None
 
-        swing_lows = sorted([float(p["price"]) for p in pivots if p.get("type") == "low" and p["price"] < entry], reverse=True)
-        tp1 = swing_lows[0] if swing_lows else entry - risk * 1.5
-        tp2 = swing_lows[1] if len(swing_lows) > 1 else entry - risk * 2.5
+        swing_lows = sorted(
+            [float(p["price"]) for p in pivots if p.get("type") == "low" and p["price"] < entry - risk * 0.8],
+            reverse=True,
+        )
+        tp1 = swing_lows[0] if swing_lows else entry - risk * 2.0
+        if (entry - tp1) < risk * min_rr:
+            tp1 = entry - risk * 2.0
+
+        tp2 = swing_lows[1] if len(swing_lows) > 1 else entry - risk * 2.8
+        if (entry - tp2) <= (entry - tp1):
+            tp2 = entry - risk * 2.8
+
         tp3 = entry - risk * 3.0
 
         conf_ok = False
@@ -488,14 +596,16 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
         if candle.get("bearish"):
             conf_ok = True
             conf_notes.append(candle.get("name", "Bearish candle"))
-        if rsi_val < 50:
-            conf_notes.append(f"RSI < 50 ({rsi_val:.1f})")
-            conf_ok = True
+        if rsi_val <= 52:
+            conf_notes.append(f"RSI {rsi_val:.1f}")
+            conf_ok = conf_ok or rsi_val < 48
         if brk and brk.get("side") == "support_break_down":
             conf_notes.append("Bearish trendline break")
             conf_ok = True
 
-        rr = abs(entry - tp1) / risk if risk > 0 else 0
+        rr = (entry - tp1) / risk
+        if rr < min_rr:
+            return None
 
         return {
             "side": "SELL",
@@ -505,12 +615,17 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             "tp2": round(tp2, 5),
             "tp3": round(tp3, 5),
             "risk": round(risk, 5),
-            "reward": round(abs(entry - tp1), 5),
+            "reward": round(entry - tp1, 5),
             "rr": round(rr, 2),
             "confirmation": conf_ok,
             "conf_notes": conf_notes,
-            "entry_note": "Sell below / on trendline after bearish confirmation" if conf_ok else "Waiting for bearish confirmation",
+            "entry_note": (
+                "Sell on trendline retest after bearish confirmation"
+                if conf_ok else
+                "Potential short — waiting for bearish confirmation"
+            ),
         }
+
 
 
 def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
@@ -544,10 +659,13 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
     for g in (family.get("gating_notes") or []):
         lines.append(g)
 
-    # Position template
-    pos = family.get("position") or build_position_container(family)
+    # Position template — only shown when R:R and retest rules are satisfied
+    pos = family.get("position")
+    if pos is None:
+        pos = build_position_container(family)
+        if pos:
+            family["position"] = pos
     if pos:
-        family["position"] = pos  # cache
         side = pos["side"]
         lines.append("─" * 42)
         lines.append(f"{'🟢 LONG' if side == 'BUY' else '🔴 SHORT'} POSITION (TradingView style)")
@@ -562,6 +680,11 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
         if pos.get("entry_note"):
             lines.append(f"→ {pos['entry_note']}")
         lines.append("Risk rule: 1-2% of capital · Move SL to BE after TP1")
+    else:
+        lines.append("─" * 42)
+        lines.append("⏳ No valid entry yet")
+        lines.append("Reason: price not retesting the trendline, or R:R would be < 1.5")
+        lines.append("Action: wait for a clean retest + confirmation (educational rule)")
 
     return "\n".join(lines)
 
