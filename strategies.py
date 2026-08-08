@@ -463,6 +463,33 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     support = _fit_primary(recent_pivots, "support", n, df)
     resistance = _fit_primary(recent_pivots, "resistance", n, df)
 
+    # Reject a candidate diagonal line whose actual price movement across
+    # its own span is too shallow to be a meaningful trend -- e.g. two
+    # swing lows that are technically "rising" by a few points over three
+    # days. That's a range, not an uptrend, and drawing it as a diagonal
+    # "ascending" rail is misleading -- it should be left for the
+    # horizontal S/R clustering below (_detect_horizontal_levels) to pick
+    # up instead, which is exactly what that layer is for.
+    MIN_TREND_MOVE_ATR = 1.8  # total rise/fall across the line's full span, in ATRs
+    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
+
+    def _has_meaningful_slope(line):
+        if not line:
+            return False
+        if not atr_now or atr_now <= 0:
+            return True  # can't measure -- don't reject on a technicality
+        total_move = abs(line["y1"] - line["y0"])
+        return total_move >= MIN_TREND_MOVE_ATR * atr_now
+
+    if support and not _has_meaningful_slope(support):
+        support = None
+        shallow_rejected = True
+    else:
+        shallow_rejected = False
+    if resistance and not _has_meaningful_slope(resistance):
+        resistance = None
+        shallow_rejected = True
+
     # LOCKED RULE:
     #   Uptrend  → map pivot LOWS  (ascending support)
     #   Downtrend → map pivot HIGHS (descending resistance)
@@ -525,6 +552,11 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     direction = "NEUTRAL"
     strength = 40
     reasons = []
+    if shallow_rejected and not primary:
+        reasons.append(
+            "No diagonal trendline met the minimum slope -- price is "
+            "ranging rather than trending here; see horizontal S/R levels instead"
+        )
     breakout_grade = None
 
     if primary and family_lines:
