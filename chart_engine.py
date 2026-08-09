@@ -498,14 +498,24 @@ def generate_trendline_map(
             continue
         x0 = max(0, x0)
         is_bull = ob["type"] == "bullish"
+        is_unmitigated = ob["freshness"] == "untested"
         color = "#26a69a" if is_bull else "#ef5350"
-        alpha = 0.30 if ob["grade"] == "strong" else 0.16
+        # Unmitigated (never traded back into) zones are the ones that
+        # actually matter going forward -- draw them bold/solid. Mitigated
+        # ("tested-held") zones already did their job once; keep them on
+        # the chart for context but visually recede.
+        alpha = (0.34 if ob["grade"] == "strong" else 0.20) if is_unmitigated else (0.14 if ob["grade"] == "strong" else 0.08)
+        linestyle = "solid" if is_unmitigated else "dashed"
+        linewidth = 1.1 if is_unmitigated else 0.7
         ax.add_patch(mpatches.Rectangle(
             (x0, ob["bottom"]), (chart_len - 1 - x0), (ob["top"] - ob["bottom"]),
-            facecolor=color, edgecolor=color, linewidth=0.8, alpha=alpha, zorder=1))
-        label = f"{'Bullish' if is_bull else 'Bearish'} OB {ob['confidence']}%"
+            facecolor=color, edgecolor=color, linewidth=linewidth, linestyle=linestyle,
+            alpha=alpha, zorder=1))
+        status = "UNMITIGATED" if is_unmitigated else "mitigated"
+        label = f"{'Bullish' if is_bull else 'Bearish'} OB · {status} · {ob['confidence']}%"
         ax.text(x0 + 1, ob["top"] if is_bull else ob["bottom"], label, fontsize=6.5,
-                color=color, fontweight="bold", va="bottom" if is_bull else "top", alpha=0.9, zorder=9)
+                color=color, fontweight="bold", va="bottom" if is_bull else "top",
+                alpha=0.95 if is_unmitigated else 0.6, zorder=9)
 
     # --- Pick exactly ONE structure to draw as "the pattern" -------------
     # Priority set upstream in strategies.py (active_pattern): a specific
