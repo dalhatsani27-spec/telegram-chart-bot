@@ -777,6 +777,45 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
                 f"— trendline bias only, wait for confirmation before entering"
             )
 
+    # --- Order block reaction gate --------------------------------------
+    # order_blocks (computed below for the chart) were being detected and
+    # drawn but never actually consulted by the direction/strength logic --
+    # so the bot could show a BUY signal while price was sitting inside a
+    # bearish supply OB, or vice versa, with zero acknowledgement of it.
+    # Compute once here, before the return, and let it push back on
+    # whatever the trendline geometry decided.
+    order_blocks = detect_order_blocks(df)
+    active_ob = None
+    for ob in order_blocks:
+        if float(ob["bottom"]) <= close <= float(ob["top"]):
+            active_ob = ob
+            break  # list is nearest-to-price first
+    if active_ob:
+        ob_side = active_ob["type"]  # 'bullish' or 'bearish'
+        ob_desc = (f"{ob_side.capitalize()} order block ({active_ob['grade']}, "
+                   f"{active_ob['confidence']}%, {active_ob['freshness']})")
+        if direction == "BUY" and ob_side == "bearish":
+            strength = max(0, strength - 20)
+            reasons.append(f"⚠️ Price is trading INSIDE a {ob_desc} — supply zone overhead, "
+                            f"counter-trend risk, expect rejection before continuation")
+        elif direction == "SELL" and ob_side == "bullish":
+            strength = max(0, strength - 20)
+            reasons.append(f"⚠️ Price is trading INSIDE a {ob_desc} — demand zone below, "
+                            f"counter-trend risk, expect rejection before continuation")
+        elif direction == "SELL" and ob_side == "bearish":
+            strength = min(100, strength + 10)
+            reasons.append(f"✅ Price reacting inside the {ob_desc} that's driving this move — "
+                            f"aligned with direction")
+        elif direction == "BUY" and ob_side == "bullish":
+            strength = min(100, strength + 10)
+            reasons.append(f"✅ Price reacting inside the {ob_desc} that's driving this move — "
+                            f"aligned with direction")
+        elif direction == "NEUTRAL":
+            direction = "SELL" if ob_side == "bearish" else "BUY"
+            strength = max(strength, 50)
+            reasons.append(f"Price sitting inside an untested {ob_desc} with no trendline bias otherwise — "
+                            f"reacting off the zone")
+
     # Series for chart (only the parallel family — clean)
     upper_line = np.full(n, np.nan)
     lower_line = np.full(n, np.nan)
@@ -832,7 +871,8 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         # strength, freshness, and whether they actually caused a
         # confirmed structure break (see detect_order_blocks docstring).
         # Previously excluded by design; added back deliberately now.
-        "order_blocks": detect_order_blocks(df),
+        "order_blocks": order_blocks,
+        "active_order_block": active_ob,
     }
 
 
