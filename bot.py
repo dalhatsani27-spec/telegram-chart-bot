@@ -9,6 +9,7 @@ sizing, Account & PnL, Open Positions).
 
 import os
 import time
+import traceback
 import threading
 import asyncio
 from datetime import datetime
@@ -273,8 +274,18 @@ async def send_trendline_analysis(context, chat_id, symbol):
                     chat_id=chat_id, photo=chart_img,
                     caption=f"{symbol} Trendline (30M) | {ts_str}",
                 )
+            else:
+                print(f"[send_trendline_analysis] {symbol}: no df in family, skipping chart. "
+                      f"family keys={list(family.keys())} error={family.get('error')}")
         except Exception:
             pos = None
+            print(f"[send_trendline_analysis] chart generation failed for {symbol}:")
+            traceback.print_exc()
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ Chart failed to render for {symbol} (sending text analysis only). "
+                     f"Check server logs for the traceback.",
+            )
 
         await context.bot.send_message(chat_id=chat_id, text=report)
 
@@ -311,8 +322,17 @@ async def send_ote_analysis(context, chat_id, symbol):
                     chat_id=chat_id, photo=chart_img,
                     caption=f"{symbol} OTE (Fib Fan + Expansion, 30M) | {ts_str}",
                 )
+            else:
+                print(f"[send_ote_analysis] {symbol}: no df in analysis, skipping chart. "
+                      f"keys={list(analysis.keys())} error={analysis.get('error')}")
         except Exception:
-            pass
+            print(f"[send_ote_analysis] chart generation failed for {symbol}:")
+            traceback.print_exc()
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ Chart failed to render for {symbol} (sending text analysis only). "
+                     f"Check server logs for the traceback.",
+            )
 
         await context.bot.send_message(chat_id=chat_id, text=report)
 
