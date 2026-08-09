@@ -39,6 +39,30 @@ def health_check():
     return {"status": "ok"}, 200
 
 
+def _keepalive_pinger():
+    """
+    Render's free tier spins the whole process down after ~15 min with no
+    inbound HTTP traffic. Telegram long-polling doesn't count as traffic
+    (it's an outbound connection from us to Telegram, not an inbound
+    request through Render's edge), so without this, the process -- and
+    the Telegram bot along with it -- goes to sleep and never wakes back
+    up on its own. This periodically hits our own public /health endpoint
+    so Render always sees recent activity and keeps us alive.
+    Only runs when RENDER_EXTERNAL_URL is set (i.e. we're actually on Render).
+    """
+    import requests as _requests
+    base_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not base_url:
+        return
+    ping_url = base_url.rstrip("/") + "/health"
+    while True:
+        time.sleep(600)  # every 10 min, comfortably inside Render's 15 min idle window
+        try:
+            _requests.get(ping_url, timeout=10)
+        except Exception as e:
+            print(f"[keepalive] ping failed: {e!r}")
+
+
 # ==========================================
 # 2. HELPERS
 # ==========================================
@@ -687,4 +711,5 @@ def run_telegram_bot():
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=_keepalive_pinger, daemon=True).start()
     run_telegram_bot()
