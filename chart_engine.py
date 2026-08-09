@@ -499,23 +499,42 @@ def generate_trendline_map(
         x0 = max(0, x0)
         is_bull = ob["type"] == "bullish"
         is_unmitigated = ob["freshness"] == "untested"
-        color = "#26a69a" if is_bull else "#ef5350"
-        # Unmitigated (never traded back into) zones are the ones that
-        # actually matter going forward -- draw them bold/solid. Mitigated
+        # Deep, solid fill colors matching how a trader actually marks these
+        # by hand (solid maroon/navy blocks), not a light translucent tint.
+        color = "#0d3ea3" if is_bull else "#7a0d16"
+        edge_color = "#26a69a" if is_bull else "#ef5350"
+        # Unmitigated (never traded back into) zones are the ones still in
+        # play -- draw them as bold, nearly-opaque blocks. Mitigated
         # ("tested-held") zones already did their job once; keep them on
-        # the chart for context but visually recede.
-        alpha = (0.34 if ob["grade"] == "strong" else 0.20) if is_unmitigated else (0.14 if ob["grade"] == "strong" else 0.08)
-        linestyle = "solid" if is_unmitigated else "dashed"
-        linewidth = 1.1 if is_unmitigated else 0.7
+        # the chart for context but shrink them to a thin outline so they
+        # don't compete visually with the zones that actually matter.
+        if is_unmitigated:
+            alpha = 0.85 if ob["grade"] == "strong" else 0.65
+            linestyle = "solid"
+            linewidth = 1.4
+        else:
+            alpha = 0.10
+            linestyle = "dashed"
+            linewidth = 0.8
         ax.add_patch(mpatches.Rectangle(
             (x0, ob["bottom"]), (chart_len - 1 - x0), (ob["top"] - ob["bottom"]),
-            facecolor=color, edgecolor=color, linewidth=linewidth, linestyle=linestyle,
+            facecolor=color, edgecolor=edge_color, linewidth=linewidth, linestyle=linestyle,
             alpha=alpha, zorder=1))
+        # Solid level line at the edge price actually has to clear to
+        # invalidate the zone (top for a bearish/supply OB since price
+        # approaches from below, bottom for a bullish/demand OB since price
+        # approaches from above) -- the single number a trader actually
+        # watches, extended to the right edge of the chart like a live level.
+        if is_unmitigated:
+            edge_price = ob["bottom"] if is_bull else ob["top"]
+            ax.plot([x0, chart_len - 1], [edge_price, edge_price],
+                     color=edge_color, linestyle="-", linewidth=1.2, alpha=0.9, zorder=6)
         status = "UNMITIGATED" if is_unmitigated else "mitigated"
         label = f"{'Bullish' if is_bull else 'Bearish'} OB · {status} · {ob['confidence']}%"
         ax.text(x0 + 1, ob["top"] if is_bull else ob["bottom"], label, fontsize=6.5,
-                color=color, fontweight="bold", va="bottom" if is_bull else "top",
-                alpha=0.95 if is_unmitigated else 0.6, zorder=9)
+                color="#ffffff" if is_unmitigated else edge_color, fontweight="bold",
+                va="bottom" if is_bull else "top",
+                alpha=0.95 if is_unmitigated else 0.55, zorder=9)
 
     # --- Pick exactly ONE structure to draw as "the pattern" -------------
     # Priority set upstream in strategies.py (active_pattern): a specific
