@@ -2,8 +2,7 @@
 bot.py
 ======
 Telegram front-end. Two chart-analysis strategies (Trendline, OTE — both
-full 4H -> 1H -> 30M top-down reads). Trendline follows classic
-educational rules (wicks, retest, candlestick confirmation, TradingView position template). plus the live-trading Control Panel
+full 4H -> 1H -> 30M top-down reads) plus the live-trading Control Panel
 (Master switch, Auto/Approval/Mobile-Manual modes, EA heartbeat, lot
 sizing, Account & PnL, Open Positions).
 """
@@ -205,7 +204,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "══════════════════════════════════\n"
         "  TOP-DOWN PRICE-ACTION ENGINE\n"
         "══════════════════════════════════\n\n"
-        "Classic Trendline  •  OTE Fib Fan+Expansion\n"
+        "Trendline Families  •  OTE Fib Fan+Expansion\n"
         "4H → 1H → 30M Top-Down Bias  •  200 EMA Regime\n"
         "Structure Permission  •  MT5 Execution\n\n"
         "──────────────────────────────\n"
@@ -578,7 +577,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "menu_help":
         await query.edit_message_text(
             "ℹ️ HELP & GUIDE\n\n"
-            "📐 Trendline -- classic rules (wicks, 2-3+ touches, retest, confirmation) "
+            "📐 Trendline -- parallel-channel trendline family (or converging "
             "wedge/triangle), entry/SL/TP from liquidity + measured-move "
             "targets. Full 4H → 1H → 30M top-down cascade: 4H sets the macro "
             "regime (200 EMA + structure), 1H grants/denies structure "
