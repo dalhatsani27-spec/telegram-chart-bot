@@ -1184,6 +1184,16 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
     if hz:
         lines.append("Horizontal levels: " + " · ".join(
             f"{l['side'][0].upper()} {l['price']:.5f} ({l['touches']}x)" for l in hz))
+    obs = family.get("order_blocks") or []
+    if obs:
+        ob_lines = []
+        for ob in obs:
+            tag = "UNMITIGATED" if ob["freshness"] == "untested" else "mitigated"
+            ob_lines.append(
+                f"{ob['type'][:4].capitalize()} {ob['bottom']:.5f}-{ob['top']:.5f} "
+                f"({tag}, {ob['confidence']}%)"
+            )
+        lines.append("Order blocks: " + " · ".join(ob_lines))
     mw = family.get("mw_pattern")
     if mw:
         lines.append(f"Pattern: {mw['name']} · neckline {mw['neckline']:.5f}")
