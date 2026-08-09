@@ -285,6 +285,16 @@ def clean_and_normalize_data(df):
     df['Prev_Close'] = df['Close'].shift(1)
     df['TR'] = np.maximum(df['High'] - df['Low'], np.maximum(abs(df['High'] - df['Prev_Close']), abs(df['Low'] - df['Prev_Close'])))
     df['ATR'] = df['TR'].rolling(window=14).mean()
+    # RSI(14) -- Wilder's smoothing. Needed for the "RSI above/below 50"
+    # entry-confirmation rule (image's Core Rules / Confirmation checklist).
+    delta = df['Close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    df['RSI'] = 100 - (100 / (1 + rs))
+    df['RSI'] = df['RSI'].fillna(50.0)  # neutral until enough bars exist
     df.dropna(inplace=True)
     df['EMA20'] = df['Close'].ewm(span=min(20, len(df)), adjust=False).mean()
     df['EMA50'] = df['Close'].ewm(span=min(50, len(df)), adjust=False).mean()
