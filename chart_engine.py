@@ -450,14 +450,10 @@ def generate_trendline_map(
     panel_ax = fig.add_subplot(gs[0, 1])
     ax.set_facecolor(COLORS["bg"])
 
-    mpf.plot(
-        chart_df,
-        type="candle",
-        style=style,
-        volume=False,
-        addplot=addplots if addplots else None,
-        ax=ax,
-    )
+    mpf_kwargs = dict(type="candle", style=style, volume=False, ax=ax)
+    if addplots:
+        mpf_kwargs["addplot"] = addplots
+    mpf.plot(chart_df, **mpf_kwargs)
     ax.set_ylim(price_min - padding, price_max + padding)
 
     # --- ALWAYS map pivot points (structure anchors) ---
