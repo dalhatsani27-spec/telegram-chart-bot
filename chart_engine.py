@@ -11,6 +11,7 @@ zones) used identically by both chart types.
 from __future__ import annotations
 
 import io
+import textwrap
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -120,7 +121,6 @@ def _draw_position_container(ax, pos, chart_len: int):
     sl = pos.get("sl")
     tp1 = pos.get("tp1")
     tp2 = pos.get("tp2")
-    tp3 = pos.get("tp3")
     if entry is None:
         return
 
@@ -140,12 +140,12 @@ def _draw_position_container(ax, pos, chart_len: int):
         ax.axhline(sl, color="#ff1744", linestyle="-", linewidth=2.0, xmin=x0_frac, zorder=4)
         ax.text(x0 + 1, sl, "SL", fontsize=8, color="#ff1744", fontweight="bold", va="top", zorder=12)
         span_vals.append(sl)
-    for tp, tp_label, tp_alpha in ((tp1, "TP1", 1.0), (tp2, "TP2", 0.75), (tp3, "TP3", 0.55)):
+    for tp, tp_label, tp_alpha in ((tp1, "TP1", 1.0), (tp2, "TP2", 0.7)):
         if tp is None:
             continue
         ax.axhspan(min(entry, tp), max(entry, tp), xmin=x0_frac, xmax=1.0,
                    facecolor="#00e676", alpha=0.28 * tp_alpha, zorder=2)
-        ax.axhline(tp, color="#00e676", linestyle=":", linewidth=1.8, xmin=x0_frac, alpha=max(tp_alpha, 0.55), zorder=4)
+        ax.axhline(tp, color="#00e676", linestyle=":", linewidth=1.8, xmin=x0_frac, alpha=max(tp_alpha, 0.6), zorder=4)
         ax.text(x0 + 1, tp, tp_label, fontsize=8, color="#00e676", fontweight="bold", va="bottom", zorder=12)
         span_vals.append(tp)
 
@@ -174,6 +174,171 @@ def _draw_position_container(ax, pos, chart_len: int):
                   edgecolor="#000000", linewidth=1.3),
         zorder=13,
     )
+
+
+def _draw_position_panel(fig, panel_ax, pos: Optional[Dict], reasons: Optional[List[str]] = None):
+    """Side info panel (Entry/SL/TP + confirmation checklist) instead of
+    the text stack overlaid on the candles. Mirrors the reference layout:
+    a colored header, a plain-text readout of the levels, then the actual
+    entry-rule checklist (candle / structure / momentum / RSI) with
+    pass/fail marks -- not just prose notes."""
+    panel_ax.set_facecolor(COLORS["bg"])
+    for spine in panel_ax.spines.values():
+        spine.set_visible(False)
+    panel_ax.set_xticks([])
+    panel_ax.set_yticks([])
+    panel_ax.set_xlim(0, 1)
+    panel_ax.set_ylim(0, 1)
+
+    if not pos or pos.get("entry") is None:
+        panel_ax.text(0.5, 0.5, "No active setup", ha="center", va="center",
+                       color=COLORS["text"], fontsize=9, alpha=0.6)
+        return
+
+    entry = pos.get("entry")
+    sl = pos.get("sl")
+    tp1 = pos.get("tp1")
+    tp2 = pos.get("tp2")
+    tp3 = pos.get("tp3")
+    side = str(pos.get("side") or pos.get("direction") or "").upper()
+    is_long = ("LONG" in side) or (side == "BUY") or ("BULL" in side)
+    confirmed = bool(pos.get("confirmed"))
+    label = ("LONG" if is_long else "SHORT") if confirmed else "WAIT"
+    # Core Rule: "never force a trade" -- an unconfirmed geometric bias
+    # gets an amber WAIT header instead of a green/red LONG/SHORT one, so
+    # it visually reads as "not yet", not as a live signal.
+    box_color = ("#00e676" if is_long else "#ff1744") if confirmed else "#ffab00"
+
+    risk = abs(entry - sl) if sl is not None else None
+    # Prefer the pre-computed R:R from build_position_container -- it's
+    # quoted against TP2 (a real "next resistance/support" target), not
+    # TP1 (a deliberately-close first partial), so it doesn't make every
+    # setup look worse than the actual plan by dividing by the smallest target.
+    if pos.get("rr") is not None:
+        rr_txt = f"R:R 1:{pos['rr']:.1f}"
+    else:
+        reward = abs((tp1 if tp1 is not None else tp2) - entry) if (tp1 is not None or tp2 is not None) else None
+        rr_txt = f"R:R 1:{(reward / risk):.1f}" if risk and reward else ""
+
+    def fmt(p):
+        return f"{p:.5f}" if p < 100 else f"{p:.2f}"
+
+    y = 0.97
+    panel_ax.add_patch(mpatches.FancyBboxPatch(
+        (0.03, y - 0.05), 0.94, 0.05, boxstyle="round,pad=0.01",
+        facecolor=box_color, edgecolor="none", alpha=0.95,
+        transform=panel_ax.transAxes, zorder=5))
+    panel_ax.text(0.5, y - 0.025, f"{label}  {rr_txt}", ha="center", va="center",
+                   fontsize=11, fontweight="bold",
+                   color="#000000" if (is_long or not confirmed) else "#ffffff", zorder=6)
+    y -= 0.09
+
+    rows = [("ENTRY", entry, COLORS["entry"], None)]
+    if tp3 is not None:
+        rows.append(("TP3", tp3, "#00e676", "RR 1:2/1:3 target"))
+    if tp2 is not None:
+        rows.append(("TP2", tp2, "#00e676", "next resistance/support"))
+    if tp1 is not None:
+        tp1_rr = pos.get("rr_tp1")
+        rows.append(("TP1", tp1, "#00e676", f"partial, RR 1:{tp1_rr:.1f}" if tp1_rr is not None else "partial target"))
+    if sl is not None:
+        rows.append(("STOP LOSS", sl, "#ff1744", None))
+
+    for name, price, color, note in rows:
+        panel_ax.text(0.05, y, name, fontsize=8.5, fontweight="bold", color=color, va="top")
+        panel_ax.text(0.95, y, fmt(price), fontsize=8.5, color=color, va="top", ha="right")
+        y -= 0.036
+        if note:
+            panel_ax.text(0.05, y, note, fontsize=6.3, color=color, va="top", alpha=0.65)
+            y -= 0.03
+        y -= 0.012
+
+    y -= 0.025
+    panel_ax.axhline(y, xmin=0.03, xmax=0.97, color=COLORS["grid"], linewidth=1, alpha=0.6)
+    y -= 0.045
+
+    # --- Entry rules checklist (the actual "Confirmation" section from
+    # the reference image: candle pattern / structure break / momentum /
+    # RSI vs 50), rendered as pass/fail marks, not prose. ---
+    entry_rules = pos.get("entry_rules")
+    panel_ax.text(0.05, y, "ENTRY RULES", fontsize=8, fontweight="bold",
+                   color=COLORS["text"], va="top", alpha=0.9)
+    y -= 0.042
+    check_labels = {
+        "candle": "Candle confirmation",
+        "structure": "Break of minor structure",
+        "momentum": "Volume / momentum",
+        "rsi": "RSI confirms direction",
+    }
+    if entry_rules:
+        for key, title in check_labels.items():
+            ok, detail = entry_rules["checks"].get(key, (False, ""))
+            mark = "✓" if ok else "✗"
+            mark_color = "#00e676" if ok else "#78828e"
+            panel_ax.text(0.05, y, mark, fontsize=8.5, fontweight="bold", color=mark_color, va="top")
+            panel_ax.text(0.12, y, title, fontsize=7.3, color=COLORS["text"], va="top", alpha=0.9)
+            y -= 0.036
+            if detail:
+                for line in textwrap.wrap(str(detail), width=32)[:1]:
+                    panel_ax.text(0.12, y, line, fontsize=6.5, color=COLORS["text"], va="top", alpha=0.6)
+                    y -= 0.032
+            y -= 0.006
+        y -= 0.012
+        panel_ax.text(0.05, y, f"{entry_rules['passed']}/4 checks passed"
+                       f" (need {entry_rules['required']}+)",
+                       fontsize=7, fontweight="bold", va="top",
+                       color="#00e676" if confirmed else "#ffab00")
+        y -= 0.05
+    else:
+        panel_ax.text(0.05, y, "n/a", fontsize=7.3, color=COLORS["text"], va="top", alpha=0.6)
+        y -= 0.05
+
+    y -= 0.01
+    panel_ax.axhline(y, xmin=0.03, xmax=0.97, color=COLORS["grid"], linewidth=1, alpha=0.6)
+    y -= 0.045
+
+    panel_ax.text(0.05, y, "NOTES", fontsize=8, fontweight="bold",
+                   color=COLORS["text"], va="top", alpha=0.85)
+    y -= 0.042
+    # Skip the entry-confirmation reason here -- it's already shown in
+    # full detail by the checklist above; just show the structural notes.
+    other_reasons = [r for r in (reasons or []) if not str(r).startswith(("Entry confirmed", "⚠ Entry"))]
+    for note in other_reasons[:2]:
+        wrapped = textwrap.wrap(str(note), width=32)
+        for line in wrapped[:2]:
+            panel_ax.text(0.05, y, f"• {line}" if line == wrapped[0] else f"  {line}",
+                           fontsize=7, color=COLORS["text"], va="top", alpha=0.8)
+            y -= 0.034
+        y -= 0.01
+        if y < 0.03:
+            break
+
+
+def _draw_price_reference_lines(ax, pos: Optional[Dict], chart_len: int):
+    """Thin dashed lines + shaded risk/reward zones only -- no text, no
+    banner. The actual numbers live in the side panel now, so the chart
+    itself just shows where those levels sit relative to price action."""
+    if not pos or pos.get("entry") is None:
+        return
+    entry = pos.get("entry")
+    sl = pos.get("sl")
+    tp1 = pos.get("tp1")
+    tp2 = pos.get("tp2")
+    tp3 = pos.get("tp3")
+    x0_frac = 0.82
+
+    if sl is not None:
+        ax.axhspan(min(entry, sl), max(entry, sl), xmin=x0_frac, xmax=1.0,
+                   facecolor="#ff1744", alpha=0.16, zorder=2)
+        ax.axhline(sl, color="#ff1744", linestyle="-", linewidth=1.4, xmin=x0_frac, zorder=4)
+    for tp, tp_alpha in ((tp1, 1.0), (tp2, 0.6), (tp3, 0.35)):
+        if tp is None:
+            continue
+        ax.axhspan(min(entry, tp), max(entry, tp), xmin=x0_frac, xmax=1.0,
+                   facecolor="#00e676", alpha=0.14 * tp_alpha, zorder=2)
+        ax.axhline(tp, color="#00e676", linestyle=":", linewidth=1.3, xmin=x0_frac,
+                   alpha=max(tp_alpha, 0.55), zorder=4)
+    ax.axhline(entry, color=COLORS["entry"], linestyle="--", linewidth=1.6, xmin=x0_frac, zorder=5)
 
 
 def _draw_vp_histogram(ax, vp, chart_len: int, price_min: float, price_max: float):
@@ -253,16 +418,13 @@ def generate_trendline_map(
         figcolor=COLORS["bg"],
     )
 
+    # NOTE: the old code plotted upper_line/middle_line/lower_line here via
+    # mplfinance addplot AND ALSO drew the same rails again further down via
+    # ax.plot() in the "family rails" loop -- the channel was being drawn
+    # twice on top of itself, which is a big part of why the map looked
+    # noisy. We now draw the pattern/channel exactly once, further down,
+    # after we've decided which single pattern actually gets the chart.
     addplots = []
-    for key, color, ls, w in [
-        ("upper_line", COLORS["trendline"], "-", 1.7),
-        ("middle_line", "#ff9800", "--", 1.15),
-        ("lower_line", COLORS["trendline"], "-", 1.7),
-    ]:
-        arr = family.get(key)
-        if arr is not None and len(arr) >= chart_len:
-            series = pd.Series(arr[-chart_len:], index=chart_df.index)
-            addplots.append(mpf.make_addplot(series, color=color, width=w, linestyle=ls))
 
     # Expand ylim for projections / position
     price_min = float(chart_df["Low"].min())
@@ -270,29 +432,33 @@ def generate_trendline_map(
     for p in (family.get("projections") or []):
         price_min = min(price_min, float(p["price"]))
         price_max = max(price_max, float(p["price"]))
-    for key in ("entry", "sl", "tp1", "tp2", "tp3"):
+    for key in ("entry", "sl", "tp1", "tp2"):
         if setup.get(key) is not None:
             price_min = min(price_min, float(setup[key]))
             price_max = max(price_max, float(setup[key]))
     pos = setup.get("position") or family.get("position")
     if pos:
-        for key in ("entry", "sl", "tp1", "tp2", "tp3"):
+        for key in ("entry", "sl", "tp1", "tp2"):
             if pos.get(key) is not None:
                 price_min = min(price_min, float(pos[key]))
                 price_max = max(price_max, float(pos[key]))
     padding = (price_max - price_min) * 0.10 or 0.0005
 
-    fig, axlist = mpf.plot(
+    fig = plt.figure(figsize=(15.4, 7.6), facecolor=COLORS["bg"])
+    gs = fig.add_gridspec(1, 2, width_ratios=[3.3, 1.0], wspace=0.03)
+    ax = fig.add_subplot(gs[0, 0])
+    panel_ax = fig.add_subplot(gs[0, 1])
+    ax.set_facecolor(COLORS["bg"])
+
+    mpf.plot(
         chart_df,
         type="candle",
         style=style,
         volume=False,
         addplot=addplots if addplots else None,
-        returnfig=True,
-        figsize=(13.2, 7.4),
-        ylim=(price_min - padding, price_max + padding),
+        ax=ax,
     )
-    ax = axlist[0]
+    ax.set_ylim(price_min - padding, price_max + padding)
 
     # --- ALWAYS map pivot points (structure anchors) ---
     pivots = family.get("pivots") or []
@@ -302,51 +468,83 @@ def generate_trendline_map(
             pivots = zigzag_swings(df, depth=4, deviation_atr=0.28)
         except Exception:
             pivots = []
-    # LOCKED clean style (match hand-drawn maps): NO HH/HL spam, no zigzag skeleton
-    # Only subtle markers on the few pivots that anchor the rails
 
-    # Clean parallel family only (MT5-style rails — anchored on pivots)
     def _line_at(tl, x):
         x0, y0, x1, y1 = tl["x0"], tl["y0"], tl["x1"], tl["y1"]
         if x1 == x0:
             return y0
         return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
 
-    family_kind = family.get("family_kind", "")
-    rail_color = "#26a69a" if family_kind == "ascending" else "#ef5350"
-    rails = family.get("family_lines") or []
-    if not rails:
-        if family.get("channel"):
-            rails = [family["channel"].get("lower"), family["channel"].get("upper")]
-            rails = [r for r in rails if r]
-    for i, tl in enumerate(rails[:3]):
-        if not tl:
-            continue
-        xs = [max(0, int(tl["x0"]) - offset), chart_len - 1]
-        ys = [_line_at(tl, max(int(tl["x0"]), 0)), float(tl.get("y_end", tl.get("y1", 0)))]
-        if xs[0] < chart_len:
-            lw = 1.8 if i in (0, len(rails) - 1) else 1.2
-            ax.plot(xs, ys, color=rail_color, linewidth=lw, alpha=0.92, zorder=4)
-        # Mark the two pivot anchors of the primary rail
-        if i == 0:
-            for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
-                if ax_key in tl and ay_key in tl:
-                    px = int(tl[ax_key]) - offset
-                    if 0 <= px < chart_len:
-                        ax.scatter([px], [float(tl[ay_key])], s=55, c=rail_color,
-                                   edgecolors="#ffffff", linewidths=1.0, zorder=11, marker="D")
+    def _pivot_dot(px, py, text, color, offset_idx=0):
+        """Single small dot + one-word label, offset so it never stacks
+        with other annotations (matches the reference 'Upper'/'Lower'
+        pivot-map style instead of dense boxed text). offset_idx staggers
+        the label vertically when two pivots land close together (e.g. a
+        tight double top/bottom) so the words don't print on top of each other."""
+        if not (0 <= px < chart_len):
+            return
+        ax.scatter([px], [py], s=46, c="#ffffff", edgecolors=color, linewidths=1.6, zorder=11)
+        y_off = 9 + offset_idx * 11
+        ax.annotate(text, (px, py), fontsize=7.5, color="#e8e8e8", fontweight="bold",
+                    xytext=(0, y_off), textcoords="offset points", ha="center", zorder=12)
 
-    # Converging wedge/triangle: two independent-slope rails, NOT the
-    # same-slope parallel family above. Rendered separately because they
-    # represent a different structure (rails meeting at an apex) than a
-    # parallel channel, and the old code had no path for this at all.
+    family_kind = family.get("family_kind", "")
+    bias_color = "#00e676" if family_kind == "ascending" else "#ff5252"
+
+    # --- Order block zones -- "likely to be respected" ones only (see
+    # detect_order_blocks: structure-confirmed, decent displacement, not
+    # already invalidated). Drawn as translucent boxes from where the zone
+    # formed out to the current bar, color-coded so bullish (demand) reads
+    # green and bearish (supply) reads red rather than one flat color.
+    for ob in (family.get("order_blocks") or []):
+        x0 = int(ob["formed_index"]) - offset
+        if x0 >= chart_len:
+            continue
+        x0 = max(0, x0)
+        is_bull = ob["type"] == "bullish"
+        color = "#26a69a" if is_bull else "#ef5350"
+        alpha = 0.30 if ob["grade"] == "strong" else 0.16
+        ax.add_patch(mpatches.Rectangle(
+            (x0, ob["bottom"]), (chart_len - 1 - x0), (ob["top"] - ob["bottom"]),
+            facecolor=color, edgecolor=color, linewidth=0.8, alpha=alpha, zorder=1))
+        label = f"{'Bullish' if is_bull else 'Bearish'} OB {ob['confidence']}%"
+        ax.text(x0 + 1, ob["top"] if is_bull else ob["bottom"], label, fontsize=6.5,
+                color=color, fontweight="bold", va="bottom" if is_bull else "top", alpha=0.9, zorder=9)
+
+    # --- Pick exactly ONE structure to draw as "the pattern" -------------
+    # Priority set upstream in strategies.py (active_pattern): a specific
+    # named reversal (M/W) beats a converging wedge/triangle beats a plain
+    # parallel channel. Whichever it is, it's the only shape drawn here --
+    # no more wedge + neckline + channel stacked on the same candles.
+    active_pattern = family.get("active_pattern", "none")
+    pattern_title = None
+    pattern_conf = family.get("pattern_confidence")
+
     wedge = family.get("wedge")
-    if wedge:
-        for rail, color in ((wedge["lower"], "#26a69a"), (wedge["upper"], "#ef5350")):
+    mw = family.get("mw_pattern")
+
+    if active_pattern == "mw" and mw and mw.get("neckline") is not None:
+        pattern_title = mw.get("name", "M/W Pattern")
+        # Neckline: one line, extended to the chart edge (the level to watch)
+        neck_x0 = max(0, int(mw.get("neck_index", 0)) - offset)
+        ax.plot([neck_x0, chart_len - 1], [mw["neckline"], mw["neckline"]],
+                color="#ff9800", linestyle="--", linewidth=1.4, alpha=0.85, zorder=5)
+        ax.text(chart_len * 0.015, mw["neckline"], "Neckline", fontsize=7.5,
+                color="#ffb74d", fontweight="bold", va="bottom", zorder=12)
+        # The two matching peaks/troughs that define the pattern
+        left, right = mw.get("left"), mw.get("right")
+        tag = "Top" if mw["pattern"] == "M" else "Bottom"
+        close_x = (left and right and abs(int(left["index"]) - int(right["index"])) < chart_len * 0.05)
+        for i, p in enumerate((left, right)):
+            if p:
+                px = int(p["index"]) - offset
+                _pivot_dot(px, float(p["price"]), tag, "#ff9800", offset_idx=(i if close_x else 0))
+
+    elif active_pattern == "wedge" and wedge:
+        pattern_title = wedge["pattern"]
+        apex = wedge.get("apex_index")
+        for rail, color, tag in ((wedge["lower"], "#26a69a", "Lower"), (wedge["upper"], "#ef5350", "Upper")):
             x0 = max(0, int(rail["x0"]) - offset)
-            # Extend to the apex (or chart edge, whichever comes first) so
-            # the convergence is visible, matching how it's drawn by hand.
-            apex = wedge.get("apex_index")
             x1 = chart_len - 1
             if apex is not None:
                 apex_local = apex - offset
@@ -355,19 +553,60 @@ def generate_trendline_map(
             y0 = _line_at(rail, max(int(rail["x0"]), 0))
             y1 = _line_at(rail, x1 + offset)
             if x0 < chart_len:
-                ax.plot([x0, x1], [y0, y1], color=color, linewidth=1.8, alpha=0.95, zorder=4)
-        label_x = max(0, int(wedge["lower"]["x0"]) - offset)
-        label_y = wedge["lower"]["y0"]
-        ax.text(label_x, label_y, wedge["pattern"], fontsize=8, color="#ffffff",
-                fontweight="bold", va="top", zorder=12,
-                bbox=dict(boxstyle="round,pad=0.2", fc="#1c202a", ec="none", alpha=0.8))
+                ax.plot([x0, x1], [y0, y1], color=color, linewidth=1.7, alpha=0.9, zorder=4)
+            # Label only the two real pivots that anchor this rail
+            for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
+                px = int(rail[ax_key]) - offset
+                _pivot_dot(px, float(rail[ay_key]), tag, color)
 
-    # M/W neckline (double top / double bottom)
-    mw = family.get("mw_pattern")
-    if mw and mw.get("neckline") is not None:
-        ax.axhline(mw["neckline"], color="#ff9800", linestyle="--", linewidth=1.1, alpha=0.70, zorder=5)
-        ax.text(chart_len * 0.02, mw["neckline"], f"NECKLINE ({mw.get('pattern', '')})",
-                fontsize=7.5, color="#ffb74d", fontweight="bold", va="bottom")
+    elif active_pattern == "channel" and family.get("channel"):
+        pattern_title = f"{family_kind.capitalize()} Channel" if family_kind != "none" else "Channel"
+        ch = family["channel"]
+        for rail, tag in ((ch.get("lower"), "Lower"), (ch.get("upper"), "Upper")):
+            if not rail:
+                continue
+            x0 = max(0, int(rail["x0"]) - offset)
+            y0 = _line_at(rail, max(int(rail["x0"]), 0))
+            y1 = float(rail.get("y_end", rail.get("y1", 0)))
+            if x0 < chart_len:
+                ax.plot([x0, chart_len - 1], [y0, y1], color=bias_color, linewidth=1.4, alpha=0.75, zorder=4)
+
+    # --- Directional bias trendline: ALWAYS drawn on top -------------
+    # Connects swing lows in an uptrend / swing highs in a downtrend --
+    # this is the single line that answers "what's the bias", independent
+    # of whichever pattern shape (if any) is drawn above.
+    primary = (family.get("uptrends") or family.get("downtrends") or [None])[0]
+    if primary:
+        x0 = max(0, int(primary["x0"]) - offset)
+        y0 = _line_at(primary, max(int(primary["x0"]), 0))
+        y1 = float(primary.get("y_end", primary.get("y1", 0)))
+        if x0 < chart_len:
+            ax.plot([x0, chart_len - 1], [y0, y1], color="#ffd600", linestyle="--",
+                     linewidth=2.2, alpha=0.95, zorder=8)
+        end_pts_x = set()
+        for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
+            px = int(primary[ax_key]) - offset
+            end_pts_x.add(px)
+            if 0 <= px < chart_len:
+                ax.scatter([px], [float(primary[ay_key])], s=60, c="#ffd600",
+                           edgecolors="#000000", linewidths=1.0, zorder=11, marker="D")
+        # Every other wick that actually touched the line -- small hollow
+        # circles, like a trader circling each bounce off the trendline.
+        # Capped and evenly re-sampled so a very tight/long-lived line
+        # (dozens of touches) still reads as "circled bounces", not a
+        # second solid line drawn out of overlapping markers.
+        touches = [tp for tp in (family.get("bias_touch_points") or [])
+                   if (int(tp["index"]) - offset) not in end_pts_x]
+        MAX_TOUCH_MARKERS = 10
+        if len(touches) > MAX_TOUCH_MARKERS:
+            step = len(touches) / MAX_TOUCH_MARKERS
+            touches = [touches[int(i * step)] for i in range(MAX_TOUCH_MARKERS)]
+        for tp in touches:
+            px = int(tp["index"]) - offset
+            if not (0 <= px < chart_len):
+                continue
+            ax.scatter([px], [float(tp["price"])], s=42, facecolors="none",
+                       edgecolors="#ffd600", linewidths=1.4, zorder=10)
 
     # Discrete pattern-scanner output (Double Top/Bottom, H&S, Triangle,
     # Wedge, Flag, Rectangle -- from patterns.py). This payload shape is
@@ -432,47 +671,13 @@ def generate_trendline_map(
     except Exception:
         pass
 
-    # Fibonacci pullback levels (for trend entries) — 0.5 / 0.618 / 0.705 / 0.79
-    # Anchored to the last clear impulse leg from non-ranging pivots
-    try:
-        direction = str(family.get("direction") or setup.get("direction") or "").upper()
-        if direction in ("BUY", "SELL", "LONG", "SHORT", "BULLISH", "BEARISH") and pivots and len(pivots) >= 2:
-            # Last impulse: previous swing -> latest swing in trend direction
-            leg = pivots[-2:]
-            a, b = leg[0], leg[1]
-            hi = max(float(a["price"]), float(b["price"]))
-            lo = min(float(a["price"]), float(b["price"]))
-            span = hi - lo
-            if span > 0:
-                # Standard ICT/SMC OTE-style pullback zone
-                fibs = [
-                    (0.50, "0.5"),
-                    (0.618, "0.618"),
-                    (0.705, "0.705"),
-                    (0.79, "0.79"),
-                ]
-                is_buy = direction in ("BUY", "LONG", "BULLISH")
-                for ratio, label in fibs:
-                    if is_buy:
-                        # Pullback down into discount of bullish impulse
-                        price = hi - span * ratio
-                    else:
-                        # Pullback up into premium of bearish impulse
-                        price = lo + span * ratio
-                    ax.axhline(price, color="#ab47bc", linestyle=":", linewidth=0.95, alpha=0.75, zorder=3)
-                    ax.text(chart_len * 0.70, price, f"Fib {label}", fontsize=6.5,
-                            color="#ce93d8", va="bottom", alpha=0.9)
-                # Highlight OTE band (0.618–0.79) lightly
-                if is_buy:
-                    ote_top = hi - span * 0.618
-                    ote_bot = hi - span * 0.79
-                else:
-                    ote_bot = lo + span * 0.618
-                    ote_top = lo + span * 0.79
-                ax.axhspan(min(ote_bot, ote_top), max(ote_bot, ote_top),
-                           facecolor="#ab47bc", alpha=0.06, zorder=1)
-    except Exception:
-        pass
+    # Fibonacci pullback levels intentionally NOT drawn on this chart.
+    # They anchor near the last impulse leg -- i.e. right next to current
+    # price -- which is exactly where the entry/SL/TP box also sits, so
+    # they were the main cause of the illegible "0.5 / 0.618 / ..." text
+    # pile-up over the signal box. The OTE chart (generate_ote_map) is the
+    # dedicated place for fib levels; keep this chart to pattern + bias +
+    # position only.
 
     # Volume Profile — keep POC + Value Area (useful), no heavy histogram clutter
     vp = family.get("volume_profile") or setup.get("volume_profile")
@@ -489,7 +694,7 @@ def generate_trendline_map(
             ax.text(chart_len * 0.01, vp["value_area_high"], "VA-H", fontsize=6, color="#ffb74d", va="bottom")
             ax.text(chart_len * 0.01, vp["value_area_low"], "VA-L", fontsize=6, color="#ffb74d", va="top")
 
-    # TradingView-style position container (R:R) — projection levels
+    # Position: thin reference lines on the chart, full readout in the side panel
     pos = setup.get("position") or family.get("position")
     if not pos and setup.get("entry") is not None:
         pos = {
@@ -497,19 +702,27 @@ def generate_trendline_map(
             "tp1": setup.get("tp1"), "tp2": setup.get("tp2"),
             "side": setup.get("direction", ""),
         }
-    _draw_tv_position_box(ax, pos, chart_len)
+    _draw_price_reference_lines(ax, pos, chart_len)
+    _draw_position_panel(fig, panel_ax, pos, family.get("reasons"))
 
     _draw_session_separators(ax, chart_df, chart_len)
 
     direction = family.get("direction") or setup.get("direction", "")
     strength = family.get("strength") or setup.get("confidence") or setup.get("score") or 0
-    ax.set_title(
-        f"{symbol}  TRENDLINE FAMILY  |  TF: 30m  |  {title_suffix}  |  {direction}  |  Str {strength:.0f}",
+    line1 = f"{symbol}  |  TF: 30m  |  {title_suffix}  |  {direction}  |  Str {strength:.0f}"
+    if pattern_title:
+        conf = pattern_conf if pattern_conf is not None else strength
+        line2 = f"Pattern: {pattern_title}  |  Confidence: {conf:.0f}%"
+    else:
+        line2 = "No named pattern — trading directional bias only"
+    fig.suptitle(
+        f"{line1}\n{line2}",
         color=COLORS["text"],
         fontsize=9.5,
         fontweight="bold",
-        pad=10,
+        y=0.99,
     )
+
 
     img_buf = io.BytesIO()
     fig.savefig(img_buf, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())
