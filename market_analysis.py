@@ -414,6 +414,158 @@ def analyse_structure(df, left=3, right=3, lookback=80):
     }
 
 
+def detect_order_blocks(df, left=3, right=3, lookback=150, max_per_side=2,
+                        min_confidence=45):
+    """
+    Order blocks: the last opposite-colored candle before a strong
+    displacement move that breaks market structure.
+
+    This is NOT "find every big candle" -- an order block is only kept if
+    it's actually "likely to be respected":
+      1. It caused a confirmed structure break (BOS) -- the impulse leaving
+         it was strong enough to take out a prior swing high/low, not just
+         a big wick that went nowhere.
+      2. Displacement strength: how far price moved (in ATR) leaving the
+         zone -- weak displacement = weak zone.
+      3. Freshness: has price come back to the zone since it formed?
+         - untested  -> highest quality, nothing has challenged it yet
+         - tested-held -> price returned and respected it (bounced/rejected)
+           -- actually a *positive* signal, the zone proved itself
+         - broken -> a candle closed all the way through it -> DISCARDED,
+           a broken zone isn't "likely to be respected", it already wasn't
+      4. Zone tightness -- a huge sprawling range is a worse zone than a
+         tight one.
+
+    Returns list of dicts, most relevant first (nearest to current price),
+    capped at max_per_side per direction so the chart doesn't fill up with
+    marginal zones:
+      type            : 'bullish' | 'bearish'
+      top / bottom    : zone price bounds
+      formed_index    : bar index of the OB candle
+      break_index     : bar index of the structure break it caused
+      displacement_atr: strength of the move away from the zone
+      freshness       : 'untested' | 'tested-held'
+      confidence      : 0-100
+      grade           : 'strong' | 'moderate'
+    """
+    if df is None or len(df) < left + right + 20:
+        return []
+
+    n = len(df)
+    start = max(0, n - lookback)
+    opens = df["Open"].values
+    closes = df["Close"].values
+    highs = df["High"].values
+    lows = df["Low"].values
+    atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).rolling(14, min_periods=1).mean().values
+
+    swings = [s for s in find_swings(df, left=left, right=right) if s["index"] >= start]
+    if len(swings) < 2:
+        return []
+
+    # Raw structure-break events: a close beyond a prior swing high/low.
+    # (Deliberately simpler than analyse_structure's full CHoCH/MSS state
+    # machine -- for order-block purposes we just need "structure broke,
+    # here, in this direction", not the BOS/CHoCH/MSS labeling.)
+    breaks = []
+    last_high = None
+    last_low = None
+    for sw in swings:
+        if sw["type"] == "high":
+            if last_high is not None:
+                for j in range(sw["index"], min(sw["index"] + 40, n)):
+                    if closes[j] > last_high["price"]:
+                        breaks.append({"index": j, "bias": "BULLISH", "level": last_high["price"]})
+                        break
+            last_high = sw
+        else:
+            if last_low is not None:
+                for j in range(sw["index"], min(sw["index"] + 40, n)):
+                    if closes[j] < last_low["price"]:
+                        breaks.append({"index": j, "bias": "BEARISH", "level": last_low["price"]})
+                        break
+            last_low = sw
+
+    candidates = []
+    seen_ob_idx = set()
+    for brk in breaks:
+        b = brk["index"]
+        bias = brk["bias"]
+        # Find the origin candle: last opposite-colored candle in the
+        # short window before the break bar.
+        ob_idx = None
+        for idx in range(b, max(0, b - 8), -1):
+            is_down = closes[idx] < opens[idx]
+            is_up = closes[idx] > opens[idx]
+            if bias == "BULLISH" and is_down:
+                ob_idx = idx
+                break
+            if bias == "BEARISH" and is_up:
+                ob_idx = idx
+                break
+        if ob_idx is None or ob_idx in seen_ob_idx:
+            continue
+        seen_ob_idx.add(ob_idx)
+
+        top = float(highs[ob_idx])
+        bottom = float(lows[ob_idx])
+        if top <= bottom:
+            continue
+        a = float(atr[b]) if b < len(atr) and atr[b] > 0 else (top - bottom)
+        displacement_atr = abs(closes[min(b + 1, n - 1)] - closes[ob_idx]) / a if a > 0 else 0.0
+        width_atr = (top - bottom) / a if a > 0 else 99
+
+        # Freshness: has price returned into the zone since it formed?
+        # A close all the way through invalidates it outright.
+        freshness = "untested"
+        broken = False
+        for k in range(min(b + 2, n), n):
+            if bias == "BULLISH":
+                if closes[k] < bottom:
+                    broken = True
+                    break
+                if lows[k] <= top:
+                    freshness = "tested-held"
+            else:
+                if closes[k] > top:
+                    broken = True
+                    break
+                if highs[k] >= bottom:
+                    freshness = "tested-held"
+        if broken:
+            continue
+
+        body_ratio = abs(closes[ob_idx] - opens[ob_idx]) / max(top - bottom, 1e-9)
+
+        score = 0.0
+        score += min(40, displacement_atr * 20)
+        score += 25 if freshness == "untested" else 14
+        score += 15  # always structure-confirmed by construction
+        score += 10 if body_ratio < 0.55 else 0
+        score += 10 if width_atr < 1.5 else 0
+        confidence = max(0, min(100, int(round(score))))
+        if confidence < min_confidence:
+            continue
+
+        candidates.append({
+            "type": "bullish" if bias == "BULLISH" else "bearish",
+            "top": top,
+            "bottom": bottom,
+            "formed_index": ob_idx,
+            "break_index": b,
+            "displacement_atr": round(displacement_atr, 2),
+            "freshness": freshness,
+            "confidence": confidence,
+            "grade": "strong" if confidence >= 65 else "moderate",
+        })
+
+    # Nearest-to-current-price first within each side, capped so the chart
+    # only shows the zones actually worth reacting to.
+    bullish = sorted([c for c in candidates if c["type"] == "bullish"], key=lambda c: -c["formed_index"])[:max_per_side]
+    bearish = sorted([c for c in candidates if c["type"] == "bearish"], key=lambda c: -c["formed_index"])[:max_per_side]
+    return sorted(bullish + bearish, key=lambda c: c["formed_index"])
+
+
 def structure_trade_permission(htf_bias, structure):
     """
     Decide trade permission from structure confirmation.
