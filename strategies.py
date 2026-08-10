@@ -784,7 +784,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # bearish supply OB, or vice versa, with zero acknowledgement of it.
     # Compute once here, before the return, and let it push back on
     # whatever the trendline geometry decided.
-    order_blocks = detect_order_blocks(df)
+    order_blocks = detect_order_blocks(df, lookback=len(df))
     active_ob = None
     for ob in order_blocks:
         if float(ob["bottom"]) <= close <= float(ob["top"]):
@@ -1042,11 +1042,10 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
                 tp3_basis = f"next liquidity level (RR 1:{cand_rr:.1f})"
                 break
 
-        # Full draw target: an untouched bearish OB above is where a BUY is
-        # actually being drawn to -- the real magnet, not just the next
-        # swing high. When one exists beyond the current tp3 candidate,
-        # extend the final target out to its near edge (the bottom of the
-        # zone, since that's what price reaches first).
+        # Full draw target: an untouched bearish OB above, or the volume
+        # profile POC if it sits further out than either, is where a BUY
+        # is actually being drawn to -- take whichever real magnet is
+        # farthest beyond wherever the liquidity/RR math landed.
         obs = family.get("order_blocks") or []
         magnet = [ob for ob in obs if ob["type"] == "bearish" and ob["freshness"] == "untested"
                   and float(ob["bottom"]) > entry]
@@ -1056,6 +1055,10 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             if magnet_edge > tp3:
                 tp3 = magnet_edge
                 tp3_basis = f"unmitigated bearish OB @ {magnet_edge:.5f} ({nearest_magnet['confidence']}%)"
+        poc = vp.get("poc_price")
+        if poc is not None and float(poc) > entry and float(poc) > tp3:
+            tp3 = float(poc)
+            tp3_basis = f"POC magnet @ {tp3:.5f}"
 
         return {
             "side": "LONG",
@@ -1139,11 +1142,10 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
                 tp3_basis = f"next liquidity level (RR 1:{cand_rr:.1f})"
                 break
 
-        # Full draw target: an untouched bullish OB below is where a SELL
-        # is actually being drawn to -- the real magnet, not just the next
-        # swing low. When one exists beyond the current tp3 candidate,
-        # extend the final target down to its near edge (the top of the
-        # zone, since that's what price reaches first).
+        # Full draw target: an untouched bullish OB below, or the volume
+        # profile POC if it sits further out than either, is where a SELL
+        # is actually being drawn to -- take whichever real magnet is
+        # farthest beyond wherever the liquidity/RR math landed.
         obs = family.get("order_blocks") or []
         magnet = [ob for ob in obs if ob["type"] == "bullish" and ob["freshness"] == "untested"
                   and float(ob["top"]) < entry]
@@ -1153,6 +1155,10 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             if magnet_edge < tp3:
                 tp3 = magnet_edge
                 tp3_basis = f"unmitigated bullish OB @ {magnet_edge:.5f} ({nearest_magnet['confidence']}%)"
+        poc = vp.get("poc_price")
+        if poc is not None and float(poc) < entry and float(poc) < tp3:
+            tp3 = float(poc)
+            tp3_basis = f"POC magnet @ {tp3:.5f}"
 
         return {
             "side": "SHORT",
