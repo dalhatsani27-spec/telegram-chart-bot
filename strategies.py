@@ -356,11 +356,20 @@ def _detect_mw_pattern(pivots, df):
     Detect simple M (double top) or W (double bottom) and neckline.
     M: two swing highs near same price, neckline = swing low between them.
     W: two swing lows near same price, neckline = swing high between them.
+
+    Strict rules (aligned with market_analysis.detect_double_top/bottom):
+    - Peaks/troughs must be within ~0.55% of each other (relative).
+    - For M: the second high must not be meaningfully higher than the first
+      (higher-high = continuation, not Double Top).
+    - For W: the second low must not be meaningfully lower than the first.
+    - Minimum bar separation and meaningful depth required.
     """
     if not pivots or len(pivots) < 3 or df is None or len(df) < 20:
         return None
     atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
-    tol = max(atr * 0.35, 1e-9)
+    atr = max(atr, 1e-9)
+    max_rel_diff = 0.0055  # ~0.55% — matches the stricter classic detector
+    min_bars = 6
     highs = [p for p in pivots if p["type"] == "high"]
     lows = [p for p in pivots if p["type"] == "low"]
 
@@ -368,37 +377,61 @@ def _detect_mw_pattern(pivots, df):
     if len(highs) >= 2:
         for i in range(len(highs) - 1, 0, -1):
             h2, h1 = highs[i], highs[i - 1]
-            if abs(h2["price"] - h1["price"]) <= tol and h2["index"] > h1["index"]:
-                between = [p for p in lows if h1["index"] < p["index"] < h2["index"]]
-                if between:
-                    neck = min(between, key=lambda p: p["price"])
-                    return {
-                        "pattern": "M",
-                        "name": "Double Top (M)",
-                        "left": h1, "right": h2,
-                        "neckline": neck["price"],
-                        "neck_index": neck["index"],
-                        "bias": "SELL",
-                        "note": f"M pattern — neckline at {neck['price']:.5f}",
-                    }
+            if h2["index"] <= h1["index"] or (h2["index"] - h1["index"]) < min_bars:
+                continue
+            p1, p2 = float(h1["price"]), float(h2["price"])
+            rel = abs(p2 - p1) / max(abs(p1), 1e-9)
+            if rel > max_rel_diff:
+                continue
+            # Reject higher-high continuation (second top clearly above first)
+            if p2 > p1 * 1.0015:  # >0.15% higher → not a Double Top
+                continue
+            between = [p for p in lows if h1["index"] < p["index"] < h2["index"]]
+            if not between:
+                continue
+            neck = min(between, key=lambda p: p["price"])
+            depth = max(p1, p2) - float(neck["price"])
+            if depth < 0.9 * atr:
+                continue
+            return {
+                "pattern": "M",
+                "name": "Double Top (M)",
+                "left": h1, "right": h2,
+                "neckline": neck["price"],
+                "neck_index": neck["index"],
+                "bias": "SELL",
+                "note": f"M pattern — neckline at {neck['price']:.5f} (peaks within {rel*100:.2f}%)",
+            }
 
     # Double bottom (W)
     if len(lows) >= 2:
         for i in range(len(lows) - 1, 0, -1):
             l2, l1 = lows[i], lows[i - 1]
-            if abs(l2["price"] - l1["price"]) <= tol and l2["index"] > l1["index"]:
-                between = [p for p in highs if l1["index"] < p["index"] < l2["index"]]
-                if between:
-                    neck = max(between, key=lambda p: p["price"])
-                    return {
-                        "pattern": "W",
-                        "name": "Double Bottom (W)",
-                        "left": l1, "right": l2,
-                        "neckline": neck["price"],
-                        "neck_index": neck["index"],
-                        "bias": "BUY",
-                        "note": f"W pattern — neckline at {neck['price']:.5f}",
-                    }
+            if l2["index"] <= l1["index"] or (l2["index"] - l1["index"]) < min_bars:
+                continue
+            p1, p2 = float(l1["price"]), float(l2["price"])
+            rel = abs(p2 - p1) / max(abs(p1), 1e-9)
+            if rel > max_rel_diff:
+                continue
+            # Reject lower-low continuation (second bottom clearly below first)
+            if p2 < p1 * 0.9985:  # >0.15% lower → not a Double Bottom
+                continue
+            between = [p for p in highs if l1["index"] < p["index"] < l2["index"]]
+            if not between:
+                continue
+            neck = max(between, key=lambda p: p["price"])
+            height = float(neck["price"]) - min(p1, p2)
+            if height < 0.9 * atr:
+                continue
+            return {
+                "pattern": "W",
+                "name": "Double Bottom (W)",
+                "left": l1, "right": l2,
+                "neckline": neck["price"],
+                "neck_index": neck["index"],
+                "bias": "BUY",
+                "note": f"W pattern — neckline at {neck['price']:.5f} (bottoms within {rel*100:.2f}%)",
+            }
     return None
 
 def _grade_breakout(df: pd.DataFrame, line: Dict, kind: str, n: int) -> Dict[str, Any]:
@@ -1809,6 +1842,109 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     strength = family.get("strength", 0)
     td_dir = topdown.get("direction", "NEUTRAL")
     gating_notes = []
+    mw = family.get("mw_pattern")
+    reasons = list(family.get("reasons") or [])
+
+    # ------------------------------------------------------------------
+    # Pattern conflict resolution
+    # Fixes the common error of printing SELL on a weak Double Top (M)
+    # while a cleaner Inverse Head & Shoulders / W + bullish OB is present.
+    # Priority of truth:
+    #   1. Clear trendline geometry (already set in build_trendline_family)
+    #   2. Strong classic reversal from the full scanner (Inverse H&S etc.)
+    #   3. Tightened M/W detector
+    #   4. Order-block reaction (already applied)
+    # ------------------------------------------------------------------
+    sp = family.get("scanned_pattern")
+    if sp:
+        sp_name = sp.get("name", "")
+        sp_bias = sp.get("bias", "NEUTRAL")
+        sp_conf = float(sp.get("confidence") or 0)
+        is_strong_bullish_rev = (
+            sp_name in ("Inverse Head and Shoulders", "Double Bottom", "Triple Bottom")
+            and sp_bias == "BUY" and sp_conf >= 62
+        )
+        is_strong_bearish_rev = (
+            sp_name in ("Head and Shoulders", "Double Top", "Triple Top")
+            and sp_bias == "SELL" and sp_conf >= 62
+        )
+
+        close = float(df_30m["Close"].iloc[-1])
+
+        # Case 1: strong Inverse H&S / Double Bottom vs weak M or NEUTRAL
+        if is_strong_bullish_rev and direction in ("SELL", "NEUTRAL"):
+            head_price = None
+            for kp in (sp.get("key_points") or []):
+                if len(kp) >= 3 and "Head" in str(kp[2]):
+                    head_price = float(kp[1])
+                    break
+            head_broken = head_price is None or close > head_price * 1.001
+
+            bullish_ob_support = False
+            for ob in (family.get("order_blocks") or []):
+                if ob.get("type") == "bullish":
+                    ob_top = float(ob.get("top", 0))
+                    ob_bot = float(ob.get("bottom", 0))
+                    if ob_bot <= close <= ob_top * 1.015:
+                        bullish_ob_support = True
+                        break
+                    if abs(close - ob_top) / max(close, 1e-9) < 0.005:
+                        bullish_ob_support = True
+                        break
+
+            if head_broken or bullish_ob_support or sp_conf >= 70:
+                old_dir = direction
+                direction = "BUY"
+                strength = max(strength, int(sp_conf) - 4)
+                if mw and mw.get("pattern") == "M":
+                    reasons.append(
+                        f"⚠ Overrode weak Double Top (M) — {sp_name} ({sp_conf:.0f}%) is the cleaner "
+                        f"structure (head broken / bullish OB). Bias {old_dir} → BUY"
+                    )
+                    family["mw_pattern"] = None
+                    family["active_pattern"] = "scanned"
+                else:
+                    reasons.append(
+                        f"✅ {sp_name} ({sp_conf:.0f}%) confirms bullish reversal — bias set to BUY"
+                    )
+                    family["active_pattern"] = "scanned"
+                family["pattern_confidence"] = max(int(family.get("pattern_confidence") or 0), int(sp_conf))
+
+        # Case 2: strong H&S / Double Top vs weak W or NEUTRAL
+        elif is_strong_bearish_rev and direction in ("BUY", "NEUTRAL"):
+            head_price = None
+            for kp in (sp.get("key_points") or []):
+                if len(kp) >= 3 and "Head" in str(kp[2]):
+                    head_price = float(kp[1])
+                    break
+            head_broken = head_price is None or close < head_price * 0.999
+
+            if head_broken or sp_conf >= 70:
+                old_dir = direction
+                direction = "SELL"
+                strength = max(strength, int(sp_conf) - 4)
+                if mw and mw.get("pattern") == "W":
+                    reasons.append(
+                        f"⚠ Overrode weak Double Bottom (W) — {sp_name} ({sp_conf:.0f}%) is cleaner. "
+                        f"Bias {old_dir} → SELL"
+                    )
+                    family["mw_pattern"] = None
+                    family["active_pattern"] = "scanned"
+                else:
+                    reasons.append(
+                        f"✅ {sp_name} ({sp_conf:.0f}%) confirms bearish reversal — bias set to SELL"
+                    )
+                    family["active_pattern"] = "scanned"
+                family["pattern_confidence"] = max(int(family.get("pattern_confidence") or 0), int(sp_conf))
+
+        # Case 3: scanned pattern agrees → mild boost
+        elif sp_bias == direction and sp_conf >= 65:
+            strength = min(100, strength + 8)
+            reasons.append(f"✅ {sp_name} ({sp_conf:.0f}%) aligns with current bias — conviction +")
+
+    family["direction"] = direction
+    family["strength"] = max(0, min(100, int(strength)))
+    family["reasons"] = reasons
 
     # SHORT-TERM TRENDLINE IS PRIMARY.
     # We adapt to the structure the trendlines show instead of fighting it
@@ -1836,7 +1972,7 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
                 f"(advisory only, not blocking)"
             )
 
-    family["strength"] = strength
+    family["strength"] = max(0, min(100, int(strength)))
     family["gating_notes"] = gating_notes
     family["short_term_signal"] = direction  # explicit short-term read for reports
     return family
