@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 import market_data
-from market_analysis import zigzag_swings, find_swings, compute_volume_profile, detect_confirmation_candle, analyse_structure, detect_order_blocks
+from market_analysis import zigzag_swings, find_swings, compute_volume_profile, detect_confirmation_candle, analyse_structure, detect_order_blocks, scan_all_patterns
 from topdown_engine import get_topdown_bias, format_topdown_summary
 
 
@@ -1180,6 +1180,10 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
             f"Structure: {wedge['pattern']} · lower rail {wedge['lower']['touches']} touches, "
             f"upper rail {wedge['upper']['touches']} touches · converging (gap {wedge['gap_end']:.5f})"
         )
+    sp = family.get("scanned_pattern")
+    if sp:
+        lines.append(f"Chart pattern: {sp['name']} ({sp['bias']}, {sp['confidence']:.0f}%) — {sp['note']}")
+
     hz = family.get("horizontal_levels") or []
     if hz:
         lines.append("Horizontal levels: " + " · ".join(
@@ -1628,6 +1632,18 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     family["topdown"] = topdown
     if family.get("error"):
         return family
+
+    # Classic chart-pattern scan (triangles, wedges, flags/pennants, H&S,
+    # double/triple tops, rectangles) -- this already existed for the
+    # auto-trade engine but was never surfaced on the Trendline chart/report.
+    try:
+        best_pattern, all_patterns = scan_all_patterns(df_30m)
+        family["scanned_pattern"] = best_pattern.to_dict() if best_pattern else None
+        family["scanned_patterns"] = [p.to_dict() for p in all_patterns]
+    except Exception as e:
+        print(f"[run_trendline_analysis] pattern scan failed for {symbol}: {e!r}")
+        family["scanned_pattern"] = None
+        family["scanned_patterns"] = []
 
     direction = family.get("direction", "NEUTRAL")
     strength = family.get("strength", 0)
