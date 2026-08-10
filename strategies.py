@@ -677,14 +677,16 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         }.get(primary.get("quality"), f"{primary['touches']} touches")
 
         if family_kind == "ascending":
-            # HARD RULE: price clearly above rising support → BUY only.
-            # We adapt to the short-term trendline structure instead of
-            # fighting it with lagging higher-timeframe direction.
-            if close >= lower:
+            # Price clearly above rising support → BUY bias.
+            # But if price is only sitting ON / testing the line, stay cautious
+            # (WAIT) instead of forcing a buy — the line can still break.
+            atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else abs(upper - lower) * 0.1
+            near_buffer = max(atr_now * 0.35, 1e-9)
+            if close >= lower + near_buffer:
                 direction = "BUY"
                 strength = 60 + min(25, primary["touches"] * 7)
                 reasons.append(f"Ascending family · {touch_note}")
-                reasons.append("Short-term Trend: BUY (price above rising support A→N)")
+                reasons.append("Short-term Trend: BUY (price clearly above rising support)")
                 if primary.get("quality") == "unconfirmed":
                     strength -= 10
                 elif primary.get("quality") == "crowded":
@@ -693,7 +695,13 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
                     reasons.append("Price in upper half of channel — bullish control")
                     strength += 12
                 else:
-                    reasons.append("Price near support rail — watch bounce / break")
+                    reasons.append("Price above support but not extended — watch continuation")
+            elif close >= lower - near_buffer * 0.5:
+                # Sitting on / slightly below the line → no forced direction
+                direction = "NEUTRAL"
+                strength = 40
+                reasons.append(f"Ascending family · {touch_note}")
+                reasons.append("Price testing rising support — WAIT for bounce or confirmed break")
             else:
                 brk = _grade_breakout(df, primary, "support_break_down", n)
                 direction = "SELL"
@@ -715,12 +723,15 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
                 reasons.append(touch_note)
                 breakout_grade = brk
         else:  # descending
-            # HARD RULE: price clearly below falling resistance → SELL only.
-            if close <= upper:
+            # Price clearly below falling resistance → SELL bias.
+            # If only testing the line, stay neutral instead of forcing sell.
+            atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else abs(upper - lower) * 0.1
+            near_buffer = max(atr_now * 0.35, 1e-9)
+            if close <= upper - near_buffer:
                 direction = "SELL"
                 strength = 60 + min(25, primary["touches"] * 7)
                 reasons.append(f"Descending family · {touch_note}")
-                reasons.append("Short-term Trend: SELL (price below falling resistance)")
+                reasons.append("Short-term Trend: SELL (price clearly below falling resistance)")
                 if primary.get("quality") == "unconfirmed":
                     strength -= 10
                 elif primary.get("quality") == "crowded":
@@ -729,7 +740,12 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
                     reasons.append("Price in lower half of channel — bearish control")
                     strength += 12
                 else:
-                    reasons.append("Price near resistance rail — watch reject / break")
+                    reasons.append("Price below resistance but not extended — watch continuation")
+            elif close <= upper + near_buffer * 0.5:
+                direction = "NEUTRAL"
+                strength = 40
+                reasons.append(f"Descending family · {touch_note}")
+                reasons.append("Price testing falling resistance — WAIT for reject or confirmed break")
             else:
                 brk = _grade_breakout(df, primary, "resistance_break_up", n)
                 direction = "BUY"
