@@ -461,8 +461,8 @@ def generate_trendline_map(
     pivots = family.get("pivots") or []
     if not pivots:
         try:
-            from market_analysis import zigzag_swings
-            pivots = zigzag_swings(df, depth=4, deviation_atr=0.28)
+            from market_analysis import hybrid_pivots
+            pivots = hybrid_pivots(df, depth=4, deviation_atr=0.28)
         except Exception:
             pivots = []
 
