@@ -531,7 +531,8 @@ def generate_trendline_map(
             ax.plot([x0, chart_len - 1], [edge_price, edge_price],
                      color=edge_color, linestyle="-", linewidth=1.2, alpha=0.9, zorder=6)
         status = "UNMITIGATED" if is_unmitigated else "mitigated"
-        label = f"{'Bullish' if is_bull else 'Bearish'} OB · {status} · {ob['confidence']}%"
+        role = " · INDUCEMENT" if ob.get("is_inducement") else ""
+        label = f"{'Bullish' if is_bull else 'Bearish'} OB · {status}{role} · {ob['confidence']}%"
         ax.text(x0 + 1, ob["top"] if is_bull else ob["bottom"], label, fontsize=6.5,
                 color="#ffffff" if is_unmitigated else edge_color, fontweight="bold",
                 va="bottom" if is_bull else "top",
