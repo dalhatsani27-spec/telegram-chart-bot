@@ -563,6 +563,38 @@ def detect_order_blocks(df, left=3, right=3, lookback=150, max_per_side=2,
     # only shows the zones actually worth reacting to.
     bullish = sorted([c for c in candidates if c["type"] == "bullish"], key=lambda c: -c["formed_index"])[:max_per_side]
     bearish = sorted([c for c in candidates if c["type"] == "bearish"], key=lambda c: -c["formed_index"])[:max_per_side]
+
+    # Inducement rule: when two OBs of the same type sit close to each other,
+    # the first (older / further from current price in the impulse direction)
+    # is treated as inducement — liquidity grab that often fails before the
+    # real (deeper / fresher) OB is respected.
+    def _tag_inducement(obs, side):
+        if len(obs) < 2:
+            for o in obs:
+                o["role"] = "primary"
+                o["is_inducement"] = False
+            return obs
+        # Sort by formation time (older first)
+        ordered = sorted(obs, key=lambda c: c["formed_index"])
+        # If the two zones are relatively close (within ~1.5× the average width)
+        avg_width = sum(o["top"] - o["bottom"] for o in ordered) / len(ordered)
+        close_enough = abs(ordered[0]["top"] - ordered[1]["top"]) < max(avg_width * 3.0, avg_width + 1e-9)
+        if close_enough:
+            # Older one = inducement, newer/deeper one = primary
+            ordered[0]["role"] = "inducement"
+            ordered[0]["is_inducement"] = True
+            ordered[0]["confidence"] = max(30, ordered[0]["confidence"] - 18)
+            ordered[0]["grade"] = "moderate"
+            ordered[1]["role"] = "primary"
+            ordered[1]["is_inducement"] = False
+        else:
+            for o in ordered:
+                o["role"] = "primary"
+                o["is_inducement"] = False
+        return ordered
+
+    bullish = _tag_inducement(bullish, "bullish")
+    bearish = _tag_inducement(bearish, "bearish")
     return sorted(bullish + bearish, key=lambda c: c["formed_index"])
 
 
