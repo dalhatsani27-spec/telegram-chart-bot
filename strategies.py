@@ -562,7 +562,9 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # "ascending" rail is misleading -- it should be left for the
     # horizontal S/R clustering below (_detect_horizontal_levels) to pick
     # up instead, which is exactly what that layer is for.
-    MIN_TREND_MOVE_ATR = 1.8  # total rise/fall across the line's full span, in ATRs
+    MIN_TREND_MOVE_ATR = 0.9  # total rise/fall across the line's full span, in ATRs
+    # Lowered so sequential higher lows (A→B→C) that form a clear rising
+    # support above an OB still get drawn even when the slope is moderate.
     atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
 
     def _has_meaningful_slope(line):
