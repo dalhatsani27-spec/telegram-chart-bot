@@ -622,18 +622,27 @@ def generate_trendline_map(
                 bbox=dict(boxstyle="round", facecolor="black", edgecolor=p_color, alpha=0.6, pad=0.2))
 
     # --- Pick exactly ONE structure to draw as "the pattern" -------------
-    # Priority set upstream in strategies.py (active_pattern): a specific
-    # named reversal (M/W) beats a converging wedge/triangle beats a plain
-    # parallel channel. Whichever it is, it's the only shape drawn here --
-    # no more wedge + neckline + channel stacked on the same candles.
+    # Priority set upstream in strategies.py (active_pattern):
+    #   scanned (strong Inverse H&S / H&S etc. that won a conflict) >
+    #   M/W (tightened double top/bottom) >
+    #   wedge/triangle >
+    #   plain channel.
+    # Only one shape is drawn as the primary pattern to avoid label pile-up.
     active_pattern = family.get("active_pattern", "none")
     pattern_title = None
     pattern_conf = family.get("pattern_confidence")
 
     wedge = family.get("wedge")
     mw = family.get("mw_pattern")
+    sp = family.get("scanned_pattern")
 
-    if active_pattern == "mw" and mw and mw.get("neckline") is not None:
+    if active_pattern == "scanned" and sp:
+        pattern_title = sp.get("name", "Chart Pattern")
+        pattern_conf = sp.get("confidence", pattern_conf)
+        # The full key_points + trigger_line are already drawn earlier in the
+        # scanned-pattern block, so here we only set the title.
+
+    elif active_pattern == "mw" and mw and mw.get("neckline") is not None:
         pattern_title = mw.get("name", "M/W Pattern")
         # Neckline: one line, extended to the chart edge (the level to watch)
         neck_x0 = max(0, int(mw.get("neck_index", 0)) - offset)
