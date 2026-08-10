@@ -1,1585 +1,1743 @@
 """
-market_analysis.py
-===================
-Shared price-action analysis toolkit: market structure (swings / BOS /
-CHoCH / MSS), volume profile, support/resistance zone clustering,
-candlestick confirmation patterns, the chart-pattern scanner, and the
-shared LONG/SHORT/NEUTRAL direction banner.
+strategies.py
+=============
+The two chart-analysis strategies this bot runs: Trendline and OTE.
 
-Used by: the Trendline and OTE strategies (strategies.py), the top-down
-bias engine (topdown_engine.py), and the auto-trading confirmation
-pipeline (execution_engine.py).
+Both call topdown_engine.get_topdown_bias() first to establish a 4H/1H
+directional read, then do their own timeframe-specific work on the 30M
+chart (the geometry/entry engine), and finally gate/score that 30M read
+against the top-down bias so Trendline and OTE never disagree with the
+bigger picture without saying so.
+
+  - Trendline: parallel-channel trendline family + measured-move /
+    liquidity targets, entry on 30M, full 4H -> 1H -> 30M cascade.
+  - OTE: Fibonacci Fan + Expansion off the most recent clean impulse leg,
+    entry on 30M, gated by the same 4H -> 1H top-down read.
 """
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-
-# ============================================================
-# DIRECTION BANNER -- shared LONG/SHORT/NEUTRAL banner used by
-# every strategy report and every live trade message.
-# ============================================================
-_LONG_WORDS = {"BUY", "LONG", "BULLISH"}
-_SHORT_WORDS = {"SELL", "SHORT", "BEARISH"}
-
-
-def normalize_direction(direction) -> str:
-    """Collapse BUY/LONG/BULLISH -> LONG, SELL/SHORT/BEARISH -> SHORT,
-    everything else -> NEUTRAL. Case-insensitive, None-safe."""
-    d = str(direction or "").strip().upper()
-    if d in _LONG_WORDS:
-        return "LONG"
-    if d in _SHORT_WORDS:
-        return "SHORT"
-    return "NEUTRAL"
-
-
-def direction_banner(direction, extra: str = "") -> str:
-    """
-    Big three-line block, unmissable even skimming on a phone.
-    `extra` appends context on the label line (symbol, strategy name, etc).
-    """
-    norm = normalize_direction(direction)
-    if norm == "LONG":
-        emoji, label, bar = "🟢", "LONG", "🟩"
-    elif norm == "SHORT":
-        emoji, label, bar = "🔴", "SHORT", "🟥"
-    else:
-        emoji, label, bar = "⚪", "NEUTRAL", "⬜"
-    row = bar * 12
-    tail = f"  ·  {extra}" if extra else ""
-    return f"{row}\n{emoji}  {label}{tail}  {emoji}\n{row}"
-
-
-def direction_tag(direction) -> str:
-    """Compact inline tag for use inside an existing line, e.g.
-    f"Stage 8 — Entry: {direction_tag(direction)}" """
-    norm = normalize_direction(direction)
-    if norm == "LONG":
-        return "🟢 LONG"
-    if norm == "SHORT":
-        return "🔴 SHORT"
-    return "⚪ NEUTRAL"
+import market_data
+from market_analysis import zigzag_swings, find_swings, compute_volume_profile, detect_confirmation_candle, analyse_structure, detect_order_blocks, scan_all_patterns
+from topdown_engine import get_topdown_bias, format_topdown_summary
 
 
 # ============================================================
-# MARKET STRUCTURE -- swing highs/lows, BOS / CHoCH / MSS,
-# structure-based trade permission.
+# TRENDLINE GEOMETRY ENGINE -- parallel-channel family, wedges,
+# horizontal S/R clustering, measured-move & liquidity targets,
+# breakout grading. Operates on whatever df is passed in (the
+# orchestration at the bottom of this file always passes the 30M
+# chart).
 # ============================================================
 
 
-def find_swings(df, left=3, right=3):
+def _line_value(x0: float, y0: float, x1: float, y1: float, x: float) -> float:
+    if x1 == x0:
+        return y0
+    return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+
+
+def _count_touches(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
+                   kind: str, tol_atr: float = 0.40) -> int:
+    if df is None or len(df) < 5:
+        return 0
+    atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
+    highs = df["High"].values
+    lows = df["Low"].values
+    touches = 0
+    lo, hi = min(x0, x1), max(x0, x1)
+    for i in range(lo, min(hi + 1, len(df))):
+        lv = _line_value(x0, y0, x1, y1, i)
+        a = float(atr[i]) if i < len(atr) and atr[i] > 0 else abs(y1 - y0) * 0.05
+        tol = max(a * tol_atr, 1e-9)
+        if kind == "support" and abs(lows[i] - lv) <= tol:
+            touches += 1
+        elif kind == "resistance" and abs(highs[i] - lv) <= tol:
+            touches += 1
+    return touches
+
+
+def _touch_points(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
+                   kind: str, tol_atr: float = 0.40) -> List[Dict]:
+    """Same tolerance test as _count_touches, but returns the actual
+    (index, price) of each touching wick instead of just a count, so the
+    chart can mark every bounce along the trendline the way a trader
+    circles them by hand -- not just the two pivots that defined the line."""
+    if df is None or len(df) < 5:
+        return []
+    atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
+    highs = df["High"].values
+    lows = df["Low"].values
+    points = []
+    lo, hi = min(x0, x1), max(x0, x1)
+    for i in range(lo, min(hi + 1, len(df))):
+        lv = _line_value(x0, y0, x1, y1, i)
+        a = float(atr[i]) if i < len(atr) and atr[i] > 0 else abs(y1 - y0) * 0.05
+        tol = max(a * tol_atr, 1e-9)
+        if kind == "support" and abs(lows[i] - lv) <= tol:
+            points.append({"index": i, "price": float(lows[i])})
+        elif kind == "resistance" and abs(highs[i] - lv) <= tol:
+            points.append({"index": i, "price": float(highs[i])})
+    return points
+
+
+def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
+    """Best 2-point primary line of given kind (support=lows, resistance=highs).
+
+    Professional validation standard: a 2-point line is only a *candidate* --
+    it takes a 3rd touch for traders to actually respect it as real structure.
+    We still return 2-touch lines (better than nothing), but tag them
+    "unconfirmed" so downstream scoring/reporting can be honest about it.
+    5+ touches is flagged "crowded": the level has been tested so many times
+    the order flow defending it is likely used up, and the next test is
+    statistically more likely to fail than hold.
+
+    The line's 2nd point must be recent enough that extrapolating it to the
+    current bar is still meaningful -- otherwise you get a line anchored to
+    an old pivot, stretched flat across everything that's happened since,
+    cutting through unrelated later price action instead of tracking it.
     """
-    Fractal swing highs and lows.
-    Returns list of dicts: {index, price, type: 'high'|'low'}
-    """
-    highs = df['High'].values
-    lows = df['Low'].values
-    n = len(df)
-    swings = []
-
-    for i in range(left, n - right):
-        window_h = highs[i - left:i + right + 1]
-        if highs[i] == window_h.max() and int(np.argmax(window_h)) == left:
-            swings.append({"index": i, "price": float(highs[i]), "type": "high"})
-        window_l = lows[i - left:i + right + 1]
-        if lows[i] == window_l.min() and int(np.argmin(window_l)) == left:
-            swings.append({"index": i, "price": float(lows[i]), "type": "low"})
-
-    swings.sort(key=lambda s: s["index"])
-    return swings
-
-
-
-def filter_non_ranging_swings(df, pivots, range_atr_mult=2.2, min_leg_atr=0.55):
-    """
-    LOCKED RULE: only keep swings that are part of directional (non-ranging) structure.
-
-    A swing is kept when the leg into it is meaningful vs ATR.
-    Swings that form inside tight sideways chop are discarded.
-    """
-    if not pivots or df is None or len(df) < 10:
-        return pivots or []
-
-    if "ATR" in df.columns and not df["ATR"].isna().all():
-        atr = df["ATR"].values.astype(float)
-    else:
-        atr = (df["High"] - df["Low"]).rolling(14, min_periods=1).mean().values
-
-    kept = [pivots[0]]
-    for i in range(1, len(pivots)):
-        prev = kept[-1]
-        cur = pivots[i]
-        a = float(atr[min(cur["index"], len(atr) - 1)]) if len(atr) else 0.0
-        if a <= 0:
-            a = abs(cur["price"] - prev["price"]) or 1e-9
-        leg = abs(cur["price"] - prev["price"])
-        # Discard micro legs that are just range noise
-        if leg < min_leg_atr * a:
-            # Replace previous same-type extreme if this one is more extreme
-            if kept and kept[-1]["type"] == cur["type"]:
-                if cur["type"] == "high" and cur["price"] > kept[-1]["price"]:
-                    kept[-1] = cur
-                elif cur["type"] == "low" and cur["price"] < kept[-1]["price"]:
-                    kept[-1] = cur
-            continue
-        kept.append(cur)
-
-    # Second pass: drop internal swings that sit inside a tight box of neighbors
-    if len(kept) < 4:
-        return kept
-    final = [kept[0]]
-    for i in range(1, len(kept) - 1):
-        a = float(atr[min(kept[i]["index"], len(atr) - 1)]) if len(atr) else 0.0
-        window = kept[max(0, i - 2): i + 3]
-        prices = [p["price"] for p in window]
-        box = max(prices) - min(prices)
-        if a > 0 and box < range_atr_mult * a:
-            # Inside a ranging cluster — skip unless it is the extreme of the cluster
-            if kept[i]["type"] == "high" and kept[i]["price"] < max(prices) * 0.9995:
+    pts = [p for p in pivots if p["type"] == ("low" if kind == "support" else "high")]
+    if len(pts) < 2:
+        return None
+    # The most recent defining touch has to sit within the last ~40% of
+    # the window (min 20 bars) -- a line whose last touch is ancient
+    # relative to the current bar has no business being extrapolated
+    # across everything since.
+    recency_floor = max(0, n - max(20, int((max(p["index"] for p in pts) - min(p["index"] for p in pts) or n) * 0.4)))
+    best = None
+    best_score = -1
+    for i in range(len(pts) - 1):
+        for j in range(i + 1, len(pts)):
+            a, b = pts[i], pts[j]
+            if b["index"] <= a["index"]:
                 continue
-            if kept[i]["type"] == "low" and kept[i]["price"] > min(prices) * 1.0005:
+            if b["index"] < recency_floor:
+                continue  # last touch too stale to extrapolate from
+            # Uptrend support needs higher low; downtrend resistance needs lower high
+            if kind == "support" and b["price"] <= a["price"]:
                 continue
-        final.append(kept[i])
-    final.append(kept[-1])
-
-    # Ensure alternating after filtering
-    cleaned = []
-    for p in final:
-        if cleaned and cleaned[-1]["type"] == p["type"]:
-            if p["type"] == "high" and p["price"] >= cleaned[-1]["price"]:
-                cleaned[-1] = p
-            elif p["type"] == "low" and p["price"] <= cleaned[-1]["price"]:
-                cleaned[-1] = p
-        else:
-            cleaned.append(p)
-    return cleaned
-
-
-def zigzag_swings(df, depth=5, deviation_atr=0.35):
-    """
-    ZigZag-style alternating swing highs/lows (noise-filtered).
-    depth  : minimum bars between pivots
-    deviation_atr : minimum reversal size as fraction of ATR
-
-    Returns alternating list of {index, price, type: 'high'|'low'}.
-    This is the preferred pivot source for OB / BOS / liquidity mapping.
-    """
-    if df is None or len(df) < depth * 2 + 5:
-        return find_swings(df, left=max(2, depth // 2), right=max(2, depth // 2))
-
-    highs = df["High"].values.astype(float)
-    lows = df["Low"].values.astype(float)
-    n = len(df)
-
-    # ATR proxy
-    if "ATR" in df.columns and not df["ATR"].isna().all():
-        atr = df["ATR"].values.astype(float)
-    else:
-        tr = np.maximum(highs - lows, 1e-9)
-        atr = pd.Series(tr).rolling(14, min_periods=1).mean().values
-
-    pivots = []
-    # Seed with first significant extreme
-    direction = 0  # 1 = looking for high, -1 = looking for low
-    last_pivot_idx = 0
-    last_pivot_price = (highs[0] + lows[0]) / 2.0
-
-    # Find initial direction from first depth bars
-    seed_h = float(np.max(highs[:depth]))
-    seed_l = float(np.min(lows[:depth]))
-    if seed_h - last_pivot_price >= last_pivot_price - seed_l:
-        direction = 1
-        last_pivot_idx = int(np.argmax(highs[:depth]))
-        last_pivot_price = highs[last_pivot_idx]
-        pivots.append({"index": last_pivot_idx, "price": float(last_pivot_price), "type": "high"})
-        direction = -1  # next look for low
-    else:
-        direction = -1
-        last_pivot_idx = int(np.argmin(lows[:depth]))
-        last_pivot_price = lows[last_pivot_idx]
-        pivots.append({"index": last_pivot_idx, "price": float(last_pivot_price), "type": "low"})
-        direction = 1
-
-    i = last_pivot_idx + 1
-    while i < n:
-        a = float(atr[i]) if i < len(atr) and atr[i] > 0 else float(highs[i] - lows[i])
-        min_move = max(a * deviation_atr, 1e-9)
-
-        if direction == 1:  # seeking swing high
-            # Track running high since last pivot
-            if i - last_pivot_idx < depth:
-                i += 1
+            if kind == "resistance" and b["price"] >= a["price"]:
                 continue
-            window = highs[last_pivot_idx + 1:i + 1]
-            if len(window) == 0:
-                i += 1
-                continue
-            cand_idx = last_pivot_idx + 1 + int(np.argmax(window))
-            cand_price = highs[cand_idx]
-            # Confirm when price reverses by min_move from candidate
-            if cand_price - lows[i] >= min_move and i - cand_idx >= max(1, depth // 2):
-                pivots.append({"index": cand_idx, "price": float(cand_price), "type": "high"})
-                last_pivot_idx = cand_idx
-                last_pivot_price = cand_price
-                direction = -1
-        else:  # seeking swing low
-            if i - last_pivot_idx < depth:
-                i += 1
-                continue
-            window = lows[last_pivot_idx + 1:i + 1]
-            if len(window) == 0:
-                i += 1
-                continue
-            cand_idx = last_pivot_idx + 1 + int(np.argmin(window))
-            cand_price = lows[cand_idx]
-            if highs[i] - cand_price >= min_move and i - cand_idx >= max(1, depth // 2):
-                pivots.append({"index": cand_idx, "price": float(cand_price), "type": "low"})
-                last_pivot_idx = cand_idx
-                last_pivot_price = cand_price
-                direction = 1
-        i += 1
-
-    # Ensure alternating
-    cleaned = []
-    for p in pivots:
-        if cleaned and cleaned[-1]["type"] == p["type"]:
-            # Keep the more extreme
-            if p["type"] == "high" and p["price"] >= cleaned[-1]["price"]:
-                cleaned[-1] = p
-            elif p["type"] == "low" and p["price"] <= cleaned[-1]["price"]:
-                cleaned[-1] = p
-        else:
-            cleaned.append(p)
-    # LOCKED: drop ranging / choppy swings
-    return filter_non_ranging_swings(df, cleaned)
-
-
-def _last_swing(swings, swing_type, before_idx=None):
-    candidates = [s for s in swings if s["type"] == swing_type]
-    if before_idx is not None:
-        candidates = [s for s in candidates if s["index"] < before_idx]
-    return candidates[-1] if candidates else None
-
-
-def analyse_structure(df, left=3, right=3, lookback=80):
-    """
-    Build current market structure state from recent swings.
-
-    Returns dict:
-      bias          : 'BULLISH' | 'BEARISH' | 'NEUTRAL'
-      last_event    : 'BOS' | 'CHoCH' | 'MSS' | None
-      event_bias    : 'BULLISH' | 'BEARISH' | None
-      event_price   : float (broken level)
-      event_index   : int
-      swings        : recent swing list
-      structure_high: last relevant swing high
-      structure_low : last relevant swing low
-      note          : human-readable summary
-    """
-    if df is None or len(df) < left + right + 10:
-        return {
-            "bias": "NEUTRAL", "last_event": None, "event_bias": None,
-            "event_price": None, "event_index": None, "swings": [],
-            "structure_high": None, "structure_low": None,
-            "note": "Insufficient data for structure.",
-        }
-
-    swings = find_swings(df, left=left, right=right)
-    n = len(df)
-    start = max(0, n - lookback)
-    swings = [s for s in swings if s["index"] >= start]
-
-    if len(swings) < 4:
-        return {
-            "bias": "NEUTRAL", "last_event": None, "event_bias": None,
-            "event_price": None, "event_index": None, "swings": swings,
-            "structure_high": None, "structure_low": None,
-            "note": "Not enough swings for clear structure.",
-        }
-
-    # Walk swings chronologically and track structure state
-    # Start neutral; first clear HH/HL or LH/LL sets bias
-    bias = "NEUTRAL"
-    last_event = None
-    event_bias = None
-    event_price = None
-    event_index = None
-    choch_pending = None  # after CHoCH, next BOS in same direction = MSS
-
-    # Keep rolling structure levels
-    last_sh = None  # last swing high used as structure
-    last_sl = None  # last swing low used as structure
-
-    closes = df['Close'].values
-    highs = df['High'].values
-    lows = df['Low'].values
-
-    # Process swing-by-swing for event labels, then check price breaks after each swing
-    for i, sw in enumerate(swings):
-        if sw["type"] == "high":
-            prev_high = _last_swing(swings[:i], "high")
-            if prev_high and sw["price"] > prev_high["price"]:
-                # Higher high
-                if bias == "BEARISH":
-                    # Break of prior structure high against downtrend → CHoCH or MSS
-                    last_event = "MSS" if choch_pending == "BULLISH" else "CHoCH"
-                    event_bias = "BULLISH"
-                    event_price = prev_high["price"]
-                    event_index = sw["index"]
-                    choch_pending = "BULLISH" if last_event == "CHoCH" else None
-                    bias = "BULLISH"
-                elif bias == "BULLISH":
-                    last_event = "BOS"
-                    event_bias = "BULLISH"
-                    event_price = prev_high["price"]
-                    event_index = sw["index"]
-                    choch_pending = None
+            slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
+            touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind)
+            # Prefer more touches + a recent 2nd touch. NOTE: deliberately no
+            # reward for a wide a-b span -- that used to bias the fit toward
+            # an old, distant starting pivot just because it made the line
+            # "look" more established, which produced lines extrapolated far
+            # past anything they were actually still tracking.
+            touch_score = touches * 10
+            if touches >= 5:
+                touch_score -= (touches - 4) * 3  # fatigue penalty, doesn't erase the line
+            score = touch_score + (b["index"] / max(n, 1)) * 8
+            if score > best_score:
+                best_score = score
+                y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
+                if touches < 3:
+                    quality = "unconfirmed"
+                elif touches <= 4:
+                    quality = "confirmed"
                 else:
-                    bias = "BULLISH"
-                    last_event = "BOS"
-                    event_bias = "BULLISH"
-                    event_price = sw["price"]
-                    event_index = sw["index"]
-                last_sh = sw
-            else:
-                last_sh = sw
+                    quality = "crowded"
+                best = {
+                    "x0": a["index"], "y0": a["price"],
+                    "x1": b["index"], "y1": b["price"],
+                    "y_end": y_end,
+                    "slope": slope,
+                    "touches": touches,
+                    "confirmed": touches >= 3,
+                    "quality": quality,
+                    "kind": kind,
+                    "bars_since_last_touch": n - 1 - b["index"],
+                }
+    return best
 
-        else:  # swing low
-            prev_low = _last_swing(swings[:i], "low")
-            if prev_low and sw["price"] < prev_low["price"]:
-                # Lower low
-                if bias == "BULLISH":
-                    last_event = "MSS" if choch_pending == "BEARISH" else "CHoCH"
-                    event_bias = "BEARISH"
-                    event_price = prev_low["price"]
-                    event_index = sw["index"]
-                    choch_pending = "BEARISH" if last_event == "CHoCH" else None
-                    bias = "BEARISH"
-                elif bias == "BEARISH":
-                    last_event = "BOS"
-                    event_bias = "BEARISH"
-                    event_price = prev_low["price"]
-                    event_index = sw["index"]
-                    choch_pending = None
-                else:
-                    bias = "BEARISH"
-                    last_event = "BOS"
-                    event_bias = "BEARISH"
-                    event_price = sw["price"]
-                    event_index = sw["index"]
-                last_sl = sw
-            else:
-                last_sl = sw
 
-    # Also check if latest price has broken the most recent structure level
-    # (intrabar break after last swing)
-    if last_sh and n > 0:
-        if closes[-1] > last_sh["price"] and bias != "BULLISH":
-            last_event = "MSS" if choch_pending == "BULLISH" else "CHoCH"
-            event_bias = "BULLISH"
-            event_price = last_sh["price"]
-            event_index = n - 1
-            bias = "BULLISH"
-        elif bias == "BULLISH" and closes[-1] > last_sh["price"]:
-            # already bullish and making new high — BOS already counted via swings
-            pass
+def _fit_line_any_slope(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
+    """Best 2-point line through swing highs or lows, ANY slope direction.
 
-    if last_sl and n > 0:
-        if closes[-1] < last_sl["price"] and bias != "BEARISH":
-            last_event = "MSS" if choch_pending == "BEARISH" else "CHoCH"
-            event_bias = "BEARISH"
-            event_price = last_sl["price"]
-            event_index = n - 1
-            bias = "BEARISH"
+    _fit_primary locks support to rising / resistance to falling only, which
+    is correct for a parallel channel but can never produce the two
+    independent-slope rails a trader draws by hand for a wedge or triangle
+    (e.g. an ascending-highs line paired with a steeper ascending-lows line
+    = rising wedge). This is the same touch-scored 2-point fit, just without
+    that directional constraint.
+    """
+    pts = [p for p in pivots if p["type"] == ("low" if kind == "support" else "high")]
+    if len(pts) < 2:
+        return None
+    best = None
+    best_score = -1
+    for i in range(len(pts) - 1):
+        for j in range(i + 1, len(pts)):
+            a, b = pts[i], pts[j]
+            if b["index"] <= a["index"]:
+                continue
+            slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
+            touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind)
+            touch_score = touches * 10
+            if touches >= 5:
+                touch_score -= (touches - 4) * 3
+            score = touch_score + (b["index"] / max(n, 1)) * 5 + (b["index"] - a["index"]) * 0.05
+            if score > best_score:
+                best_score = score
+                y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
+                quality = "unconfirmed" if touches < 3 else ("confirmed" if touches <= 4 else "crowded")
+                best = {
+                    "x0": a["index"], "y0": a["price"],
+                    "x1": b["index"], "y1": b["price"],
+                    "y_end": y_end, "slope": slope, "touches": touches,
+                    "confirmed": touches >= 3, "quality": quality, "kind": kind,
+                }
+    return best
 
-    structure_high = last_sh["price"] if last_sh else None
-    structure_low = last_sl["price"] if last_sl else None
 
-    if last_event and event_bias:
-        note = f"{last_event} ({event_bias}) @ {event_price:.5f} — structure bias {bias}"
+def _detect_converging_wedge(pivots: List[Dict], df: pd.DataFrame, n: int) -> Optional[Dict]:
+    """
+    Detect two independent-slope trendlines (one off the lows, one off the
+    highs) that converge toward an apex -- wedges and triangles. This is
+    distinct from _build_parallel_family, which only ever produces rails
+    that share the primary's slope. A hand-drawn chart very often shows
+    exactly this shape (two lines of different steepness meeting), and the
+    old single-family logic could never reproduce it.
+    """
+    lower = _fit_line_any_slope(pivots, "support", n, df)
+    upper = _fit_line_any_slope(pivots, "resistance", n, df)
+    if not lower or not upper or lower["touches"] < 2 or upper["touches"] < 2:
+        return None
+
+    start_x = max(min(lower["x0"], upper["x0"]), 0)
+    gap_start = (_line_value(upper["x0"], upper["y0"], upper["x1"], upper["y1"], start_x) -
+                 _line_value(lower["x0"], lower["y0"], lower["x1"], lower["y1"], start_x))
+    gap_end = upper["y_end"] - lower["y_end"]
+    if gap_start <= 0 or gap_end <= 0:
+        return None  # lines have already crossed -- not a clean wedge anymore
+    if gap_end >= gap_start * 0.92:
+        return None  # not meaningfully converging -- let the parallel-channel path handle it
+
+    slope_l, slope_u = lower["slope"], upper["slope"]
+    flat = lambda s: abs(s) < 1e-9
+    if slope_l > 0 and slope_u > 0 and slope_l > slope_u:
+        pattern, bias = "Rising Wedge", "SELL"
+    elif slope_l < 0 and slope_u < 0 and slope_u < slope_l:
+        pattern, bias = "Falling Wedge", "BUY"
+    elif slope_l > 0 and slope_u < 0:
+        pattern, bias = "Symmetrical Triangle", "NEUTRAL"
+    elif flat(slope_l) and slope_u < 0:
+        pattern, bias = "Descending Triangle", "SELL"
+    elif slope_l > 0 and flat(slope_u):
+        pattern, bias = "Ascending Triangle", "BUY"
     else:
-        note = f"Structure bias: {bias} (no recent BOS/CHoCH/MSS)"
+        pattern, bias = "Converging Channel", "NEUTRAL"
+
+    apex_x = None
+    if abs(slope_l - slope_u) > 1e-9:
+        apex_x = (n - 1) + (upper["y_end"] - lower["y_end"]) / (slope_l - slope_u)
 
     return {
-        "bias": bias,
-        "last_event": last_event,
-        "event_bias": event_bias,
-        "event_price": event_price,
-        "event_index": event_index,
-        "swings": swings[-12:],
-        "structure_high": structure_high,
-        "structure_low": structure_low,
-        "note": note,
+        "pattern": pattern, "bias": bias,
+        "lower": lower, "upper": upper,
+        "gap_start": round(gap_start, 5), "gap_end": round(gap_end, 5),
+        "apex_index": apex_x,
     }
 
 
-def detect_order_blocks(df, left=3, right=3, lookback=150, max_per_side=2,
-                        min_confidence=45):
+def _detect_horizontal_levels(df: pd.DataFrame, pivots: List[Dict], n: int,
+                               max_levels: int = 4, tol_atr: float = 0.45) -> List[Dict]:
     """
-    Order blocks: the last opposite-colored candle before a strong
-    displacement move that breaks market structure.
-
-    This is NOT "find every big candle" -- an order block is only kept if
-    it's actually "likely to be respected":
-      1. It caused a confirmed structure break (BOS) -- the impulse leaving
-         it was strong enough to take out a prior swing high/low, not just
-         a big wick that went nowhere.
-      2. Displacement strength: how far price moved (in ATR) leaving the
-         zone -- weak displacement = weak zone.
-      3. Freshness: has price come back to the zone since it formed?
-         - untested  -> highest quality, nothing has challenged it yet
-         - tested-held -> price returned and respected it (bounced/rejected)
-           -- actually a *positive* signal, the zone proved itself
-         - broken -> a candle closed all the way through it -> DISCARDED,
-           a broken zone isn't "likely to be respected", it already wasn't
-      4. Zone tightness -- a huge sprawling range is a worse zone than a
-         tight one.
-
-    Returns list of dicts, most relevant first (nearest to current price),
-    capped at max_per_side per direction so the chart doesn't fill up with
-    marginal zones:
-      type            : 'bullish' | 'bearish'
-      top / bottom    : zone price bounds
-      formed_index    : bar index of the OB candle
-      break_index     : bar index of the structure break it caused
-      displacement_atr: strength of the move away from the zone
-      freshness       : 'untested' | 'tested-held'
-      confidence      : 0-100
-      grade           : 'strong' | 'moderate'
+    Cluster ALL swing pivots across the full chart history by price
+    proximity, not just the last few swings. A level a trader marks by eye
+    usually earned that mark by getting tested repeatedly over the *life*
+    of the chart -- a flip zone from weeks ago that's still respected is
+    exactly the kind of line the old "last 6 pivots, top 2 highs/lows"
+    logic would silently drop once it aged out of that recent window.
     """
-    if df is None or len(df) < left + right + 20:
+    if not pivots or df is None or len(df) < 10:
         return []
+    atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
+    avg_atr = float(np.nanmean(atr[-50:])) if len(atr) else 0.0
+    tol = max(avg_atr * tol_atr, 1e-9)
 
-    n = len(df)
-    start = max(0, n - lookback)
-    opens = df["Open"].values
-    closes = df["Close"].values
-    highs = df["High"].values
-    lows = df["Low"].values
-    atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).rolling(14, min_periods=1).mean().values
-
-    swings = [s for s in find_swings(df, left=left, right=right) if s["index"] >= start]
-    if len(swings) < 2:
-        return []
-
-    # Raw structure-break events: a close beyond a prior swing high/low.
-    # (Deliberately simpler than analyse_structure's full CHoCH/MSS state
-    # machine -- for order-block purposes we just need "structure broke,
-    # here, in this direction", not the BOS/CHoCH/MSS labeling.)
-    breaks = []
-    last_high = None
-    last_low = None
-    for sw in swings:
-        if sw["type"] == "high":
-            if last_high is not None:
-                for j in range(sw["index"], min(sw["index"] + 40, n)):
-                    if closes[j] > last_high["price"]:
-                        breaks.append({"index": j, "bias": "BULLISH", "level": last_high["price"]})
-                        break
-            last_high = sw
-        else:
-            if last_low is not None:
-                for j in range(sw["index"], min(sw["index"] + 40, n)):
-                    if closes[j] < last_low["price"]:
-                        breaks.append({"index": j, "bias": "BEARISH", "level": last_low["price"]})
-                        break
-            last_low = sw
-
-    candidates = []
-    seen_ob_idx = set()
-    for brk in breaks:
-        b = brk["index"]
-        bias = brk["bias"]
-        # Find the origin candle: last opposite-colored candle in the
-        # short window before the break bar.
-        ob_idx = None
-        for idx in range(b, max(0, b - 8), -1):
-            is_down = closes[idx] < opens[idx]
-            is_up = closes[idx] > opens[idx]
-            if bias == "BULLISH" and is_down:
-                ob_idx = idx
+    clusters: List[Dict] = []
+    for p in pivots:
+        price = float(p["price"])
+        placed = False
+        for c in clusters:
+            if abs(price - c["price"]) <= tol:
+                c["touches"].append(p)
+                c["price"] = float(np.mean([t["price"] for t in c["touches"]]))
+                placed = True
                 break
-            if bias == "BEARISH" and is_up:
-                ob_idx = idx
-                break
-        if ob_idx is None or ob_idx in seen_ob_idx:
+        if not placed:
+            clusters.append({"price": price, "touches": [p]})
+
+    close = float(df["Close"].iloc[-1])
+    levels = []
+    for c in clusters:
+        n_touch = len(c["touches"])
+        if n_touch < 2:
             continue
-        seen_ob_idx.add(ob_idx)
-
-        top = float(highs[ob_idx])
-        bottom = float(lows[ob_idx])
-        if top <= bottom:
-            continue
-        a = float(atr[b]) if b < len(atr) and atr[b] > 0 else (top - bottom)
-        displacement_atr = abs(closes[min(b + 1, n - 1)] - closes[ob_idx]) / a if a > 0 else 0.0
-        width_atr = (top - bottom) / a if a > 0 else 99
-
-        # Freshness: has price returned into the zone since it formed?
-        # A close all the way through invalidates it outright.
-        freshness = "untested"
-        broken = False
-        for k in range(min(b + 2, n), n):
-            if bias == "BULLISH":
-                if closes[k] < bottom:
-                    broken = True
-                    break
-                if lows[k] <= top:
-                    freshness = "tested-held"
-            else:
-                if closes[k] > top:
-                    broken = True
-                    break
-                if highs[k] >= bottom:
-                    freshness = "tested-held"
-        if broken:
-            continue
-
-        body_ratio = abs(closes[ob_idx] - opens[ob_idx]) / max(top - bottom, 1e-9)
-
-        score = 0.0
-        score += min(40, displacement_atr * 20)
-        score += 25 if freshness == "untested" else 14
-        score += 15  # always structure-confirmed by construction
-        score += 10 if body_ratio < 0.55 else 0
-        score += 10 if width_atr < 1.5 else 0
-        confidence = max(0, min(100, int(round(score))))
-        if confidence < min_confidence:
-            continue
-
-        candidates.append({
-            "type": "bullish" if bias == "BULLISH" else "bearish",
-            "top": top,
-            "bottom": bottom,
-            "formed_index": ob_idx,
-            "break_index": b,
-            "displacement_atr": round(displacement_atr, 2),
-            "freshness": freshness,
-            "confidence": confidence,
-            "grade": "strong" if confidence >= 65 else "moderate",
+        first_idx = min(t["index"] for t in c["touches"])
+        last_idx = max(t["index"] for t in c["touches"])
+        span = last_idx - first_idx
+        recency = last_idx / max(n, 1)
+        # Durability (span) and touch count matter more than raw recency --
+        # this is what lets an older, well-tested zone outscore a level
+        # that just happened to form in the last handful of candles.
+        score = n_touch * 10 + span * 0.08 + recency * 5
+        quality = "unconfirmed" if n_touch < 3 else ("confirmed" if n_touch <= 4 else "crowded")
+        levels.append({
+            "price": c["price"], "touches": n_touch, "span": span,
+            "first_index": first_idx, "last_index": last_idx,
+            "side": "resistance" if c["price"] >= close else "support",
+            "quality": quality, "score": round(score, 2),
         })
-
-    # Nearest-to-current-price first within each side, capped so the chart
-    # only shows the zones actually worth reacting to.
-    bullish = sorted([c for c in candidates if c["type"] == "bullish"], key=lambda c: -c["formed_index"])[:max_per_side]
-    bearish = sorted([c for c in candidates if c["type"] == "bearish"], key=lambda c: -c["formed_index"])[:max_per_side]
-    return sorted(bullish + bearish, key=lambda c: c["formed_index"])
+    levels.sort(key=lambda l: l["score"], reverse=True)
+    return levels[:max_levels]
 
 
-def structure_trade_permission(htf_bias, structure):
+def _build_parallel_family(primary: Dict, pivots: List[Dict], n: int, max_members: int = 4) -> List[Dict]:
     """
-    Decide trade permission from structure confirmation.
-
-    LOCKED RULES:
-      1. 200 EMA / HTF bias = overall context ONLY — never the entry signal.
-      2. When CHoCH then BOS/MSS occurs → look for pullback entry in the
-         direction of the NEW trend (confirmation direction wins).
-      3. Trade the confirmation direction, not the EMA direction.
-
-    Returns:
-      allowed: bool
-      reason: str
-      preferred_direction: 'BUY' | 'SELL' | 'NEUTRAL'
+    True parallel family: same slope as primary, each member anchored
+    through a swing on the opposite side (or further on same side).
+    This is what your MT5 screenshots show — one slope, multiple rails.
     """
-    struct_bias = structure.get("bias", "NEUTRAL")
-    event = structure.get("last_event")
-    event_bias = structure.get("event_bias")
-    htf = htf_bias  # context only
+    slope = primary["slope"]
+    kind = primary["kind"]
+    members = [primary]
 
-    # --- Confirmation events drive the trade ---
-    if event == "MSS" and event_bias:
-        direction = "BUY" if event_bias == "BULLISH" else "SELL"
-        note = f"MSS confirmed ({event_bias}) — pullback entry in new trend"
-        if htf not in ("NEUTRAL", direction):
-            note += f" (against HTF {htf} — still valid, HTF is bias only)"
-        return True, note, direction
-
-    if event == "BOS" and event_bias:
-        # BOS after structure = continuation of the current/new trend
-        direction = "BUY" if event_bias == "BULLISH" else "SELL"
-        note = f"BOS ({event_bias}) — pullback entry with trend"
-        if htf not in ("NEUTRAL", direction):
-            note += f" (HTF {htf} is bias only, not entry)"
-        return True, note, direction
-
-    if event == "CHoCH" and event_bias:
-        # CHoCH alone = early warning. Wait for BOS/MSS before full entry.
-        direction = "BUY" if event_bias == "BULLISH" else "SELL"
-        return False, (
-            f"CHoCH ({event_bias}) — watch for pullback; wait for BOS/MSS "
-            f"confirmation before entry"
-        ), direction
-
-    # No fresh confirmation event — use structure bias, EMA only as soft context
-    if struct_bias == "BULLISH":
-        return True, "Bullish structure — look for pullback longs (EMA is bias only)", "BUY"
-    if struct_bias == "BEARISH":
-        return True, "Bearish structure — look for pullback shorts (EMA is bias only)", "SELL"
-
-    return False, "No clear structure confirmation", "NEUTRAL"
-
-
-# ============================================================
-# VOLUME PROFILE -- POC / Value Area from tick volume.
-# ============================================================
-
-
-def compute_volume_profile(df, bins=24, value_area_pct=0.68):
-    """
-    df: OHLC dataframe, optionally with a 'Volume' column (tick_volume).
-    Returns dict with bin_edges, bin_volumes, poc_price, value_area_low,
-    value_area_high -- or None if there's not enough range to profile.
-    """
-    if df is None or df.empty:
-        return None
-    price_min = float(df['Low'].min())
-    price_max = float(df['High'].max())
-    if price_max <= price_min:
-        return None
-
-    bin_edges = np.linspace(price_min, price_max, bins + 1)
-    bin_volumes = np.zeros(bins)
-    has_volume = 'Volume' in df.columns
-
-    highs = df['High'].values
-    lows = df['Low'].values
-    vols = df['Volume'].values if has_volume else np.ones(len(df))
-
-    for lo, hi, vol in zip(lows, highs, vols):
-        if hi <= lo:
+    # Candidate anchors: swings that are not the primary anchors
+    anchors = []
+    for p in pivots:
+        if p["index"] == primary["x0"] or p["index"] == primary["x1"]:
             continue
-        vol = float(vol) if vol and vol > 0 else 1.0
-        start_idx = max(0, int(np.searchsorted(bin_edges, lo, side='right')) - 1)
-        end_idx = min(bins, int(np.searchsorted(bin_edges, hi, side='left')))
-        if end_idx <= start_idx:
-            idx = min(bins - 1, max(0, start_idx))
-            bin_volumes[idx] += vol
+        anchors.append(p)
+
+    # Offset of each anchor relative to primary line at that x
+    seen_offsets = [0.0]  # primary offset = 0
+    for p in anchors:
+        y_on_primary = _line_value(primary["x0"], primary["y0"], primary["x1"], primary["y1"], p["index"])
+        offset = p["price"] - y_on_primary
+        # Skip near-duplicates
+        # Require meaningful spacing vs primary (avoid cluttered near-duplicates)
+        if any(abs(offset - o) / max(abs(y_on_primary) * 0.002, abs(o), 1e-9) < 0.35 for o in seen_offsets):
             continue
-        span = hi - lo
-        for b in range(start_idx, end_idx):
-            b_lo = max(lo, bin_edges[b])
-            b_hi = min(hi, bin_edges[b + 1])
-            frac = max(0.0, (b_hi - b_lo)) / span
-            bin_volumes[b] += vol * frac
+        if abs(offset) < abs(y_on_primary) * 0.0015:  # too tight to primary
+            continue
+        seen_offsets.append(offset)
+        y0 = primary["y0"] + offset
+        y1 = primary["y1"] + offset
+        y_end = primary["y_end"] + offset
+        members.append({
+            "x0": primary["x0"], "y0": y0,
+            "x1": primary["x1"], "y1": y1,
+            "y_end": y_end,
+            "slope": slope,
+            "offset": offset,
+            "kind": "parallel",
+            "touches": 0,
+        })
+        if len(members) >= max_members:
+            break
 
-    total = bin_volumes.sum()
-    if total <= 0:
+    # Sort by price level at chart end (lowest to highest)
+    members.sort(key=lambda m: m["y_end"])
+    return members
+
+
+
+def _detect_mw_pattern(pivots, df):
+    """
+    Detect simple M (double top) or W (double bottom) and neckline.
+    M: two swing highs near same price, neckline = swing low between them.
+    W: two swing lows near same price, neckline = swing high between them.
+    """
+    if not pivots or len(pivots) < 3 or df is None or len(df) < 20:
         return None
+    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
+    tol = max(atr * 0.35, 1e-9)
+    highs = [p for p in pivots if p["type"] == "high"]
+    lows = [p for p in pivots if p["type"] == "low"]
 
-    poc_idx = int(np.argmax(bin_volumes))
-    poc_price = float((bin_edges[poc_idx] + bin_edges[poc_idx + 1]) / 2)
+    # Double top (M) — last two significant highs
+    if len(highs) >= 2:
+        for i in range(len(highs) - 1, 0, -1):
+            h2, h1 = highs[i], highs[i - 1]
+            if abs(h2["price"] - h1["price"]) <= tol and h2["index"] > h1["index"]:
+                between = [p for p in lows if h1["index"] < p["index"] < h2["index"]]
+                if between:
+                    neck = min(between, key=lambda p: p["price"])
+                    return {
+                        "pattern": "M",
+                        "name": "Double Top (M)",
+                        "left": h1, "right": h2,
+                        "neckline": neck["price"],
+                        "neck_index": neck["index"],
+                        "bias": "SELL",
+                        "note": f"M pattern — neckline at {neck['price']:.5f}",
+                    }
 
-    lo_i = hi_i = poc_idx
-    included_vol = bin_volumes[poc_idx]
-    while included_vol / total < value_area_pct and (lo_i > 0 or hi_i < bins - 1):
-        left_vol = bin_volumes[lo_i - 1] if lo_i > 0 else -1
-        right_vol = bin_volumes[hi_i + 1] if hi_i < bins - 1 else -1
-        if right_vol >= left_vol and hi_i < bins - 1:
-            hi_i += 1
-            included_vol += bin_volumes[hi_i]
-        elif lo_i > 0:
-            lo_i -= 1
-            included_vol += bin_volumes[lo_i]
+    # Double bottom (W)
+    if len(lows) >= 2:
+        for i in range(len(lows) - 1, 0, -1):
+            l2, l1 = lows[i], lows[i - 1]
+            if abs(l2["price"] - l1["price"]) <= tol and l2["index"] > l1["index"]:
+                between = [p for p in highs if l1["index"] < p["index"] < l2["index"]]
+                if between:
+                    neck = max(between, key=lambda p: p["price"])
+                    return {
+                        "pattern": "W",
+                        "name": "Double Bottom (W)",
+                        "left": l1, "right": l2,
+                        "neckline": neck["price"],
+                        "neck_index": neck["index"],
+                        "bias": "BUY",
+                        "note": f"W pattern — neckline at {neck['price']:.5f}",
+                    }
+    return None
+
+def _grade_breakout(df: pd.DataFrame, line: Dict, kind: str, n: int) -> Dict[str, Any]:
+    """
+    Grade how much to trust a close beyond the family rail, instead of
+    treating every cross as an equal, instant signal (the #1 cause of
+    trendline whipsaws per standard breakout-trading practice):
+
+      - penetration_atr : how far beyond the line the close is, in ATR --
+        a close that's barely beyond (wick-through territory) is graded
+        weak even though it technically "broke" the line.
+      - consecutive      : how many bars in a row have closed beyond it --
+        1 bar is a first break, 2+ is starting to look real.
+      - body_ratio       : candle body vs full range on the break bar --
+        a small body with long wicks against the break direction is a
+        classic fakeout signature.
+      - retest_level     : the rail's current price -- where a limit order
+        would sit if waiting for the break-and-retest entry instead of
+        chasing the break at market.
+    """
+    close = df["Close"].values
+    open_ = df["Open"].values
+    high = df["High"].values
+    low = df["Low"].values
+    atr_col = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
+    last = n - 1
+    line_val = _line_value(line["x0"], line["y0"], line["x1"], line["y1"], last)
+    atr = float(atr_col[last]) if atr_col[last] and atr_col[last] > 0 else abs(high[last] - low[last]) or 1e-9
+
+    beyond = (close[last] > line_val) if kind == "resistance_break_up" or kind == "support_break_up" else (close[last] < line_val)
+    penetration_atr = abs(close[last] - line_val) / atr
+
+    rng = max(high[last] - low[last], 1e-9)
+    body_ratio = abs(close[last] - open_[last]) / rng
+
+    consecutive = 0
+    for i in range(last, max(last - 5, -1), -1):
+        lv_i = _line_value(line["x0"], line["y0"], line["x1"], line["y1"], i)
+        beyond_i = (close[i] > lv_i) if kind.endswith("break_up") else (close[i] < lv_i)
+        if beyond_i:
+            consecutive += 1
         else:
             break
 
+    if penetration_atr >= 0.35 and body_ratio >= 0.45 and consecutive >= 2:
+        strength = "confirmed"
+    elif penetration_atr >= 0.15 and consecutive >= 1:
+        strength = "developing"
+    else:
+        strength = "weak"
+
     return {
-        "bin_edges": bin_edges, "bin_volumes": bin_volumes, "poc_price": poc_price,
-        "value_area_low": float(bin_edges[lo_i]), "value_area_high": float(bin_edges[hi_i + 1]),
+        "strength": strength,
+        "penetration_atr": round(penetration_atr, 2),
+        "consecutive_closes": consecutive,
+        "body_ratio": round(body_ratio, 2),
+        "retest_level": line_val,
     }
 
 
-def level_volume_bonus(profile, price_level, tolerance_frac=0.0015):
+def _entry_confirmation(df: pd.DataFrame, direction: str) -> Dict[str, Any]:
     """
-    Confidence delta for a pattern's trigger/neckline sitting at a
-    volume-significant level (+) or in a thin, low-activity gap (-).
-    Range: roughly -5 to +8. Returns 0.0 if no profile is available.
+    The "Confirmation" checklist from the entry rules -- this is the part
+    that was previously missing entirely: direction used to be decided
+    purely from price-vs-rail geometry, with nothing checking whether the
+    move actually has confirmation behind it (image's Core Rule: "wait
+    for confirmation before entry", "never force a trade").
+
+    Checks 4 things:
+      1. Candlestick pattern in the trade direction
+      2. Break of MINOR market structure (small-swing BOS/MSS) confirming
+         momentum has actually shifted, not just "price is near the line"
+      3. Volume/momentum (rising volume if the feed has it, else a
+         short-term rate-of-change proxy when it doesn't)
+      4. RSI(14) above 50 for longs / below 50 for shorts
     """
-    if profile is None or price_level is None:
-        return 0.0
+    checks = {
+        "candle": (False, "no candle data"),
+        "structure": (False, "no structure data"),
+        "momentum": (False, "no momentum data"),
+        "rsi": (False, "no RSI data"),
+    }
+    if df is None or len(df) < 20 or direction not in ("BUY", "SELL"):
+        return {"checks": checks, "passed": 0, "required": 2, "confirmed": False}
 
-    bin_edges = profile["bin_edges"]
-    avg_price = float((bin_edges[0] + bin_edges[-1]) / 2) or 1.0
-    tol = avg_price * tolerance_frac
+    found, name = detect_confirmation_candle(df, direction)
+    checks["candle"] = (found, name or "no matching pattern in last 3 bars")
 
-    poc = profile["poc_price"]
-    if abs(price_level - poc) <= tol:
-        return 8.0
+    minor = analyse_structure(df, left=2, right=2, lookback=30)
+    want_bias = "BULLISH" if direction == "BUY" else "BEARISH"
+    struct_ok = minor.get("last_event") in ("BOS", "MSS") and minor.get("event_bias") == want_bias
+    checks["structure"] = (struct_ok, minor.get("note") or "no recent minor BOS/MSS")
 
-    va_lo, va_hi = profile["value_area_low"], profile["value_area_high"]
-    if va_lo - tol <= price_level <= va_hi + tol:
-        return 4.0
+    if "Volume" in df.columns and df["Volume"].tail(20).sum() > 0:
+        recent_vol = float(df["Volume"].iloc[-1])
+        avg_vol = float(df["Volume"].iloc[-11:-1].mean()) if len(df) > 11 else recent_vol
+        mom_ok = recent_vol > avg_vol * 1.05
+        checks["momentum"] = (mom_ok, f"vol {recent_vol:.0f} vs 10-bar avg {avg_vol:.0f}")
+    elif len(df) > 6:
+        roc = float((df["Close"].iloc[-1] - df["Close"].iloc[-6]) / df["Close"].iloc[-6] * 100)
+        mom_ok = roc > 0.05 if direction == "BUY" else roc < -0.05
+        checks["momentum"] = (mom_ok, f"5-bar RoC {roc:+.2f}% (no volume feed)")
 
-    bin_volumes = profile["bin_volumes"]
-    idx = int(np.searchsorted(bin_edges, price_level)) - 1
-    idx = min(max(idx, 0), len(bin_volumes) - 1)
-    max_vol = bin_volumes.max() or 1.0
-    if bin_volumes[idx] < 0.15 * max_vol:
-        return -5.0
-    return 0.0
+    if "RSI" in df.columns:
+        rsi = float(df["RSI"].iloc[-1])
+        rsi_ok = rsi > 50 if direction == "BUY" else rsi < 50
+        checks["rsi"] = (rsi_ok, f"RSI {rsi:.1f}")
+
+    passed = sum(1 for ok, _ in checks.values() if ok)
+    required = 2  # at least half the checklist -- "confirmation", not "perfection"
+    return {"checks": checks, "passed": passed, "required": required, "confirmed": passed >= required}
 
 
-# ============================================================
-# SUPPORT/RESISTANCE ZONE CLUSTERING
-# ============================================================
-
-
-def cluster_sr_zones(prices, tolerance_frac=0.0015):
+def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: int = 90) -> Dict[str, Any]:
     """
-    prices: flat list/array of price levels (pivot highs + pivot lows combined).
-    Greedily clusters values within tolerance_frac of each other.
-    Returns list of {"level": float, "touch_count": int}, sorted by touch_count desc.
+    Build one clean parallel family (ascending OR descending), not both mixed.
+    Market reveals direction: price relative to the family rails.
+
+    lookback_bars: diagonal trendlines (and the wedge detector) only
+    consider pivots from the most recent `lookback_bars` candles. Without
+    this, a long flat chop zone from days ago can out-score the swing that
+    actually shapes the current move -- a flat zone sits near dozens of
+    candles' lows just by being flat and old, racking up touch count, while
+    a real recent diagonal (the thing a trader actually draws) only grazes
+    a handful of candles because it's moving fast. Scoring by raw touch
+    count alone then picks the stale flat line and the rails end up
+    running almost horizontal across the whole chart -- indistinguishable
+    from a moving average -- instead of hugging the live structure.
+    Horizontal S/R intentionally stays full-history (older well-tested
+    flip zones ARE still relevant); only the diagonal fit is windowed.
     """
-    if prices is None or len(prices) == 0:
-        return []
-    sorted_prices = sorted(float(p) for p in prices)
-    zones = []
-    current_cluster = [sorted_prices[0]]
+    if df is None or len(df) < 30:
+        return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}
 
-    for p in sorted_prices[1:]:
-        cluster_center = sum(current_cluster) / len(current_cluster)
-        tol = cluster_center * tolerance_frac
-        if abs(p - cluster_center) <= tol:
-            current_cluster.append(p)
-        else:
-            zones.append({"level": sum(current_cluster) / len(current_cluster), "touch_count": len(current_cluster)})
-            current_cluster = [p]
-    zones.append({"level": sum(current_cluster) / len(current_cluster), "touch_count": len(current_cluster)})
-
-    zones.sort(key=lambda z: z["touch_count"], reverse=True)
-    return zones
-
-
-def zone_strength_bonus(zones, price_level, tolerance_frac=0.0015, max_bonus=10.0):
-    """
-    Confidence delta for a trigger sitting at/near a well-touched S/R zone.
-    +2 per touch beyond the first 2 (i.e. a 4-touch zone -> +4, capped at max_bonus).
-    Returns 0.0 if no zone is nearby.
-    """
-    if not zones or price_level is None:
-        return 0.0
-    for z in zones:
-        tol = z["level"] * tolerance_frac
-        if abs(price_level - z["level"]) <= tol:
-            bonus = max(0, z["touch_count"] - 2) * 2.0
-            return float(min(max_bonus, bonus))
-    return 0.0
-
-
-# ============================================================
-# CANDLESTICK CONFIRMATION PATTERNS
-# ============================================================
-def _body(o, c):
-    return abs(c - o)
-
-
-def _range(h, l):
-    return h - l
-
-
-def is_bullish_engulfing(prior, current):
-    po, ph, pl, pc = prior
-    co, ch, cl, cc = current
-    prior_bearish = pc < po
-    current_bullish = cc > co
-    engulfs = (co <= pc) and (cc >= po)
-    return prior_bearish and current_bullish and engulfs
-
-
-def is_bearish_engulfing(prior, current):
-    po, ph, pl, pc = prior
-    co, ch, cl, cc = current
-    prior_bullish = pc > po
-    current_bearish = cc < co
-    engulfs = (co >= pc) and (cc <= po)
-    return prior_bullish and current_bearish and engulfs
-
-
-def is_hammer(bar, atr):
-    o, h, l, c = bar
-    rng = _range(h, l)
-    if rng <= 0 or atr is None or atr <= 0 or rng < 0.5 * atr:
-        return False
-    body = _body(o, c)
-    if body / rng < 0.08:  # avoid doji-like near-zero bodies
-        return False
-    lower_wick = min(o, c) - l
-    upper_wick = h - max(o, c)
-    return (lower_wick >= 2.0 * body) and (upper_wick <= 0.3 * body if body > 0 else upper_wick <= 0.05 * rng)
-
-
-def is_shooting_star(bar, atr):
-    o, h, l, c = bar
-    rng = _range(h, l)
-    if rng <= 0 or atr is None or atr <= 0 or rng < 0.5 * atr:
-        return False
-    body = _body(o, c)
-    if body / rng < 0.08:
-        return False
-    upper_wick = h - max(o, c)
-    lower_wick = min(o, c) - l
-    return (upper_wick >= 2.0 * body) and (lower_wick <= 0.3 * body if body > 0 else lower_wick <= 0.05 * rng)
-
-
-def is_inverted_hammer(bar, atr):
-    # same shape as shooting star, but used at the base of a downtrend as a bullish signal
-    return is_shooting_star(bar, atr)
-
-
-def is_piercing_line(prior, current):
-    po, ph, pl, pc = prior
-    co, ch, cl, cc = current
-    prior_bearish = pc < po
-    prior_mid = (po + pc) / 2.0
-    current_bullish = cc > co
-    opens_below_prior_low_zone = co < pc  # gaps down or opens near/below prior close
-    closes_above_midpoint = cc > prior_mid and cc < po
-    return prior_bearish and current_bullish and opens_below_prior_low_zone and closes_above_midpoint
-
-
-def is_dark_cloud_cover(prior, current):
-    po, ph, pl, pc = prior
-    co, ch, cl, cc = current
-    prior_bullish = pc > po
-    prior_mid = (po + pc) / 2.0
-    current_bearish = cc < co
-    opens_above_prior_high_zone = co > pc
-    closes_below_midpoint = cc < prior_mid and cc > po
-    return prior_bullish and current_bearish and opens_above_prior_high_zone and closes_below_midpoint
-
-
-def is_morning_star(bar1, bar2, bar3):
-    o1, h1, l1, c1 = bar1
-    o2, h2, l2, c2 = bar2
-    o3, h3, l3, c3 = bar3
-    first_bearish = c1 < o1
-    second_small = _body(o2, c2) < 0.4 * _body(o1, c1) if _body(o1, c1) > 0 else True
-    gapped_down = max(o2, c2) < c1
-    third_bullish = c3 > o3
-    closes_into_first_body = c3 > (o1 + c1) / 2.0
-    return first_bearish and second_small and gapped_down and third_bullish and closes_into_first_body
-
-
-def is_evening_star(bar1, bar2, bar3):
-    o1, h1, l1, c1 = bar1
-    o2, h2, l2, c2 = bar2
-    o3, h3, l3, c3 = bar3
-    first_bullish = c1 > o1
-    second_small = _body(o2, c2) < 0.4 * _body(o1, c1) if _body(o1, c1) > 0 else True
-    gapped_up = min(o2, c2) > c1
-    third_bearish = c3 < o3
-    closes_into_first_body = c3 < (o1 + c1) / 2.0
-    return first_bullish and second_small and gapped_up and third_bearish and closes_into_first_body
-
-
-def is_three_white_soldiers(bar1, bar2, bar3):
-    bars = [bar1, bar2, bar3]
-    for (o, h, l, c) in bars:
-        if c <= o:
-            return False
-    for i in range(1, 3):
-        po, ph, pl, pc = bars[i-1]
-        o, h, l, c = bars[i]
-        if not (o > po and o < pc):  # opens within prior body
-            return False
-        if not (c > pc):  # each close higher than the last
-            return False
-    return True
-
-
-def is_three_black_crows(bar1, bar2, bar3):
-    bars = [bar1, bar2, bar3]
-    for (o, h, l, c) in bars:
-        if c >= o:
-            return False
-    for i in range(1, 3):
-        po, ph, pl, pc = bars[i-1]
-        o, h, l, c = bars[i]
-        if not (o < po and o > pc):
-            return False
-        if not (c < pc):
-            return False
-    return True
-
-
-def is_tweezer_bottom(prior, current, tolerance_frac=0.001):
-    po, ph, pl, pc = prior
-    co, ch, cl, cc = current
-    avg = (pl + cl) / 2.0 or 1.0
-    return abs(pl - cl) / abs(avg) <= tolerance_frac and pc < po and cc > co
-
-
-def is_tweezer_top(prior, current, tolerance_frac=0.001):
-    po, ph, pl, pc = prior
-    co, ch, cl, cc = current
-    avg = (ph + ch) / 2.0 or 1.0
-    return abs(ph - ch) / abs(avg) <= tolerance_frac and pc > po and cc < co
-
-
-def is_doji(bar, atr):
-    """Not used as confirmation -- indecision, not conviction. Exposed for
-    optional caution-flagging elsewhere (e.g. 'setup forming but last candle
-    was a doji, expect more chop before a real move')."""
-    o, h, l, c = bar
-    rng = _range(h, l)
-    if rng <= 0:
-        return False
-    return _body(o, c) / rng < 0.08
-
-
-def detect_confirmation_candle(df, bias):
-    """
-    Checks the most recent bars for a directionally-matching candlestick
-    confirmation pattern. Returns (found: bool, pattern_name: str or None).
-    """
     n = len(df)
-    if n < 3:
-        return False, None
-    atr = float(df['ATR'].iloc[-1]) if 'ATR' in df.columns else None
+    # LOCKED: only non-ranging swings (zigzag_swings now filters ranging legs)
+    # Prefer cleaner, larger pivots so lines follow real directional structure
+    pivots = zigzag_swings(df, depth=4, deviation_atr=0.30)
+    if len(pivots) < 4:
+        pivots = zigzag_swings(df, depth=3, deviation_atr=0.25)
+    if len(pivots) < 3:
+        pivots = zigzag_swings(df, depth=3, deviation_atr=0.18)
 
-    def bar_at(i):
-        row = df.iloc[i]
-        return (float(row['Open']), float(row['High']), float(row['Low']), float(row['Close']))
+    # Recent-only candidate pool for the DIAGONAL fit (see docstring).
+    cutoff = max(0, n - lookback_bars)
+    recent_pivots = [p for p in pivots if p["index"] >= cutoff]
+    if len(recent_pivots) < 3:
+        # Not enough recent structure -- widen gradually rather than
+        # snapping straight back to the full, stale-prone history.
+        recent_pivots = [p for p in pivots if p["index"] >= max(0, n - lookback_bars * 2)]
+    if len(recent_pivots) < 2:
+        recent_pivots = pivots
 
-    b1, b2, b3 = bar_at(-3), bar_at(-2), bar_at(-1)
+    support = _fit_primary(recent_pivots, "support", n, df)
+    resistance = _fit_primary(recent_pivots, "resistance", n, df)
 
-    if bias == "BUY":
-        if is_bullish_engulfing(b2, b3): return True, "Bullish Engulfing"
-        if is_hammer(b3, atr): return True, "Hammer"
-        if is_inverted_hammer(b3, atr): return True, "Inverted Hammer"
-        if is_piercing_line(b2, b3): return True, "Piercing Line"
-        if is_morning_star(b1, b2, b3): return True, "Morning Star"
-        if is_three_white_soldiers(b1, b2, b3): return True, "Three White Soldiers"
-        if is_tweezer_bottom(b2, b3): return True, "Tweezer Bottom"
+    # Reject a candidate diagonal line whose actual price movement across
+    # its own span is too shallow to be a meaningful trend -- e.g. two
+    # swing lows that are technically "rising" by a few points over three
+    # days. That's a range, not an uptrend, and drawing it as a diagonal
+    # "ascending" rail is misleading -- it should be left for the
+    # horizontal S/R clustering below (_detect_horizontal_levels) to pick
+    # up instead, which is exactly what that layer is for.
+    MIN_TREND_MOVE_ATR = 1.8  # total rise/fall across the line's full span, in ATRs
+    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
+
+    def _has_meaningful_slope(line):
+        if not line:
+            return False
+        if not atr_now or atr_now <= 0:
+            return True  # can't measure -- don't reject on a technicality
+        total_move = abs(line["y1"] - line["y0"])
+        return total_move >= MIN_TREND_MOVE_ATR * atr_now
+
+    if support and not _has_meaningful_slope(support):
+        support = None
+        shallow_rejected = True
     else:
-        if is_bearish_engulfing(b2, b3): return True, "Bearish Engulfing"
-        if is_shooting_star(b3, atr): return True, "Shooting Star"
-        if is_dark_cloud_cover(b2, b3): return True, "Dark Cloud Cover"
-        if is_evening_star(b1, b2, b3): return True, "Evening Star"
-        if is_three_black_crows(b1, b2, b3): return True, "Three Black Crows"
-        if is_tweezer_top(b2, b3): return True, "Tweezer Top"
+        shallow_rejected = False
+    if resistance and not _has_meaningful_slope(resistance):
+        resistance = None
+        shallow_rejected = True
 
-    return False, None
+    # LOCKED RULE (updated):
+    #   Uptrend  → map sequential pivot LOWS (A→N higher lows / ascending support)
+    #   Downtrend → map sequential pivot HIGHS (lower highs / descending resistance)
+    # Prefer the directional family that matches structure; do not mix.
+    # Short-term trendline structure is PRIMARY — we adapt to what price is
+    # actually doing instead of fighting it with lagging higher-timeframe bias.
+    close = float(df["Close"].iloc[-1])
+    primary = None
+    family_kind = "none"
+
+    # Detect simple structure bias from recent non-ranging pivots
+    # Prefer sequential higher lows (A→N) for bullish, sequential lower highs for bearish.
+    recent = pivots[-8:] if len(pivots) >= 4 else pivots
+    highs = [p for p in recent if p["type"] == "high"]
+    lows = [p for p in recent if p["type"] == "low"]
+    struct_bias = "NEUTRAL"
+    if len(highs) >= 2 and len(lows) >= 2:
+        hh = highs[-1]["price"] > highs[-2]["price"]
+        hl = lows[-1]["price"] > lows[-2]["price"]
+        lh = highs[-1]["price"] < highs[-2]["price"]
+        ll = lows[-1]["price"] < lows[-2]["price"]
+        if hh and hl:
+            struct_bias = "BULLISH"
+        elif lh and ll:
+            struct_bias = "BEARISH"
+        # Also accept pure sequential higher lows even without clear HH yet
+        elif len(lows) >= 3 and lows[-1]["price"] > lows[-2]["price"] > lows[-3]["price"]:
+            struct_bias = "BULLISH"
+        elif len(highs) >= 3 and highs[-1]["price"] < highs[-2]["price"] < highs[-3]["price"]:
+            struct_bias = "BEARISH"
+
+    if struct_bias == "BULLISH" and support:
+        # Uptrend: only map pivot lows (sequential A→N)
+        primary, family_kind = support, "ascending"
+    elif struct_bias == "BEARISH" and resistance:
+        # Downtrend: only map pivot highs
+        primary, family_kind = resistance, "descending"
+    elif support and resistance:
+        s_end = support["y_end"]
+        r_end = resistance["y_end"]
+        # Prefer ascending when price is clearly above the rising support
+        if close >= s_end * 0.998:
+            primary, family_kind = support, "ascending"
+        elif close <= r_end * 1.002:
+            primary, family_kind = resistance, "descending"
+        elif support["touches"] >= resistance["touches"]:
+            primary, family_kind = support, "ascending"
+        elif resistance["touches"] > support["touches"]:
+            primary, family_kind = resistance, "descending"
+        elif close > (s_end + r_end) / 2:
+            primary, family_kind = support, "ascending"
+        else:
+            primary, family_kind = resistance, "descending"
+    elif support:
+        primary, family_kind = support, "ascending"
+    elif resistance:
+        primary, family_kind = resistance, "descending"
+
+    family_lines = []
+    channel = None
+    if primary:
+        family_lines = _build_parallel_family(primary, recent_pivots, n, max_members=min(2, max_lines))
+        if len(family_lines) >= 2:
+            channel = {
+                "lower": family_lines[0],
+                "upper": family_lines[-1],
+                "mid_end": (family_lines[0]["y_end"] + family_lines[-1]["y_end"]) / 2.0,
+                "width": abs(family_lines[-1]["y_end"] - family_lines[0]["y_end"]),
+                "members": family_lines,
+            }
+
+    # Direction from family geometry (price reveals it)
+    direction = "NEUTRAL"
+    strength = 40
+    reasons = []
+    if shallow_rejected and not primary:
+        reasons.append(
+            "No diagonal trendline met the minimum slope -- price is "
+            "ranging rather than trending here; see horizontal S/R levels instead"
+        )
+    breakout_grade = None
+
+    if primary and family_lines:
+        lower = family_lines[0]["y_end"]
+        upper = family_lines[-1]["y_end"]
+        mid = (lower + upper) / 2.0
+        touch_note = {
+            "unconfirmed": "⚠️ only 2 touches -- unconfirmed, treat as tentative",
+            "confirmed": f"{primary['touches']} touches -- validated structure",
+            "crowded": f"{primary['touches']} touches -- crowded level, order flow may be depleted",
+        }.get(primary.get("quality"), f"{primary['touches']} touches")
+
+        if family_kind == "ascending":
+            # HARD RULE: price clearly above rising support → BUY only.
+            # We adapt to the short-term trendline structure instead of
+            # fighting it with lagging higher-timeframe direction.
+            if close >= lower:
+                direction = "BUY"
+                strength = 60 + min(25, primary["touches"] * 7)
+                reasons.append(f"Ascending family · {touch_note}")
+                reasons.append("Short-term Trend: BUY (price above rising support A→N)")
+                if primary.get("quality") == "unconfirmed":
+                    strength -= 10
+                elif primary.get("quality") == "crowded":
+                    strength -= 5
+                if close > mid:
+                    reasons.append("Price in upper half of channel — bullish control")
+                    strength += 12
+                else:
+                    reasons.append("Price near support rail — watch bounce / break")
+            else:
+                brk = _grade_breakout(df, primary, "support_break_down", n)
+                direction = "SELL"
+                if brk["strength"] == "confirmed":
+                    strength = 68
+                    reasons.append(f"Confirmed break below ascending support — "
+                                    f"{brk['penetration_atr']} ATR beyond, {brk['consecutive_closes']} closes, "
+                                    f"body {brk['body_ratio']}")
+                    reasons.append("Short-term Trend: SELL (break of rising support)")
+                elif brk["strength"] == "developing":
+                    strength = 52
+                    reasons.append(f"Developing break below support ({brk['consecutive_closes']} close(s), "
+                                    f"{brk['penetration_atr']} ATR) — not yet confirmed, watch for retest "
+                                    f"at {brk['retest_level']:.5f}")
+                else:
+                    strength = 38
+                    reasons.append(f"Weak/wick break below support ({brk['penetration_atr']} ATR, "
+                                    f"body {brk['body_ratio']}) — likely noise, high fakeout risk")
+                reasons.append(touch_note)
+                breakout_grade = brk
+        else:  # descending
+            # HARD RULE: price clearly below falling resistance → SELL only.
+            if close <= upper:
+                direction = "SELL"
+                strength = 60 + min(25, primary["touches"] * 7)
+                reasons.append(f"Descending family · {touch_note}")
+                reasons.append("Short-term Trend: SELL (price below falling resistance)")
+                if primary.get("quality") == "unconfirmed":
+                    strength -= 10
+                elif primary.get("quality") == "crowded":
+                    strength -= 5
+                if close < mid:
+                    reasons.append("Price in lower half of channel — bearish control")
+                    strength += 12
+                else:
+                    reasons.append("Price near resistance rail — watch reject / break")
+            else:
+                brk = _grade_breakout(df, primary, "resistance_break_up", n)
+                direction = "BUY"
+                if brk["strength"] == "confirmed":
+                    strength = 68
+                    reasons.append(f"Confirmed break above descending resistance — "
+                                    f"{brk['penetration_atr']} ATR beyond, {brk['consecutive_closes']} closes, "
+                                    f"body {brk['body_ratio']}")
+                    reasons.append("Short-term Trend: BUY (break of falling resistance)")
+                elif brk["strength"] == "developing":
+                    strength = 52
+                    reasons.append(f"Developing break above resistance ({brk['consecutive_closes']} close(s), "
+                                    f"{brk['penetration_atr']} ATR) — not yet confirmed, watch for retest "
+                                    f"at {brk['retest_level']:.5f}")
+                else:
+                    strength = 38
+                    reasons.append(f"Weak/wick break above resistance ({brk['penetration_atr']} ATR, "
+                                    f"body {brk['body_ratio']}) — likely noise, high fakeout risk")
+                reasons.append(touch_note)
+                breakout_grade = brk
+
+    # Converging wedge/triangle (independent-slope rails) and full-history
+    # horizontal S/R -- computed off the FULL pivot list, before it gets
+    # truncated to the last 16 below, so an older well-tested level or a
+    # wedge anchored further back doesn't silently drop out.
+    wedge = _detect_converging_wedge(recent_pivots, df, n)
+    # Keep only the 2 strongest horizontal levels (1 support + 1 resistance,
+    # nearest to price) for the chart -- the full clustered history is still
+    # useful for the text report, but 3-4 stacked S/R lines on top of a
+    # diagonal family + wedge/M-W pattern is what caused the label pile-up
+    # around the entry zone. The report path can still ask for more via
+    # max_levels if it wants the full picture.
+    horizontal_levels = _detect_horizontal_levels(df, pivots, n, max_levels=2)
+    if wedge and direction == "NEUTRAL" and wedge["bias"] != "NEUTRAL":
+        direction = wedge["bias"]
+        strength = max(strength, 58)
+        reasons.append(f"{wedge['pattern']} — rails converging toward apex")
+
+    projections = _measured_move_projections(df, pivots, direction)
+    vp = compute_volume_profile(df.iloc[:-1])
+    mw = _detect_mw_pattern(pivots, df)
+    if mw:
+        reasons.append(mw["note"])
+        if direction == "NEUTRAL":
+            direction = mw["bias"]
+            strength = max(strength, 65)
+        elif direction == mw["bias"]:
+            strength = min(100, strength + 12)
+    else:
+        mw = None
+
+    # --- Entry confirmation gate (Core Rule: wait for confirmation, never
+    # force a trade). This did not exist before -- direction was decided
+    # purely from price-vs-rail geometry above. It still is, but now we
+    # separately record whether the move is actually confirmed, and the
+    # chart/report show it plainly instead of presenting every geometric
+    # bias as a ready-to-fire signal.
+    entry_rules = _entry_confirmation(df, direction) if direction in ("BUY", "SELL") else None
+    if entry_rules:
+        passed_names = [k for k, (ok, _) in entry_rules["checks"].items() if ok]
+        if entry_rules["confirmed"]:
+            strength = min(100, strength + 6)
+            reasons.append(f"Entry confirmed ({entry_rules['passed']}/4 checks: {', '.join(passed_names) or 'none'})")
+        else:
+            strength = max(0, strength - 15)
+            reasons.append(
+                f"⚠ Entry NOT confirmed yet ({entry_rules['passed']}/4 checks, need {entry_rules['required']}) "
+                f"— trendline bias only, wait for confirmation before entering"
+            )
+
+    # --- Order block reaction gate --------------------------------------
+    # order_blocks (computed below for the chart) were being detected and
+    # drawn but never actually consulted by the direction/strength logic --
+    # so the bot could show a BUY signal while price was sitting inside a
+    # bearish supply OB, or vice versa, with zero acknowledgement of it.
+    # Compute once here, before the return, and let it push back on
+    # whatever the trendline geometry decided.
+    order_blocks = detect_order_blocks(df, lookback=len(df))
+    active_ob = None
+    for ob in order_blocks:
+        if float(ob["bottom"]) <= close <= float(ob["top"]):
+            active_ob = ob
+            break  # list is nearest-to-price first
+    if active_ob:
+        ob_side = active_ob["type"]  # 'bullish' or 'bearish'
+        ob_desc = (f"{ob_side.capitalize()} order block ({active_ob['grade']}, "
+                   f"{active_ob['confidence']}%, {active_ob['freshness']})")
+        if direction == "BUY" and ob_side == "bearish":
+            strength = max(0, strength - 20)
+            reasons.append(f"⚠️ Price is trading INSIDE a {ob_desc} — supply zone overhead, "
+                            f"counter-trend risk, expect rejection before continuation")
+        elif direction == "SELL" and ob_side == "bullish":
+            strength = max(0, strength - 20)
+            reasons.append(f"⚠️ Price is trading INSIDE a {ob_desc} — demand zone below, "
+                            f"counter-trend risk, expect rejection before continuation")
+        elif direction == "SELL" and ob_side == "bearish":
+            strength = min(100, strength + 10)
+            reasons.append(f"✅ Price reacting inside the {ob_desc} that's driving this move — "
+                            f"aligned with direction")
+        elif direction == "BUY" and ob_side == "bullish":
+            strength = min(100, strength + 10)
+            reasons.append(f"✅ Price reacting inside the {ob_desc} that's driving this move — "
+                            f"aligned with direction")
+        elif direction == "NEUTRAL":
+            direction = "SELL" if ob_side == "bearish" else "BUY"
+            strength = max(strength, 50)
+            reasons.append(f"Price sitting inside an untested {ob_desc} with no trendline bias otherwise — "
+                            f"reacting off the zone")
+
+    # Series for chart (only the parallel family — clean)
+    upper_line = np.full(n, np.nan)
+    lower_line = np.full(n, np.nan)
+    mid_line = np.full(n, np.nan)
+    if channel:
+        u, lo = channel["upper"], channel["lower"]
+        for i in range(n):
+            upper_line[i] = _line_value(u["x0"], u["y0"], u["x1"], u["y1"], i)
+            lower_line[i] = _line_value(lo["x0"], lo["y0"], lo["x1"], lo["y1"], i)
+            mid_line[i] = (upper_line[i] + lower_line[i]) / 2.0
+
+    return {
+        "direction": direction,
+        "strength": max(0, min(100, int(strength))),
+        "reasons": reasons,
+        "entry_rules": entry_rules,
+        "family_kind": family_kind,
+        "family_lines": family_lines,  # the clean parallel set
+        "uptrends": [primary] if family_kind == "ascending" and primary else [],
+        "downtrends": [primary] if family_kind == "descending" and primary else [],
+        "channel": channel,
+        "wedge": wedge,
+        "horizontal_levels": horizontal_levels,
+        "projections": projections,
+        "mw_pattern": mw,
+        "pivots": pivots[-16:],
+        "volume_profile": vp,
+        "upper_line": upper_line,
+        "lower_line": lower_line,
+        "middle_line": mid_line,
+        "df": df,
+        "mode": "channel" if channel else "lines",
+        "breakout_grade": breakout_grade,
+        "primary_quality": primary.get("quality") if primary else None,
+        "primary_touches": primary.get("touches") if primary else 0,
+        # Single "which pattern wins the chart" decision, so the renderer
+        # never has to draw wedge + M/W + channel all at once. Priority:
+        # M/W (specific reversal structure, high signal) > wedge/triangle
+        # (specific continuation/reversal structure) > plain channel/bias
+        # line (just "this is the trend", not a named pattern).
+        "active_pattern": (
+            "mw" if mw else "wedge" if wedge else "channel" if channel else "none"
+        ),
+        "pattern_confidence": max(0, min(100, int(strength))),
+        # Every wick that actually touches the bias line within tolerance --
+        # not just its 2 defining pivots -- so the chart can circle each
+        # bounce (the "notice the bounces" behavior from a hand-drawn map).
+        "bias_touch_points": (
+            _touch_points(df, int(primary["x0"]), primary["y0"], int(primary["x1"]), primary["y1"], primary["kind"])
+            if primary else []
+        ),
+        # Order blocks "likely to be respected" -- graded by displacement
+        # strength, freshness, and whether they actually caused a
+        # confirmed structure break (see detect_order_blocks docstring).
+        # Previously excluded by design; added back deliberately now.
+        "order_blocks": order_blocks,
+        "active_order_block": active_ob,
+    }
 
 
-# ============================================================
-# CHART PATTERN SCANNER -- used internally by the auto-trading
-# confirmation pipeline (execution_engine.py). Not exposed as a
-# Telegram menu strategy.
-# ============================================================
+def _measured_move_projections(df, pivots, direction) -> List[Dict[str, Any]]:
+    if not pivots or len(pivots) < 2:
+        return []
+    last, prev = pivots[-1], pivots[-2]
+    d = abs(last["price"] - prev["price"])
+    if d <= 0:
+        return []
+    close = float(df["Close"].iloc[-1])
+    projs = []
+    mults = [(1.0, "P1 1.0x"), (1.618, "P2 1.618x"), (2.618, "P3 2.618x")]
+    if direction == "BUY":
+        base = last["price"] if last["type"] == "low" else close
+        for m, label in mults:
+            projs.append({"price": base + d * m, "label": label, "mult": m, "side": "BUY"})
+    elif direction == "SELL":
+        base = last["price"] if last["type"] == "high" else close
+        for m, label in mults:
+            projs.append({"price": base - d * m, "label": label, "mult": m, "side": "SELL"})
+    return projs
 
 
-# ----------------------------------------------------------------------------
-# 1. SWING PIVOT DETECTION
-# ----------------------------------------------------------------------------
-def find_pivots(df, left=3, right=3):
+def _liquidity_targets(pivots, direction: str, entry: float) -> List[float]:
     """
-    Swing pivot detection, sourced from the shared ZigZag engine
-    (market_structure.zigzag_swings) so pattern scanning agrees with
-    everything else in the bot (chart drawing, trendlines, SMC zones,
-    structure engine) instead of running its own separate fractal calc
-    that could disagree and produce conflicting reads across strategies.
-
-    left/right are kept as the public knobs (unchanged call signature)
-    and mapped onto ZigZag's `depth` so nothing else has to change.
-
-    Returns two lists of integer indices (positions, not timestamps):
-        pivot_highs, pivot_lows
+    External liquidity pools price is drawn to:
+      BUY  → swing highs above entry (BSL)
+      SELL → swing lows below entry (SSL)
+    Sorted nearest → farthest.
     """
-    depth = max(2, left + right)
-    pivots = zigzag_swings(df, depth=depth, deviation_atr=0.30)
-    pivot_highs = [p["index"] for p in pivots if p["type"] == "high"]
-    pivot_lows = [p["index"] for p in pivots if p["type"] == "low"]
-    return pivot_highs, pivot_lows
-
-
-def _dedupe_adjacent(pivots, min_gap):
-    """Collapse pivots that are within min_gap bars of each other, keeping the first."""
     if not pivots:
-        return pivots
-    out = [pivots[0]]
-    for p in pivots[1:]:
-        if p - out[-1] >= min_gap:
-            out.append(p)
-    return out
+        return []
+    targets = []
+    for p in pivots:
+        px = float(p["price"])
+        if direction == "BUY" and p.get("type") == "high" and px > entry:
+            targets.append(px)
+        elif direction == "SELL" and p.get("type") == "low" and px < entry:
+            targets.append(px)
+    if direction == "BUY":
+        targets.sort()  # nearest high first
+    else:
+        targets.sort(reverse=True)  # nearest low first
+    # unique with small tolerance
+    cleaned = []
+    for t in targets:
+        if not cleaned or abs(t - cleaned[-1]) / max(abs(t), 1e-9) > 0.0003:
+            cleaned.append(t)
+    return cleaned
 
 
-# ----------------------------------------------------------------------------
-# 2. SHARED HELPERS
-# ----------------------------------------------------------------------------
-def _line_through(p1, p2):
-    """Return (slope, intercept) of the line through two (x, y) points."""
-    (x1, y1), (x2, y2) = p1, p2
-    if x2 == x1:
-        return 0.0, y1
-    slope = (y2 - y1) / (x2 - x1)
-    intercept = y1 - slope * x1
-    return slope, intercept
+def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -> Optional[Dict[str, Any]]:
+    """
+    Position box with DYNAMIC R:R from real liquidity distance.
 
+    Entry  : nearest structure rail / close
+    SL     : beyond invalidation (last opposing swing or rail break)
+    TP1/TP2: nearest / next liquidity pools (swing highs or lows)
+    R:R    : |TP1 - Entry| / |Entry - SL|  (not a fixed multiple)
+    """
+    if not family or family.get("error"):
+        return None
+    df = family.get("df")
+    if df is None or df.empty:
+        return None
+    close = float(df["Close"].iloc[-1])
+    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
+    direction = family.get("direction", "NEUTRAL")
+    if direction not in ("BUY", "SELL"):
+        return None
 
-def _pct(a, b):
-    """Percent difference of a relative to b."""
-    if b == 0:
-        return 0.0
-    return (a - b) / abs(b)
+    pivots = family.get("pivots") or []
+    lines = family.get("family_lines") or []
+    channel = family.get("channel")
+    mw = family.get("mw_pattern")
+    projs = family.get("projections") or []
+    vp = family.get("volume_profile") or {}
+    brk = family.get("breakout_grade")
+    entry_rules = family.get("entry_rules")
+    confirmed = bool(entry_rules and entry_rules.get("confirmed"))
 
+    # Trendline value at the current bar -- used as the other half of the
+    # "SL below recent swing low / trendline" rule, alongside the swing-low
+    # based stop already computed below. Only trusted if the line's last
+    # defining touch is recent -- an old line stretched a long way to reach
+    # the current bar isn't a real invalidation level, and letting it push
+    # the stop out is exactly how risk balloons for no real reason.
+    primary = (family.get("uptrends") or family.get("downtrends") or [None])[0]
+    trendline_val = None
+    if primary and df is not None and len(df) and primary.get("bars_since_last_touch", 999) <= 25:
+        trendline_val = _line_value(primary["x0"], primary["y0"], primary["x1"], primary["y1"], len(df) - 1)
 
-def _atr(df):
-    if 'ATR' in df.columns and not df['ATR'].isna().all():
-        return float(df['ATR'].iloc[-1])
-    return float((df['High'] - df['Low']).tail(14).mean())
+    if direction == "BUY":
+        # Entry: support rail or close
+        entry = close
+        if lines:
+            below = [m["y_end"] for m in lines if m["y_end"] <= close]
+            if below:
+                entry = max(below)
+        elif channel and channel.get("lower"):
+            entry = float(channel["lower"].get("y_end", close))
 
+        # SL: below last swing low under entry (structural invalidation)
+        swing_lows = [float(p["price"]) for p in pivots if p.get("type") == "low" and p["price"] < entry]
+        if swing_lows:
+            sl = min(swing_lows[-2:], default=min(swing_lows))  # recent low
+            sl = min(swing_lows) if len(swing_lows) == 1 else sorted(swing_lows)[-1]
+            # use nearest swing low below entry
+            below_entry = [x for x in swing_lows if x < entry]
+            sl = max(below_entry) if below_entry else entry - atr * atr_mult_sl
+            sl = sl - atr * 0.15  # buffer beyond liquidity
+        else:
+            sl = entry - atr * atr_mult_sl
+        # "below recent swing low / trendline" -- use whichever is further
+        # from entry, but capped: a stop should never balloon past ~3x ATR
+        # just because a (possibly stale) trendline sat further away.
+        if trendline_val is not None and trendline_val < entry:
+            max_reasonable_risk = max(atr * 3.0, (entry - sl) * 1.4)
+            candidate_sl = trendline_val - atr * 0.15
+            if (entry - candidate_sl) <= max_reasonable_risk:
+                sl = min(sl, candidate_sl)
 
-class Pattern:
-    """Container for a detected pattern, with everything needed to render it."""
-    def __init__(self, name, category, bias, trigger_price, trigger_line,
-                 key_points, confidence, note):
-        self.name = name                 # display name
-        self.category = category         # 'reversal' | 'continuation'
-        self.bias = bias                 # 'BUY' | 'SELL'
-        self.trigger_price = trigger_price   # single price level to watch (breakout/neckline)
-        self.trigger_line = trigger_line     # list of (x, y) points describing the line to draw (2+ pts)
-        self.key_points = key_points          # list of (x, y, label) marker points to draw
-        self.confidence = confidence      # 0-100 raw detector confidence
-        self.note = note                  # human-readable rationale
+        # Targets = buy-side liquidity (swing highs above) + neckline if W + POC if above
+        liq = _liquidity_targets(pivots, "BUY", entry)
+        if mw and mw.get("pattern") == "W" and mw.get("neckline", 0) > entry:
+            liq = sorted(set(liq + [float(mw["neckline"])]))
+        if vp.get("poc_price") and vp["poc_price"] > entry:
+            liq = sorted(set(liq + [float(vp["poc_price"])]))
+        # fallback measured move only if no swing liquidity
+        if not liq and projs:
+            liq = [float(p["price"]) for p in projs if p["price"] > entry]
 
-    def to_dict(self):
+        tp1 = liq[0] if liq else entry + atr * 1.5
+        tp2 = liq[1] if len(liq) > 1 else (liq[0] if liq else entry + atr * 2.5)
+
+        order_type = "LIMIT" if entry < close - atr * 0.08 else "MARKET"
+        entry_note = None
+        # A breakout that isn't confirmed yet (weak/developing) shouldn't be
+        # chased at market -- route the entry to the break-and-retest zone
+        # instead, per standard breakout-trading practice.
+        if brk and brk["strength"] != "confirmed":
+            entry = brk["retest_level"]
+            order_type = "LIMIT"
+            entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
+                          f"broken rail at {entry:.5f} instead of chasing at market")
+            sl = min(sl, entry - atr * 0.5)
+
+        risk = abs(entry - sl)
+        reward_tp1 = abs(tp1 - entry)
+        # Headline reward/R:R quoted against TP2 ("next resistance", a real
+        # target) rather than TP1 ("previous high" -- often the very next
+        # bit of structure, deliberately close). Quoting R:R off the quick
+        # partial made every setup look worse than the actual plan is.
+        reward = abs(tp2 - entry) if tp2 is not None else reward_tp1
+        rr = (reward / risk) if risk > 0 else 0.0
+        rr_tp1 = (reward_tp1 / risk) if risk > 0 else 0.0
+
+        # TP3: "use RR 1:2 or 1:3" -- prefer a real liquidity level beyond
+        # RR 1:2 if one exists, otherwise the fixed RR 1:2 extension.
+        tp3 = entry + risk * 2.0
+        tp3_basis = "fixed RR 1:2 target"
+        for lvl in liq[2:]:
+            cand_rr = abs(lvl - entry) / risk if risk > 0 else 0
+            if cand_rr >= 2.0:
+                tp3 = lvl
+                tp3_basis = f"next liquidity level (RR 1:{cand_rr:.1f})"
+                break
+
+        # Full draw target: an untouched bearish OB above, or the volume
+        # profile POC if it sits further out than either, is where a BUY
+        # is actually being drawn to -- take whichever real magnet is
+        # farthest beyond wherever the liquidity/RR math landed.
+        obs = family.get("order_blocks") or []
+        magnet = [ob for ob in obs if ob["type"] == "bearish" and ob["freshness"] == "untested"
+                  and float(ob["bottom"]) > entry]
+        if magnet:
+            nearest_magnet = min(magnet, key=lambda ob: float(ob["bottom"]))
+            magnet_edge = float(nearest_magnet["bottom"])
+            if magnet_edge > tp3:
+                tp3 = magnet_edge
+                tp3_basis = f"unmitigated bearish OB @ {magnet_edge:.5f} ({nearest_magnet['confidence']}%)"
+        poc = vp.get("poc_price")
+        if poc is not None and float(poc) > entry and float(poc) > tp3:
+            tp3 = float(poc)
+            tp3_basis = f"POC magnet @ {tp3:.5f}"
+
         return {
-            "name": self.name, "category": self.category, "bias": self.bias,
-            "trigger_price": self.trigger_price, "trigger_line": self.trigger_line,
-            "key_points": self.key_points, "confidence": self.confidence, "note": self.note,
+            "side": "LONG",
+            "direction": "BUY",
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "tp3_basis": tp3_basis,
+            "rr": round(rr, 2),
+            "rr_tp1": round(rr_tp1, 2),
+            "risk": risk,
+            "reward": reward,
+            "liquidity_tp1": "swing high / BSL" if liq else "measured move",
+            "order_type": order_type,
+            "entry_note": entry_note,
+            "breakout_grade": brk,
+            "confirmed": confirmed,
+            "entry_rules": entry_rules,
+        }
+
+    else:  # SELL
+        entry = close
+        if lines:
+            above = [m["y_end"] for m in lines if m["y_end"] >= close]
+            if above:
+                entry = min(above)
+        elif channel and channel.get("upper"):
+            entry = float(channel["upper"].get("y_end", close))
+
+        swing_highs = [float(p["price"]) for p in pivots if p.get("type") == "high" and p["price"] > entry]
+        if swing_highs:
+            above_entry = [x for x in swing_highs if x > entry]
+            sl = min(above_entry) if above_entry else entry + atr * atr_mult_sl
+            sl = sl + atr * 0.15
+        else:
+            sl = entry + atr * atr_mult_sl
+        # "below recent swing low / trendline" mirrored for shorts: SL
+        # above recent swing high OR the trendline (capped the same way).
+        if trendline_val is not None and trendline_val > entry:
+            max_reasonable_risk = max(atr * 3.0, (sl - entry) * 1.4)
+            candidate_sl = trendline_val + atr * 0.15
+            if (candidate_sl - entry) <= max_reasonable_risk:
+                sl = max(sl, candidate_sl)
+
+        # Sell-side liquidity (swing lows below) + M neckline + POC
+        liq = _liquidity_targets(pivots, "SELL", entry)
+        if mw and mw.get("pattern") == "M" and mw.get("neckline", 0) < entry:
+            liq_set = list(liq) + [float(mw["neckline"])]
+            liq = sorted(liq_set, reverse=True)
+        if vp.get("poc_price") and vp["poc_price"] < entry:
+            liq = sorted(set(list(liq) + [float(vp["poc_price"])]), reverse=True)
+        if not liq and projs:
+            liq = [float(p["price"]) for p in projs if p["price"] < entry]
+
+        tp1 = liq[0] if liq else entry - atr * 1.5
+        tp2 = liq[1] if len(liq) > 1 else (liq[0] if liq else entry - atr * 2.5)
+
+        order_type = "LIMIT" if entry > close + atr * 0.08 else "MARKET"
+        entry_note = None
+        if brk and brk["strength"] != "confirmed":
+            entry = brk["retest_level"]
+            order_type = "LIMIT"
+            entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
+                          f"broken rail at {entry:.5f} instead of chasing at market")
+            sl = max(sl, entry + atr * 0.5)
+
+        risk = abs(sl - entry)
+        reward_tp1 = abs(entry - tp1)
+        reward = abs(entry - tp2) if tp2 is not None else reward_tp1
+        rr = (reward / risk) if risk > 0 else 0.0
+        rr_tp1 = (reward_tp1 / risk) if risk > 0 else 0.0
+
+        tp3 = entry - risk * 2.0
+        tp3_basis = "fixed RR 1:2 target"
+        for lvl in liq[2:]:
+            cand_rr = abs(entry - lvl) / risk if risk > 0 else 0
+            if cand_rr >= 2.0:
+                tp3 = lvl
+                tp3_basis = f"next liquidity level (RR 1:{cand_rr:.1f})"
+                break
+
+        # Full draw target: an untouched bullish OB below, or the volume
+        # profile POC if it sits further out than either, is where a SELL
+        # is actually being drawn to -- take whichever real magnet is
+        # farthest beyond wherever the liquidity/RR math landed.
+        obs = family.get("order_blocks") or []
+        magnet = [ob for ob in obs if ob["type"] == "bullish" and ob["freshness"] == "untested"
+                  and float(ob["top"]) < entry]
+        if magnet:
+            nearest_magnet = min(magnet, key=lambda ob: entry - float(ob["top"]))
+            magnet_edge = float(nearest_magnet["top"])
+            if magnet_edge < tp3:
+                tp3 = magnet_edge
+                tp3_basis = f"unmitigated bullish OB @ {magnet_edge:.5f} ({nearest_magnet['confidence']}%)"
+        poc = vp.get("poc_price")
+        if poc is not None and float(poc) < entry and float(poc) < tp3:
+            tp3 = float(poc)
+            tp3_basis = f"POC magnet @ {tp3:.5f}"
+
+        return {
+            "side": "SHORT",
+            "direction": "SELL",
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "tp3_basis": tp3_basis,
+            "rr": round(rr, 2),
+            "rr_tp1": round(rr_tp1, 2),
+            "risk": risk,
+            "reward": reward,
+            "liquidity_tp1": "swing low / SSL" if liq else "measured move",
+            "order_type": order_type,
+            "entry_note": entry_note,
+            "breakout_grade": brk,
+            "confirmed": confirmed,
+            "entry_rules": entry_rules,
         }
 
 
-# ----------------------------------------------------------------------------
-# 3. INDIVIDUAL PATTERN DETECTORS
-#    Each takes (df, pivot_highs, pivot_lows) and returns a Pattern or None.
-# ----------------------------------------------------------------------------
-
-def detect_double_top(df, ph, pl, min_bars=8, min_depth_atr=1.0, max_peak_diff=0.006):
-    """
-    Stricter Double Top for lower noise (especially on 30m).
-    - Peaks within max_peak_diff (~0.6%)
-    - At least min_bars between the two tops
-    - Trough depth >= min_depth_atr * ATR
-    """
-    if len(ph) < 2:
-        return None
-    i2, i1 = ph[-1], ph[-2]
-    if (i2 - i1) < min_bars:
-        return None
-    h1, h2 = float(df['High'].iloc[i1]), float(df['High'].iloc[i2])
-    if abs(_pct(h2, h1)) > max_peak_diff:
-        return None
-    between_lows = [p for p in pl if i1 < p < i2]
-    if not between_lows:
-        return None
-    trough_i = min(between_lows, key=lambda p: df['Low'].iloc[p])
-    neckline = float(df['Low'].iloc[trough_i])
-    atr = _atr(df) or 1e-9
-    depth = max(h1, h2) - neckline
-    if depth < min_depth_atr * atr:
-        return None
-    current = float(df['Close'].iloc[-1])
-    if current > max(h1, h2):
-        return None
-    equality_bonus = min(12, (1 - abs(_pct(h2, h1)) * 100) * 8)
-    depth_bonus = min(10, (depth / atr - min_depth_atr) * 4)
-    conf = 58 + equality_bonus + depth_bonus
-    return Pattern(
-        "Double Top", "reversal", "SELL",
-        trigger_price=neckline,
-        trigger_line=[(i1, neckline), (i2, neckline)],
-        key_points=[(i1, h1, "Top 1"), (i2, h2, "Top 2"), (trough_i, neckline, "Neckline")],
-        confidence=float(np.clip(conf, 55, 88)),
-        note=(f"Two near-equal highs ({h1:.5f} / {h2:.5f}) separated by {i2 - i1} bars. "
-              f"Neckline {neckline:.5f} (depth {depth / atr:.1f}×ATR). "
-              f"Close below neckline confirms breakdown.")
+def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
+    if family.get("error"):
+        return family["error"]
+    quality = family.get("primary_quality")
+    quality_tag = {
+        "unconfirmed": "⚠️ UNCONFIRMED (2 touches)",
+        "confirmed": "✅ CONFIRMED",
+        "crowded": "⚠️ CROWDED (5+ touches)",
+    }.get(quality, "")
+    short_sig = family.get("short_term_signal") or family.get("direction", "NEUTRAL")
+    lines = [
+        f"📐 TRENDLINE  |  {symbol}  (Short-term structure primary)",
+        f"Short-term Trend: {short_sig}",
+    ]
+    topdown = family.get("topdown")
+    if topdown:
+        lines.append(format_topdown_summary(topdown))
+        lines.append("—")
+    lines.append(
+        f"30M Family: {family.get('family_kind', '—').upper()}  |  "
+        f"Direction: {family.get('direction')}  |  Strength: {family.get('strength', 0)}/100"
     )
+    if quality_tag:
+        lines.append(f"Trendline validation: {quality_tag} · {family.get('primary_touches', 0)} touches")
+    for r in family.get("gating_notes") or []:
+        lines.append(f"  • {r}")
+    for r in family.get("reasons") or []:
+        lines.append(f"  • {r}")
+    n_rails = len(family.get("family_lines") or [])
+    lines.append(f"Parallel rails: {n_rails}")
+    wedge = family.get("wedge")
+    if wedge:
+        lines.append(
+            f"Structure: {wedge['pattern']} · lower rail {wedge['lower']['touches']} touches, "
+            f"upper rail {wedge['upper']['touches']} touches · converging (gap {wedge['gap_end']:.5f})"
+        )
+    sp = family.get("scanned_pattern")
+    if sp:
+        lines.append(f"Chart pattern: {sp['name']} ({sp['bias']}, {sp['confidence']:.0f}%) — {sp['note']}")
+
+    hz = family.get("horizontal_levels") or []
+    if hz:
+        lines.append("Horizontal levels: " + " · ".join(
+            f"{l['side'][0].upper()} {l['price']:.5f} ({l['touches']}x)" for l in hz))
+    obs = family.get("order_blocks") or []
+    if obs:
+        ob_lines = []
+        for ob in obs:
+            tag = "UNMITIGATED" if ob["freshness"] == "untested" else "mitigated"
+            ob_lines.append(
+                f"{ob['type'][:4].capitalize()} {ob['bottom']:.5f}-{ob['top']:.5f} "
+                f"({tag}, {ob['confidence']}%)"
+            )
+        lines.append("Order blocks: " + " · ".join(ob_lines))
+    mw = family.get("mw_pattern")
+    if mw:
+        lines.append(f"Pattern: {mw['name']} · neckline {mw['neckline']:.5f}")
+    if family.get("channel"):
+        w = family["channel"].get("width")
+        if w:
+            lines.append(f"Channel width: {w:.5f}")
+    projs = family.get("projections") or []
+    if projs:
+        lines.append("Projections: " + " · ".join(f"{p['label']} {p['price']:.5f}" for p in projs))
+    vp = family.get("volume_profile")
+    if vp:
+        lines.append(f"POC {vp['poc_price']:.5f} | VA {vp['value_area_low']:.5f}–{vp['value_area_high']:.5f}")
+    brk = family.get("breakout_grade")
+    if brk:
+        grade_tag = {"confirmed": "✅ CONFIRMED", "developing": "🟡 DEVELOPING",
+                     "weak": "🔴 WEAK / LIKELY FAKEOUT"}.get(brk["strength"], brk["strength"])
+        lines.append(
+            f"Breakout grade: {grade_tag} · {brk['penetration_atr']} ATR beyond · "
+            f"{brk['consecutive_closes']} consecutive close(s) · body {brk['body_ratio']}"
+        )
+        lines.append(f"Retest zone: {brk['retest_level']:.5f}")
+    pos = build_position_container(family)
+    if pos:
+        lines.append(
+            f"Position: {pos['side']}  Entry {pos['entry']:.5f}  SL {pos['sl']:.5f}  "
+            f"TP1 {pos['tp1']:.5f}  TP2 {pos['tp2']:.5f}"
+        )
+        lines.append(
+            f"R:R 1:{pos.get('rr', 0):.2f}  (risk {pos.get('risk', 0):.5f} → reward {pos.get('reward', 0):.5f})"
+        )
+        if pos.get("liquidity_tp1"):
+            lines.append(f"TP1 liquidity: {pos['liquidity_tp1']}")
+        if pos.get("entry_note"):
+            lines.append(f"⚠️ {pos['entry_note']}")
+    return "\n".join(lines)
 
 
-def detect_double_bottom(df, ph, pl, min_bars=8, min_depth_atr=1.0, max_peak_diff=0.006):
+# ============================================================
+# OTE STRATEGY -- Fibonacci Fan + Fibonacci Expansion
+#
+#   1. Get 4H -> 1H top-down bias (topdown_engine.get_topdown_bias)
+#   2. Detect the most recent clear impulse swing on the 30M chart
+#   3. Draw Fibonacci Fan (38.2 / 50 / 61.8) from the impulse origin
+#   4. Entry zone = deeper fan lines (50-61.8%) acting as dynamic OTE
+#   5. Project Fibonacci Expansion targets (127.2 / 161.8 / 200 / 261.8)
+#   6. Gate/score the setup against the 4H/1H top-down bias
+#
+# Always runs and displays on the 30M timeframe.
+# ============================================================
+
+FAN_RATIOS = [0.382, 0.50, 0.618]
+EXPANSION_RATIOS = [1.272, 1.618, 2.0, 2.618]
+
+
+def _ensure_atr(df: pd.DataFrame) -> pd.DataFrame:
+    if "ATR" not in df.columns or df["ATR"].isna().all():
+        tr = pd.concat([
+            df["High"] - df["Low"],
+            (df["High"] - df["Close"].shift(1)).abs(),
+            (df["Low"] - df["Close"].shift(1)).abs(),
+        ], axis=1).max(axis=1)
+        df = df.copy()
+        df["ATR"] = tr.rolling(14, min_periods=1).mean()
+    return df
+
+
+def _find_impulse(df: pd.DataFrame, lookback: int = 120) -> Optional[Dict[str, Any]]:
     """
-    Stricter Double Bottom for lower noise (especially on 30m).
-    - Bottoms within max_peak_diff (~0.6%)
-    - At least min_bars between the two bottoms
-    - Peak height >= min_depth_atr * ATR
+    Find the most recent clean impulse leg suitable for Fan + Expansion.
+
+    Returns:
+      {
+        "direction": "BUY" | "SELL",
+        "start": {index, price, type},
+        "end":   {index, price, type},
+        "retracement": {index, price, type} | None,   # point C if available
+        "leg_size": float,
+      }
     """
-    if len(pl) < 2:
+    if df is None or len(df) < 40:
         return None
-    i2, i1 = pl[-1], pl[-2]
-    if (i2 - i1) < min_bars:
-        return None
-    l1, l2 = float(df['Low'].iloc[i1]), float(df['Low'].iloc[i2])
-    if abs(_pct(l2, l1)) > max_peak_diff:
-        return None
-    between_highs = [p for p in ph if i1 < p < i2]
-    if not between_highs:
-        return None
-    peak_i = max(between_highs, key=lambda p: df['High'].iloc[p])
-    neckline = float(df['High'].iloc[peak_i])
-    atr = _atr(df) or 1e-9
-    height = neckline - min(l1, l2)
-    if height < min_depth_atr * atr:
-        return None
-    current = float(df['Close'].iloc[-1])
-    if current < min(l1, l2):
-        return None
-    equality_bonus = min(12, (1 - abs(_pct(l2, l1)) * 100) * 8)
-    depth_bonus = min(10, (height / atr - min_depth_atr) * 4)
-    conf = 58 + equality_bonus + depth_bonus
-    return Pattern(
-        "Double Bottom", "reversal", "BUY",
-        trigger_price=neckline,
-        trigger_line=[(i1, neckline), (i2, neckline)],
-        key_points=[(i1, l1, "Bottom 1"), (i2, l2, "Bottom 2"), (peak_i, neckline, "Neckline")],
-        confidence=float(np.clip(conf, 55, 88)),
-        note=(f"Two near-equal lows ({l1:.5f} / {l2:.5f}) separated by {i2 - i1} bars. "
-              f"Neckline {neckline:.5f} (height {height / atr:.1f}×ATR). "
-              f"Close above neckline confirms breakout.")
-    )
 
-
-def detect_triple_top(df, ph, pl):
-    if len(ph) < 3:
-        return None
-    i1, i2, i3 = ph[-3], ph[-2], ph[-1]
-    h1, h2, h3 = df['High'].iloc[i1], df['High'].iloc[i2], df['High'].iloc[i3]
-    tops = [h1, h2, h3]
-    if (max(tops) - min(tops)) / max(tops) > 0.008:
-        return None
-    between = [p for p in pl if i1 < p < i3]
-    if not between:
-        return None
-    trough_i = min(between, key=lambda p: df['Low'].iloc[p])
-    neckline = float(df['Low'].iloc[trough_i])
-    current = float(df['Close'].iloc[-1])
-    if current > max(tops):
-        return None
-    return Pattern(
-        "Triple Top", "reversal", "SELL",
-        trigger_price=neckline,
-        trigger_line=[(i1, neckline), (i3, neckline)],
-        key_points=[(i1, h1, "Top 1"), (i2, h2, "Top 2"), (i3, h3, "Top 3"), (trough_i, neckline, "Neckline")],
-        confidence=68,
-        note=f"Three tests of resistance near {max(tops):.5f} rejected. Neckline at {neckline:.5f}."
-    )
-
-
-def detect_triple_bottom(df, ph, pl):
-    if len(pl) < 3:
-        return None
-    i1, i2, i3 = pl[-3], pl[-2], pl[-1]
-    l1, l2, l3 = df['Low'].iloc[i1], df['Low'].iloc[i2], df['Low'].iloc[i3]
-    bots = [l1, l2, l3]
-    if (max(bots) - min(bots)) / max(bots) > 0.008:
-        return None
-    between = [p for p in ph if i1 < p < i3]
-    if not between:
-        return None
-    peak_i = max(between, key=lambda p: df['High'].iloc[p])
-    neckline = float(df['High'].iloc[peak_i])
-    current = float(df['Close'].iloc[-1])
-    if current < min(bots):
-        return None
-    return Pattern(
-        "Triple Bottom", "reversal", "BUY",
-        trigger_price=neckline,
-        trigger_line=[(i1, neckline), (i3, neckline)],
-        key_points=[(i1, l1, "Bottom 1"), (i2, l2, "Bottom 2"), (i3, l3, "Bottom 3"), (peak_i, neckline, "Neckline")],
-        confidence=68,
-        note=f"Three tests of support near {min(bots):.5f} held. Neckline at {neckline:.5f}."
-    )
-
-
-def detect_head_shoulders(df, ph, pl):
-    if len(ph) < 3:
-        return None
-    i1, i2, i3 = ph[-3], ph[-2], ph[-1]
-    ls, head, rs = df['High'].iloc[i1], df['High'].iloc[i2], df['High'].iloc[i3]
-    if not (head > ls and head > rs):
-        return None
-    if abs(_pct(rs, ls)) > 0.03:  # shoulders should be roughly symmetric
-        return None
-    between1 = [p for p in pl if i1 < p < i2]
-    between2 = [p for p in pl if i2 < p < i3]
-    if not between1 or not between2:
-        return None
-    t1 = min(between1, key=lambda p: df['Low'].iloc[p])
-    t2 = min(between2, key=lambda p: df['Low'].iloc[p])
-    slope, intercept = _line_through((t1, df['Low'].iloc[t1]), (t2, df['Low'].iloc[t2]))
-    neckline_now = slope * (len(df) - 1) + intercept
-    current = float(df['Close'].iloc[-1])
-    if current < neckline_now * 0.99:
-        return None  # already broke down further back, stale
-    return Pattern(
-        "Head and Shoulders", "reversal", "SELL",
-        trigger_price=float(neckline_now),
-        trigger_line=[(t1, float(df['Low'].iloc[t1])), (t2, float(df['Low'].iloc[t2]))],
-        key_points=[(i1, ls, "L Shoulder"), (i2, head, "Head"), (i3, rs, "R Shoulder")],
-        confidence=72,
-        note=f"Classic H&S: head {head:.5f} above shoulders {ls:.5f}/{rs:.5f}. "
-             f"Neckline (sloped) currently ~{neckline_now:.5f} — close below confirms."
-    )
-
-
-def detect_inverse_head_shoulders(df, ph, pl):
-    if len(pl) < 3:
-        return None
-    i1, i2, i3 = pl[-3], pl[-2], pl[-1]
-    ls, head, rs = df['Low'].iloc[i1], df['Low'].iloc[i2], df['Low'].iloc[i3]
-    if not (head < ls and head < rs):
-        return None
-    if abs(_pct(rs, ls)) > 0.03:
-        return None
-    between1 = [p for p in ph if i1 < p < i2]
-    between2 = [p for p in ph if i2 < p < i3]
-    if not between1 or not between2:
-        return None
-    t1 = max(between1, key=lambda p: df['High'].iloc[p])
-    t2 = max(between2, key=lambda p: df['High'].iloc[p])
-    slope, intercept = _line_through((t1, df['High'].iloc[t1]), (t2, df['High'].iloc[t2]))
-    neckline_now = slope * (len(df) - 1) + intercept
-    current = float(df['Close'].iloc[-1])
-    if current > neckline_now * 1.01:
-        return None
-    return Pattern(
-        "Inverse Head and Shoulders", "reversal", "BUY",
-        trigger_price=float(neckline_now),
-        trigger_line=[(t1, float(df['High'].iloc[t1])), (t2, float(df['High'].iloc[t2]))],
-        key_points=[(i1, ls, "L Shoulder"), (i2, head, "Head"), (i3, rs, "R Shoulder")],
-        confidence=72,
-        note=f"Inverse H&S: head {head:.5f} below shoulders {ls:.5f}/{rs:.5f}. "
-             f"Neckline (sloped) currently ~{neckline_now:.5f} — close above confirms."
-    )
-
-
-def _fit_trend(points):
-    """points: list of (x, y). Returns slope, intercept via least squares."""
-    xs = np.array([p[0] for p in points], dtype=float)
-    ys = np.array([p[1] for p in points], dtype=float)
-    if len(xs) < 2 or np.all(xs == xs[0]):
-        return 0.0, float(ys[-1]) if len(ys) else 0.0
-    slope, intercept = np.polyfit(xs, ys, 1)
-    return float(slope), float(intercept)
-
-
-def _touch_quality_score(points, slope, intercept, avg_price):
-    """
-    How tightly the given points actually hug their fitted line, as a
-    confidence bonus (0-8). A triangle/wedge can have the "right" slope
-    pattern by the numbers while price barely respects either boundary --
-    this distinguishes a real, well-defended structure from a coincidental
-    one. Tighter fit (lower deviation relative to price scale) -> higher bonus.
-    """
-    if len(points) < 2 or avg_price <= 0:
-        return 0.0
-    xs = np.array([p[0] for p in points], dtype=float)
-    ys = np.array([p[1] for p in points], dtype=float)
-    fitted = slope * xs + intercept
-    deviations = np.abs(ys - fitted)
-    rms = float(np.sqrt(np.mean(deviations ** 2)))
-    normalized_rms = rms / avg_price
-    bonus = 8.0 - normalized_rms * 3000.0
-    return float(np.clip(bonus, 0.0, 8.0))
-
-
-def detect_triangle_or_wedge(df, ph, pl, lookback=60):
-    """
-    Uses the last several pivot highs (upper boundary) and pivot lows (lower
-    boundary) within `lookback` bars to fit two trendlines, then classifies:
-        - both flat-ish, converging  -> not used here (handled by rectangle)
-        - upper flat, lower rising   -> Ascending Triangle (bullish continuation)
-        - upper falling, lower flat  -> Descending Triangle (bearish continuation)
-        - both converging, opposite slopes -> Symmetrical Triangle
-        - both rising, converging    -> Rising Wedge (bearish reversal)
-        - both falling, converging   -> Falling Wedge (bullish reversal)
-    """
+    df = _ensure_atr(df)
     n = len(df)
-    start = max(0, n - lookback)
-    recent_ph = [p for p in ph if p >= start][-4:]
-    recent_pl = [p for p in pl if p >= start][-4:]
-    if len(recent_ph) < 2 or len(recent_pl) < 2:
+    swings = zigzag_swings(df, depth=5, deviation_atr=0.40)
+    if len(swings) < 2:
+        swings = find_swings(df, left=3, right=3)
+    if len(swings) < 2:
         return None
 
-    upper_pts = [(p, float(df['High'].iloc[p])) for p in recent_ph]
-    lower_pts = [(p, float(df['Low'].iloc[p])) for p in recent_pl]
-    up_slope, up_intercept = _fit_trend(upper_pts)
-    lo_slope, lo_intercept = _fit_trend(lower_pts)
+    # Restrict to recent window
+    swings = [s for s in swings if s["index"] >= max(0, n - lookback)]
+    if len(swings) < 2:
+        return None
 
-    avg_price = float(df['Close'].tail(lookback).mean()) or 1.0
-    touch_quality_bonus = (_touch_quality_score(upper_pts, up_slope, up_intercept, avg_price) +
-                           _touch_quality_score(lower_pts, lo_slope, lo_intercept, avg_price)) / 2.0
-    up_norm = (up_slope * lookback) / avg_price
-    lo_norm = (lo_slope * lookback) / avg_price
-    FLAT = 0.003   # ~0.3% drift over the window counts as "flat"
+    # Walk backwards looking for a strong directional leg
+    for i in range(len(swings) - 1, 0, -1):
+        a = swings[i - 1]
+        b = swings[i]
+        if a["type"] == b["type"]:
+            continue
 
-    x_now = n - 1
-    upper_now = up_slope * x_now + up_intercept
-    lower_now = lo_slope * x_now + lo_intercept
-    if upper_now <= lower_now:
-        return None  # lines already crossed, pattern played out
+        leg = abs(b["price"] - a["price"])
+        atr = float(df["ATR"].iloc[min(b["index"], n - 1)])
+        if atr <= 0:
+            atr = leg * 0.1
+        if leg < 1.2 * atr:          # require meaningful impulse
+            continue
 
-    current = float(df['Close'].iloc[-1])
-    line = [(upper_pts[0][0], upper_pts[0][1]), (upper_pts[-1][0], upper_pts[-1][1])]
-    lower_line = [(lower_pts[0][0], lower_pts[0][1]), (lower_pts[-1][0], lower_pts[-1][1])]
+        # Bullish impulse: low -> high
+        if a["type"] == "low" and b["type"] == "high" and b["price"] > a["price"]:
+            retrace = None
+            for s in swings[i + 1:]:
+                if s["type"] == "low" and s["price"] < b["price"]:
+                    retrace = s
+                    break
+            return {"direction": "BUY", "start": a, "end": b, "retracement": retrace, "leg_size": leg}
 
-    # Ascending triangle: flat top, rising bottom -> bullish continuation
-    if abs(up_norm) < FLAT and lo_norm > FLAT:
-        return Pattern(
-            "Ascending Triangle", "continuation", "BUY",
-            trigger_price=float(upper_now),
-            trigger_line=line,
-            key_points=[(p, y, "Resistance") for p, y in upper_pts] + [(p, y, "Higher Low") for p, y in lower_pts],
-            confidence=65 + touch_quality_bonus,
-            note=f"Flat resistance near {upper_now:.5f} with rising higher-lows underneath — "
-                 f"buyers stepping in earlier each time. Breakout above the flat top favors continuation up."
-        )
-    # Descending triangle: falling top, flat bottom -> bearish continuation
-    if up_norm < -FLAT and abs(lo_norm) < FLAT:
-        return Pattern(
-            "Descending Triangle", "continuation", "SELL",
-            trigger_price=float(lower_now),
-            trigger_line=lower_line,
-            key_points=[(p, y, "Support") for p, y in lower_pts] + [(p, y, "Lower High") for p, y in upper_pts],
-            confidence=65 + touch_quality_bonus,
-            note=f"Flat support near {lower_now:.5f} with falling lower-highs above — "
-                 f"sellers stepping in earlier each time. Breakdown below flat support favors continuation down."
-        )
-    # Rising wedge: both rising, converging, upper rising slower -> bearish reversal
-    if up_norm > FLAT and lo_norm > FLAT and lo_norm > up_norm:
-        return Pattern(
-            "Rising Wedge", "reversal", "SELL",
-            trigger_price=float(lower_now),
-            trigger_line=lower_line,
-            key_points=[(p, y, "Upper") for p, y in upper_pts] + [(p, y, "Lower") for p, y in lower_pts],
-            confidence=63 + touch_quality_bonus,
-            note="Both boundaries rising but converging (upper line losing steam faster) — "
-                 "classic exhaustion structure. Break of the rising lower trendline signals reversal down."
-        )
-    # Falling wedge: both falling, converging, lower falling slower -> bullish reversal
-    if up_norm < -FLAT and lo_norm < -FLAT and up_norm < lo_norm:
-        return Pattern(
-            "Falling Wedge", "reversal", "BUY",
-            trigger_price=float(upper_now),
-            trigger_line=line,
-            key_points=[(p, y, "Upper") for p, y in upper_pts] + [(p, y, "Lower") for p, y in lower_pts],
-            confidence=63 + touch_quality_bonus,
-            note="Both boundaries falling but converging (lower line losing steam faster) — "
-                 "selling pressure fading. Break of the falling upper trendline signals reversal up."
-        )
-    # Symmetrical triangle: opposite slopes converging, roughly equal magnitude
-    if up_norm < -FLAT and lo_norm > FLAT:
-        bias = "BUY" if current >= (upper_now + lower_now) / 2 else "SELL"
-        return Pattern(
-            "Symmetrical Triangle", "continuation", bias,
-            trigger_price=float(upper_now if bias == "BUY" else lower_now),
-            trigger_line=line if bias == "BUY" else lower_line,
-            key_points=[(p, y, "Upper") for p, y in upper_pts] + [(p, y, "Lower") for p, y in lower_pts],
-            confidence=55 + touch_quality_bonus,
-            note="Converging trendlines with contracting range (coiling price action). "
-                 "Direction is set by whichever side breaks first — currently leaning "
-                 + ("up." if bias == "BUY" else "down.")
-        )
+        # Bearish impulse: high -> low
+        if a["type"] == "high" and b["type"] == "low" and b["price"] < a["price"]:
+            retrace = None
+            for s in swings[i + 1:]:
+                if s["type"] == "high" and s["price"] > b["price"]:
+                    retrace = s
+                    break
+            return {"direction": "SELL", "start": a, "end": b, "retracement": retrace, "leg_size": leg}
+
     return None
 
 
-def detect_rectangle(df, ph, pl, lookback=50):
+def _build_fan(impulse: Dict[str, Any], n: int) -> List[Dict[str, Any]]:
+    """Build Fibonacci Fan rays from impulse start -> end, extendable to any bar index."""
+    x0 = impulse["start"]["index"]
+    y0 = impulse["start"]["price"]
+    x1 = impulse["end"]["index"]
+    y1 = impulse["end"]["price"]
+    dy = y1 - y0
+
+    fans = []
+    for r in FAN_RATIOS:
+        y_div = y0 + dy * r
+        slope = (y_div - y0) / max(x1 - x0, 1)
+        y_end = y0 + slope * (n - 1 - x0)
+        fans.append({
+            "ratio": r, "label": f"{r*100:.1f}%",
+            "x0": x0, "y0": y0, "x1": x1, "y1": y_div,
+            "slope": slope, "y_at_end": y_end,
+        })
+    return fans
+
+
+def _fan_price_at(fan: Dict, x: float) -> float:
+    return fan["y0"] + fan["slope"] * (x - fan["x0"])
+
+
+def _build_expansion(impulse: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Fibonacci Expansion (3-point when a retracement point exists, else simple extension)."""
+    start = impulse["start"]["price"]
+    end = impulse["end"]["price"]
+    leg = impulse["leg_size"]
+    direction = impulse["direction"]
+    retrace = impulse.get("retracement")
+
+    expansions = []
+    if retrace is not None:
+        c = retrace["price"]
+        for r in EXPANSION_RATIOS:
+            price = c + leg * r if direction == "BUY" else c - leg * r
+            expansions.append({"ratio": r, "label": f"{r*100:.1f}%", "price": float(price), "from_point": "C"})
+    else:
+        for r in EXPANSION_RATIOS:
+            price = end + leg * (r - 1.0) if direction == "BUY" else end - leg * (r - 1.0)
+            expansions.append({"ratio": r, "label": f"{r*100:.1f}%", "price": float(price), "from_point": "B"})
+    return expansions
+
+
+def _evaluate_entry(
+    df: pd.DataFrame,
+    impulse: Dict[str, Any],
+    fans: List[Dict],
+    expansions: List[Dict],
+    topdown: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Decide if price is currently in a valid OTE entry zone on the Fan,
+    gate the score against the 4H/1H top-down bias, and build the ticket.
+    """
     n = len(df)
-    start = max(0, n - lookback)
-    recent_ph = [p for p in ph if p >= start]
-    recent_pl = [p for p in pl if p >= start]
-    if len(recent_ph) < 2 or len(recent_pl) < 2:
-        return None
-    highs = [df['High'].iloc[p] for p in recent_ph]
-    lows = [df['Low'].iloc[p] for p in recent_pl]
-    top = float(np.mean(highs))
-    bottom = float(np.mean(lows))
-    if (max(highs) - min(highs)) / top > 0.01 or (max(lows) - min(lows)) / bottom > 0.01:
-        return None  # not flat enough to call a clean range
-    if (top - bottom) / top < 0.003:
-        return None
-    current = float(df['Close'].iloc[-1])
-    bias = "BUY" if current <= bottom * 1.003 else ("SELL" if current >= top * 0.997 else None)
-    if bias is None:
-        return None
-    return Pattern(
-        "Rectangle / Range", "continuation", bias,
-        trigger_price=top if bias == "SELL" else bottom,
-        trigger_line=[(recent_ph[0], top), (recent_ph[-1], top)] if bias == "SELL"
-                     else [(recent_pl[0], bottom), (recent_pl[-1], bottom)],
-        key_points=[(p, df['High'].iloc[p], "Range High") for p in recent_ph] +
-                   [(p, df['Low'].iloc[p], "Range Low") for p in recent_pl],
-        confidence=52,
-        note=f"Price ranging between {bottom:.5f} and {top:.5f}. Currently testing the "
-             f"{'top' if bias=='SELL' else 'bottom'} of the range."
+    close = float(df["Close"].iloc[-1])
+    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(impulse["leg_size"]) * 0.1
+    direction = impulse["direction"]
+
+    fan_prices = sorted(
+        [{"ratio": f["ratio"], "label": f["label"], "price": _fan_price_at(f, n - 1)} for f in fans],
+        key=lambda x: x["price"],
     )
 
+    in_zone = False
+    nearest_fan = None
+    min_dist = 1e18
+    for fp in fan_prices:
+        dist = abs(close - fp["price"])
+        if dist < min_dist:
+            min_dist = dist
+            nearest_fan = fp
+        if dist <= atr * 0.45:
+            in_zone = True
 
-def detect_flag_or_pennant(df, lookback_pole=20, lookback_flag=15):
-    """
-    Bull/Bear flag & pennant detector — weighted highest per user requirement.
+    reasons = []
+    score = 40
 
-    Logic: look for a strong directional "flagpole" move over the last
-    ~lookback_pole+lookback_flag bars, then a tight, shallow consolidation
-    (the flag/pennant) over the most recent lookback_flag bars that retraces
-    only a modest fraction of the pole and slopes counter to (or flat versus)
-    the pole direction.
+    if impulse["leg_size"] >= 2.0 * atr:
+        score += 15
+        reasons.append(f"Strong impulse ({impulse['leg_size']/atr:.1f} ATR)")
+    else:
+        reasons.append(f"Moderate impulse ({impulse['leg_size']/atr:.1f} ATR)")
+
+    if in_zone:
+        score += 25
+        reasons.append(f"Price interacting with Fan {nearest_fan['label']}")
+    else:
+        lowest = fan_prices[0]["price"]
+        highest = fan_prices[-1]["price"]
+        if direction == "BUY" and lowest <= close <= highest + atr * 0.3:
+            score += 10
+            reasons.append("Price inside Fan channel")
+        elif direction == "SELL" and highest >= close >= lowest - atr * 0.3:
+            score += 10
+            reasons.append("Price inside Fan channel")
+
+    if nearest_fan and nearest_fan["ratio"] >= 0.50:
+        score += 12
+        reasons.append(f"Deep Fan zone ({nearest_fan['label']}) — OTE quality")
+
+    if expansions:
+        score += 8
+        reasons.append(f"{len(expansions)} Expansion targets projected")
+
+    # --- gate against the 4H/1H top-down bias (advisory only) ---
+    # Short-term impulse / trendline structure is PRIMARY. Higher TF no longer blocks.
+    td_dir = (topdown or {}).get("direction", "NEUTRAL")
+    td_allowed = bool((topdown or {}).get("allowed"))
+    if td_dir in ("BUY", "SELL"):
+        if td_dir == direction and td_allowed:
+            score += 12
+            reasons.append(f"✅ Short-term impulse ({direction}) aligned with 4H/1H top-down ({td_dir})")
+        elif td_dir == direction and not td_allowed:
+            reasons.append(f"Short-term impulse ({direction}) matches top-down but 1H permission pending")
+        else:
+            score -= 8
+            reasons.append(
+                f"Short-term impulse: {direction} — higher TF still {td_dir} (advisory only, not blocking)"
+            )
+    else:
+        reasons.append(f"Short-term impulse: {direction} — higher TF neutral")
+
+    # Build ticket
+    entry = close
+    if direction == "BUY":
+        sl_candidates = [fp["price"] for fp in fan_prices] + [impulse["start"]["price"]]
+        sl = min(sl_candidates) - atr * 0.35
+        tps = sorted([e["price"] for e in expansions if e["price"] > entry])
+    else:
+        sl_candidates = [fp["price"] for fp in fan_prices] + [impulse["start"]["price"]]
+        sl = max(sl_candidates) + atr * 0.35
+        tps = sorted([e["price"] for e in expansions if e["price"] < entry], reverse=True)
+
+    tp1 = tps[0] if tps else (entry + atr * 1.8 if direction == "BUY" else entry - atr * 1.8)
+    tp2 = tps[1] if len(tps) > 1 else (entry + atr * 3.0 if direction == "BUY" else entry - atr * 3.0)
+
+    risk = abs(entry - sl)
+    reward = abs(tp1 - entry)
+    rr = (reward / risk) if risk > 0 else 0.0
+
+    score = max(0, min(100, score))
+    # No longer invalidate just because higher TF disagrees
+    valid = direction in ("BUY", "SELL") and score >= 58 and in_zone and rr >= 1.2
+
+    ticket = {
+        "side": "LONG" if direction == "BUY" else "SHORT",
+        "direction": direction,
+        "entry": float(entry), "sl": float(sl), "tp1": float(tp1), "tp2": float(tp2),
+        "rr": round(rr, 2), "risk": float(risk), "reward": float(reward),
+        "order_type": "MARKET",
+        "nearest_fan": nearest_fan["label"] if nearest_fan else None,
+    }
+
+    return {
+        "in_zone": in_zone, "nearest_fan": nearest_fan, "score": score,
+        "reasons": reasons, "valid": valid,
+        "ticket": ticket if valid else None, "fan_prices": fan_prices,
+    }
+
+
+def run_ote_analysis(symbol: str, df: pd.DataFrame = None) -> Dict[str, Any]:
     """
+    Full OTE analysis for a symbol: 4H/1H top-down bias, then impulse +
+    Fan + Expansion detection and entry evaluation on the 30M chart.
+    Always fetches/displays on 30M (falls back to 15M only if 30M truly
+    doesn't have enough bars yet).
+    """
+    topdown = get_topdown_bias(symbol)
+
+    timeframe = "30min"
+    if df is None:
+        df = market_data.fetch_candles(symbol, "30min", count=220)
+        if df is None or df.empty or len(df) < 50:
+            df = market_data.fetch_candles(symbol, "15min", count=220)
+            timeframe = "15min (30M had insufficient history)"
+
+    if df is None or df.empty or len(df) < 50:
+        return {
+            "error": "Insufficient 30M data for OTE analysis",
+            "direction": "NEUTRAL", "score": 0, "valid": False,
+            "symbol": symbol, "topdown": topdown,
+        }
+
+    df = _ensure_atr(df)
     n = len(df)
-    if n < lookback_pole + lookback_flag + 5:
-        return None
 
-    flag_start = n - lookback_flag
-    pole_start = max(0, flag_start - lookback_pole)
+    impulse = _find_impulse(df)
+    if impulse is None:
+        return {
+            "error": "No clear impulse swing found for Fan / Expansion",
+            "direction": "NEUTRAL", "score": 0, "valid": False,
+            "df": df, "timeframe": timeframe, "symbol": symbol, "topdown": topdown,
+        }
 
-    pole_df = df.iloc[pole_start:flag_start]
-    flag_df = df.iloc[flag_start:]
+    fans = _build_fan(impulse, n)
+    expansions = _build_expansion(impulse)
+    entry_eval = _evaluate_entry(df, impulse, fans, expansions, topdown=topdown)
 
-    pole_move = float(pole_df['Close'].iloc[-1] - pole_df['Close'].iloc[0])
-    pole_range = float(pole_df['High'].max() - pole_df['Low'].min()) or 1e-9
-    atr = _atr(df) or 1e-9
+    direction = impulse["direction"]
+    score = entry_eval["score"]
+    valid = entry_eval["valid"]
+    reasons = entry_eval["reasons"]
 
-    # Require a genuine impulsive pole: move at least ~3x ATR and directionally clean
-    if abs(pole_move) < atr * 3.0:
-        return None
-    pole_up = pole_move > 0
+    return {
+        "strategy": "OTE",
+        "direction": direction if valid else "NEUTRAL",
+        "score": score,
+        "reasons": reasons,
+        "valid": valid,
+        "impulse": impulse,
+        "fans": fans,
+        "expansions": expansions,
+        "fan_prices": entry_eval["fan_prices"],
+        "nearest_fan": entry_eval["nearest_fan"],
+        "in_zone": entry_eval["in_zone"],
+        "position": entry_eval["ticket"],
+        "ticket": entry_eval["ticket"],
+        "df": df,
+        "timeframe": timeframe,
+        "symbol": symbol,
+        "topdown": topdown,
+    }
 
-    # directional cleanliness: fraction of bars closing in the pole's direction
-    closes = pole_df['Close'].values
-    diffs = np.diff(closes)
-    if len(diffs) == 0:
-        return None
-    clean_frac = np.mean(diffs > 0) if pole_up else np.mean(diffs < 0)
-    if clean_frac < 0.55:
-        return None
 
-    # Flag: shallow retracement, tight range, and (ideally) sloping against the pole
-    flag_x = np.arange(len(flag_df))
-    flag_slope, flag_intercept = np.polyfit(flag_x, flag_df['Close'].values, 1) if len(flag_df) >= 2 else (0, flag_df['Close'].iloc[-1])
-    flag_range = float(flag_df['High'].max() - flag_df['Low'].min())
-    retrace = flag_range / pole_range
+def format_ote_report(analysis: Dict[str, Any]) -> str:
+    symbol = analysis.get("symbol", "")
+    if analysis.get("error"):
+        lines = [f"🎯 OTE  (Fib Fan + Expansion)  |  {symbol}  (4H → 1H → 30M top-down)"]
+        topdown = analysis.get("topdown")
+        if topdown:
+            lines.append(format_topdown_summary(topdown))
+            lines.append("—")
+        lines.append(analysis["error"])
+        return "\n".join(lines)
 
-    if retrace > 0.65:
-        return None  # too deep a pullback to still call it a flag
+    direction = analysis.get("direction", "NEUTRAL")
+    score = analysis.get("score", 0)
+    valid = analysis.get("valid", False)
+    impulse = analysis.get("impulse") or {}
+    fans = analysis.get("fans") or []
+    expansions = analysis.get("expansions") or []
+    ticket = analysis.get("ticket")
+    nearest = analysis.get("nearest_fan")
+    topdown = analysis.get("topdown")
 
-    flag_norm_slope = (flag_slope * len(flag_df)) / (float(np.mean(flag_df['Close'])) or 1.0)
-    counter_slope_ok = (flag_norm_slope < 0.004) if pole_up else (flag_norm_slope > -0.004)
-    if not counter_slope_ok:
-        return None
-
-    upper = float(flag_df['High'].max())
-    lower = float(flag_df['Low'].min())
-    is_pennant = retrace < 0.35 and abs(flag_norm_slope) < 0.002  # tight converging = pennant
-
-    name = ("Bull Flag" if pole_up else "Bear Flag") if not is_pennant else ("Bullish Pennant" if pole_up else "Bearish Pennant")
-    bias = "BUY" if pole_up else "SELL"
-    trigger_price = upper if pole_up else lower
-    trigger_line = [(flag_start, upper if pole_up else lower), (n - 1, upper if pole_up else lower)]
-
-    conf = 75 + min(15, clean_frac * 15) - min(10, retrace * 15)
-    return Pattern(
-        name, "continuation", bias,
-        trigger_price=float(trigger_price),
-        trigger_line=trigger_line,
-        key_points=[(pole_start, float(pole_df['Close'].iloc[0]), "Pole Start"),
-                    (flag_start, float(pole_df['Close'].iloc[-1]), "Pole End / Flag Start")],
-        confidence=float(np.clip(conf, 55, 92)),
-        note=(f"Strong {'bullish' if pole_up else 'bearish'} flagpole ({abs(pole_move):.5f}, "
-              f"{clean_frac*100:.0f}% directional bars) followed by a tight "
-              f"{retrace*100:.0f}%-retrace consolidation. Watch {trigger_price:.5f} — a break "
-              f"in the pole's direction projects continuation roughly equal to the flagpole length.")
+    lines = [f"🎯 OTE  (Fib Fan + Expansion)  |  {symbol}  (4H → 1H → 30M top-down)"]
+    if topdown:
+        lines.append(format_topdown_summary(topdown))
+        lines.append("—")
+    lines.append(f"30M Direction: {direction}  |  Score: {score}/100  |  {'✅ VALID' if valid else '⏳ WAIT'}")
+    lines.append(
+        f"Impulse: {impulse.get('start', {}).get('type', '?')} → {impulse.get('end', {}).get('type', '?')}  "
+        f"({impulse.get('leg_size', 0):.5f})"
     )
 
+    if fans:
+        lines.append("Fan rays: " + " · ".join(f["label"] for f in fans))
+    if nearest:
+        lines.append(f"Nearest Fan: {nearest.get('label')} @ {nearest.get('price', 0):.5f}")
+    if expansions:
+        lines.append("Expansion targets: " + " · ".join(f"{e['label']} {e['price']:.5f}" for e in expansions[:3]))
 
-# ----------------------------------------------------------------------------
-# 4. TOP-LEVEL SCANNER
-# ----------------------------------------------------------------------------
-# Priority: flags/pennants first (highest-conviction continuation signal per
-# user spec), then other continuation patterns, then classic reversals.
-_PRIORITY = {
-    "Bull Flag": 100, "Bear Flag": 100, "Bullish Pennant": 98, "Bearish Pennant": 98,
-    "Ascending Channel": 92, "Descending Channel": 92,
-    "Ascending Triangle": 85, "Descending Triangle": 85, "Symmetrical Triangle": 80,
-    "Rising Wedge": 75, "Falling Wedge": 75,
-    "Head and Shoulders": 72, "Inverse Head and Shoulders": 72,
-    "Double Top": 68, "Double Bottom": 68,
-    "Triple Top": 66, "Triple Bottom": 66,
-    "Rectangle / Range": 50,
-}
+    for r in analysis.get("reasons") or []:
+        lines.append(f"  • {r}")
+
+    if ticket:
+        lines.append(
+            f"Ticket: {ticket['side']}  Entry {ticket['entry']:.5f}  "
+            f"SL {ticket['sl']:.5f}  TP1 {ticket['tp1']:.5f}  TP2 {ticket['tp2']:.5f}"
+        )
+        lines.append(f"R:R 1:{ticket.get('rr', 0):.2f}")
+
+    return "\n".join(lines)
 
 
-def scan_all_patterns(df, left=3, right=3, volume_profile=None):
-    """
-    Runs every detector against the given OHLC dataframe (must have a
-    'Close'-indexed reset-friendly integer position order — pass df as-is,
-    positions are derived internally).
+def build_ote_ticket(analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    return analysis.get("ticket")
 
-    volume_profile: optional dict from volume_profile.compute_volume_profile().
-    When provided, each detected pattern's confidence is adjusted based on
-    whether its trigger/neckline sits at a volume-significant level (Point
-    of Control / Value Area) or in a thin, low-activity gap. This is a
-    post-detection adjustment layered on top -- it never changes whether a
-    pattern is detected, only how much weight its trigger level deserves.
 
-    Returns: (best_pattern_or_None, all_detected_list)
-    """
-    ph, pl = find_pivots(df, left=left, right=right)
-    ph = _dedupe_adjacent(ph, min_gap=left + right)
-    pl = _dedupe_adjacent(pl, min_gap=left + right)
+# ============================================================
+# TRENDLINE STRATEGY ORCHESTRATION -- full top-down cascade:
+#   4H bias (EMA200 + structure) -> 1H structure permission -> 30M entry
+# The 30M trendline family supplies the entry/SL/TP geometry; the 4H/1H
+# read gates and scores it (see topdown_engine.get_topdown_bias).
+# ============================================================
 
-    detected = []
-    for fn in (detect_flag_or_pennant,):
-        try:
-            res = fn(df)
-        except Exception as e:
-            print(f"[patterns] {fn.__name__} raised: {e!r}")
-            res = None
-        if res:
-            detected.append(res)
+def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
+    topdown = get_topdown_bias(symbol)
+    df_30m = market_data.fetch_candles(symbol, "30min", count=250)
+    if df_30m is None or df_30m.empty or len(df_30m) < 30:
+        return {
+            "error": "Insufficient 30M data for Trendline analysis",
+            "direction": "NEUTRAL", "symbol": symbol, "topdown": topdown,
+        }
 
-    for fn in (detect_double_top, detect_double_bottom, detect_triple_top,
-               detect_triple_bottom, detect_head_shoulders,
-               detect_inverse_head_shoulders):
-        try:
-            res = fn(df, ph, pl)
-        except Exception as e:
-            print(f"[patterns] {fn.__name__} raised: {e!r}")
-            res = None
-        if res:
-            detected.append(res)
+    family = build_trendline_family(df_30m, max_lines=4, lookback_bars=90)
+    family["symbol"] = symbol
+    family["timeframe"] = "30min"
+    family["topdown"] = topdown
+    if family.get("error"):
+        return family
 
-    for fn in (detect_triangle_or_wedge, detect_rectangle):
-        try:
-            res = fn(df, ph, pl)
-        except Exception as e:
-            print(f"[patterns] {fn.__name__} raised: {e!r}")
-            res = None
-        if res:
-            detected.append(res)
+    # Classic chart-pattern scan (triangles, wedges, flags/pennants, H&S,
+    # double/triple tops, rectangles) -- this already existed for the
+    # auto-trade engine but was never surfaced on the Trendline chart/report.
+    try:
+        best_pattern, all_patterns = scan_all_patterns(df_30m)
+        family["scanned_pattern"] = best_pattern.to_dict() if best_pattern else None
+        family["scanned_patterns"] = [p.to_dict() for p in all_patterns]
+    except Exception as e:
+        print(f"[run_trendline_analysis] pattern scan failed for {symbol}: {e!r}")
+        family["scanned_pattern"] = None
+        family["scanned_patterns"] = []
 
-    if not detected:
-        return None, []
+    direction = family.get("direction", "NEUTRAL")
+    strength = family.get("strength", 0)
+    td_dir = topdown.get("direction", "NEUTRAL")
+    gating_notes = []
 
-    if volume_profile is not None:
-        for p in detected:
-            bonus = level_volume_bonus(volume_profile, p.trigger_price)
-            p.confidence = float(np.clip(p.confidence + bonus, 0.0, 100.0))
-            if bonus > 0:
-                p.note += " Trigger level sits at a high-volume node (POC/Value Area) -- reinforced."
-            elif bonus < 0:
-                p.note += " Trigger level sits in a thin, low-activity price gap -- treat with extra caution."
+    # SHORT-TERM TRENDLINE IS PRIMARY.
+    # We adapt to the structure the trendlines show instead of fighting it
+    # with lagging higher-timeframe direction. 4H/1H is now advisory only.
+    if direction in ("BUY", "SELL"):
+        if td_dir == direction and topdown.get("allowed"):
+            strength = min(100, strength + 12)
+            gating_notes.append(
+                f"✅ Short-term trend ({direction}) aligned with 4H/1H top-down ({td_dir})"
+            )
+        elif td_dir == direction and not topdown.get("allowed"):
+            gating_notes.append(
+                f"Short-term trend ({direction}) matches top-down direction but 1H permission "
+                f"not yet granted — still valid, slightly lower conviction"
+            )
+        elif td_dir == "NEUTRAL":
+            gating_notes.append(
+                f"Short-term Trend: {direction} (trendline structure) — higher TF neutral"
+            )
+        else:
+            # Conflict: keep the short-term signal, only mild confidence reduction
+            strength = max(0, strength - 8)
+            gating_notes.append(
+                f"Short-term Trend: {direction} (from trendline) — higher TF still {td_dir} "
+                f"(advisory only, not blocking)"
+            )
 
-    # S/R zone clustering -- self-contained, reuses the pivots already
-    # computed above. A trigger sitting on a level touched many times gets
-    # weighted higher than one sitting on a level nobody's actually tested.
-    touch_prices = [df['High'].iloc[i] for i in ph] + [df['Low'].iloc[i] for i in pl]
-    zones = cluster_sr_zones(touch_prices)
-    for p in detected:
-        bonus = zone_strength_bonus(zones, p.trigger_price)
-        if bonus > 0:
-            p.confidence = float(np.clip(p.confidence + bonus, 0.0, 100.0))
-            p.note += f" Trigger aligns with a well-defended S/R zone -- reinforced."
-
-    detected.sort(key=lambda p: (_PRIORITY.get(p.name, 40) + p.confidence), reverse=True)
-    return detected[0], detected
+    family["strength"] = strength
+    family["gating_notes"] = gating_notes
+    family["short_term_signal"] = direction  # explicit short-term read for reports
+    return family
