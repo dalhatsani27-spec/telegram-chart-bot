@@ -90,6 +90,8 @@ def format_trade_ticket(symbol, strategy_name, direction, score, ticket, reasons
             f"SL        : {ticket.get('sl', '—')}",
             f"TP1       : {ticket.get('tp1', '—')}",
             f"TP2       : {ticket.get('tp2', '—')}",
+            f"TP3       : {ticket.get('tp3', '—')}" + (
+                f"  ({ticket['tp3_basis']})" if ticket.get("tp3_basis") else ""),
             f"Order     : {ticket.get('order_type', 'MARKET')}",
         ]
     if reasons:
