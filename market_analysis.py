@@ -156,46 +156,25 @@ def filter_non_ranging_swings(df, pivots, range_atr_mult=2.2, min_leg_atr=0.55):
     return cleaned
 
 
-def zigzag_swings(df, depth=5, deviation_atr=0.35):
+def _zigzag_core(highs, lows, atr, depth, deviation_atr, n):
     """
-    ZigZag-style alternating swing highs/lows (noise-filtered).
-    depth  : minimum bars between pivots
-    deviation_atr : minimum reversal size as fraction of ATR
-
-    Returns alternating list of {index, price, type: 'high'|'low'}.
-    This is the preferred pivot source for OB / BOS / liquidity mapping.
+    Shared alternating-pivot search used by both the wick-based zigzag
+    (highs/lows = actual High/Low columns) and the close-based "line
+    chart" zigzag (highs/lows both = Close). Returns the raw, not-yet-
+    deduped pivot list -- callers run _clean_alternating() after this.
     """
-    if df is None or len(df) < depth * 2 + 5:
-        return find_swings(df, left=max(2, depth // 2), right=max(2, depth // 2))
-
-    highs = df["High"].values.astype(float)
-    lows = df["Low"].values.astype(float)
-    n = len(df)
-
-    # ATR proxy
-    if "ATR" in df.columns and not df["ATR"].isna().all():
-        atr = df["ATR"].values.astype(float)
-    else:
-        tr = np.maximum(highs - lows, 1e-9)
-        atr = pd.Series(tr).rolling(14, min_periods=1).mean().values
-
     pivots = []
-    # Seed with first significant extreme
-    direction = 0  # 1 = looking for high, -1 = looking for low
     last_pivot_idx = 0
     last_pivot_price = (highs[0] + lows[0]) / 2.0
 
-    # Find initial direction from first depth bars
     seed_h = float(np.max(highs[:depth]))
     seed_l = float(np.min(lows[:depth]))
     if seed_h - last_pivot_price >= last_pivot_price - seed_l:
-        direction = 1
         last_pivot_idx = int(np.argmax(highs[:depth]))
         last_pivot_price = highs[last_pivot_idx]
         pivots.append({"index": last_pivot_idx, "price": float(last_pivot_price), "type": "high"})
-        direction = -1  # next look for low
-    else:
         direction = -1
+    else:
         last_pivot_idx = int(np.argmin(lows[:depth]))
         last_pivot_price = lows[last_pivot_idx]
         pivots.append({"index": last_pivot_idx, "price": float(last_pivot_price), "type": "low"})
@@ -207,7 +186,6 @@ def zigzag_swings(df, depth=5, deviation_atr=0.35):
         min_move = max(a * deviation_atr, 1e-9)
 
         if direction == 1:  # seeking swing high
-            # Track running high since last pivot
             if i - last_pivot_idx < depth:
                 i += 1
                 continue
@@ -217,7 +195,6 @@ def zigzag_swings(df, depth=5, deviation_atr=0.35):
                 continue
             cand_idx = last_pivot_idx + 1 + int(np.argmax(window))
             cand_price = highs[cand_idx]
-            # Confirm when price reverses by min_move from candidate
             if cand_price - lows[i] >= min_move and i - cand_idx >= max(1, depth // 2):
                 pivots.append({"index": cand_idx, "price": float(cand_price), "type": "high"})
                 last_pivot_idx = cand_idx
@@ -240,19 +217,125 @@ def zigzag_swings(df, depth=5, deviation_atr=0.35):
                 direction = 1
         i += 1
 
-    # Ensure alternating
+    return pivots
+
+
+def _clean_alternating(pivots):
+    """Collapse same-type runs down to the single most-extreme pivot,
+    guaranteeing a strict high/low/high/low alternation."""
     cleaned = []
     for p in pivots:
         if cleaned and cleaned[-1]["type"] == p["type"]:
-            # Keep the more extreme
             if p["type"] == "high" and p["price"] >= cleaned[-1]["price"]:
                 cleaned[-1] = p
             elif p["type"] == "low" and p["price"] <= cleaned[-1]["price"]:
                 cleaned[-1] = p
         else:
             cleaned.append(p)
+    return cleaned
+
+
+def zigzag_swings(df, depth=5, deviation_atr=0.35):
+    """
+    ZigZag-style alternating swing highs/lows (noise-filtered).
+    depth  : minimum bars between pivots
+    deviation_atr : minimum reversal size as fraction of ATR
+
+    Returns alternating list of {index, price, type: 'high'|'low'}.
+    This is the preferred pivot source for OB / BOS / liquidity mapping,
+    where the actual wick extreme matters (that's where resting orders
+    / stop-hunts really happened).
+    """
+    if df is None or len(df) < depth * 2 + 5:
+        return find_swings(df, left=max(2, depth // 2), right=max(2, depth // 2))
+
+    highs = df["High"].values.astype(float)
+    lows = df["Low"].values.astype(float)
+    n = len(df)
+
+    if "ATR" in df.columns and not df["ATR"].isna().all():
+        atr = df["ATR"].values.astype(float)
+    else:
+        tr = np.maximum(highs - lows, 1e-9)
+        atr = pd.Series(tr).rolling(14, min_periods=1).mean().values
+
+    pivots = _zigzag_core(highs, lows, atr, depth, deviation_atr, n)
+    cleaned = _clean_alternating(pivots)
     # LOCKED: drop ranging / choppy swings
     return filter_non_ranging_swings(df, cleaned)
+
+
+def zigzag_swings_close(df, depth=5, deviation_atr=0.35):
+    """
+    Same zigzag engine, but run as if this were a LINE chart: both the
+    'high' and 'low' pivot search operate on Close only. A single
+    stop-hunt wick can't fake a structural turn here -- only a genuine
+    reversal in where price actually settled (closed) counts. This is
+    the "real pattern, not noise" pivot source: it strips out exactly
+    the kind of one-candle spike that makes a Double Top or H&S look
+    like it printed when price never actually accepted trading there.
+    """
+    if df is None or len(df) < depth * 2 + 5:
+        return []
+
+    closes = df["Close"].values.astype(float)
+    n = len(df)
+
+    if "ATR" in df.columns and not df["ATR"].isna().all():
+        atr = df["ATR"].values.astype(float)
+    else:
+        tr = np.maximum(df["High"].values - df["Low"].values, 1e-9)
+        atr = pd.Series(tr).rolling(14, min_periods=1).mean().values
+
+    pivots = _zigzag_core(closes, closes, atr, depth, deviation_atr, n)
+    cleaned = _clean_alternating(pivots)
+    return filter_non_ranging_swings(df, cleaned)
+
+
+def hybrid_pivots(df, depth=4, deviation_atr=0.30, pair_window=None):
+    """
+    THE pivot source for pattern recognition and trendline mapping.
+
+    Hybrid = candle (wick) zigzag validated against a line-chart (close)
+    zigzag. A wick pivot only survives if a genuine close-based turn
+    happened near it -- i.e. price didn't just spike and get rejected on
+    one candle, it actually reversed where it settled. That's what
+    separates a real chart pattern from noise: the WICK gives the precise
+    price level (for necklines/triggers), the CLOSE zigzag is what
+    confirms the turn was real.
+
+    Pivots that are wick-only (a spike with no matching close-confirmed
+    reversal nearby) are dropped. Falls back to wick-only pivots if no
+    close-based structure is available at all (e.g. very short/flat data)
+    so this never returns emptier results than the old wick-only path
+    would have on data too short to line-confirm anything.
+
+    Returns the same shape as zigzag_swings(): alternating list of
+    {index, price, type: 'high'|'low'}, sourced from wick extremes.
+    """
+    if pair_window is None:
+        pair_window = max(depth, 3)
+
+    wick_pivots = zigzag_swings(df, depth=depth, deviation_atr=deviation_atr)
+    close_pivots = zigzag_swings_close(df, depth=depth, deviation_atr=deviation_atr)
+    if not close_pivots:
+        return wick_pivots
+
+    confirmed = []
+    for wp in wick_pivots:
+        same_type = [cp for cp in close_pivots if cp["type"] == wp["type"]]
+        if not same_type:
+            continue
+        nearest = min(same_type, key=lambda cp: abs(cp["index"] - wp["index"]))
+        if abs(nearest["index"] - wp["index"]) <= pair_window:
+            confirmed.append(wp)
+
+    if not confirmed:
+        # Nothing paired within window -- likely a very choppy/noisy read
+        # where the two views genuinely disagree everywhere. Better to
+        # fall back to wick-only than hand back zero structure.
+        return wick_pivots
+    return confirmed
 
 
 def _last_swing(swings, swing_type, before_idx=None):
@@ -516,23 +599,41 @@ def detect_order_blocks(df, left=3, right=3, lookback=150, max_per_side=2,
         width_atr = (top - bottom) / a if a > 0 else 99
 
         # Freshness: has price returned into the zone since it formed?
-        # A close all the way through invalidates it outright.
+        # A close all the way through no longer counts as a "zone likely to
+        # be respected" in its original direction -- but instead of just
+        # discarding it, check whether it has FLIPPED into a breaker block:
+        # once price closes through, the zone can invert polarity (former
+        # demand becomes supply, or vice versa) if price then comes back to
+        # retest it from the other side and gets rejected. That retest-and-
+        # reject is what actually confirms the flip -- a close-through with
+        # no retest yet is just "broken", not yet a tradeable breaker.
         freshness = "untested"
         broken = False
+        break_close_idx = None
         for k in range(min(b + 2, n), n):
             if bias == "BULLISH":
                 if closes[k] < bottom:
                     broken = True
+                    break_close_idx = k
                     break
                 if lows[k] <= top:
                     freshness = "tested-held"
             else:
                 if closes[k] > top:
                     broken = True
+                    break_close_idx = k
                     break
                 if highs[k] >= bottom:
                     freshness = "tested-held"
+
         if broken:
+            breaker = _check_breaker_flip(
+                closes, highs, lows, opens, atr,
+                ob_idx, top, bottom, bias, break_close_idx, n,
+            )
+            if breaker is None:
+                continue  # broken, no confirmed retest yet -- not worth drawing
+            candidates.append(breaker)
             continue
 
         body_ratio = abs(closes[ob_idx] - opens[ob_idx]) / max(top - bottom, 1e-9)
@@ -557,6 +658,7 @@ def detect_order_blocks(df, left=3, right=3, lookback=150, max_per_side=2,
             "freshness": freshness,
             "confidence": confidence,
             "grade": "strong" if confidence >= 65 else "moderate",
+            "is_breaker": False,
         })
 
     # Nearest-to-current-price first within each side, capped so the chart
@@ -564,6 +666,74 @@ def detect_order_blocks(df, left=3, right=3, lookback=150, max_per_side=2,
     bullish = sorted([c for c in candidates if c["type"] == "bullish"], key=lambda c: -c["formed_index"])[:max_per_side]
     bearish = sorted([c for c in candidates if c["type"] == "bearish"], key=lambda c: -c["formed_index"])[:max_per_side]
     return sorted(bullish + bearish, key=lambda c: c["formed_index"])
+
+
+def _check_breaker_flip(closes, highs, lows, opens, atr, ob_idx, top, bottom,
+                         original_bias, break_close_idx, n, min_confidence=45):
+    """
+    A former bullish OB that price closed all the way through is only a
+    breaker block once price comes BACK to retest that same zone from the
+    new side and gets rejected (closes back away from it). Without that
+    retest-and-reject, it's just "broken" -- noise, not a level.
+
+    original_bias 'BULLISH' (was demand, broke down) -> if retest holds as
+    resistance, flips to a bearish breaker ('type': 'bearish', flagged
+    is_breaker=True).
+    original_bias 'BEARISH' (was supply, broke up) -> flips to a bullish
+    breaker on a held retest from above.
+
+    Returns a candidate dict (same shape as a normal OB, plus is_breaker)
+    or None if no confirmed flip yet.
+    """
+    retested = False
+    rejected_idx = None
+    for k in range(break_close_idx + 1, n):
+        if original_bias == "BULLISH":
+            # zone is now expected resistance -- price must tag back into
+            # it from below, then close back below it to confirm rejection
+            if highs[k] >= bottom:
+                retested = True
+            if retested and closes[k] < bottom:
+                rejected_idx = k
+                break
+            if retested and closes[k] > top:
+                return None  # reclaimed the whole zone -- flip failed
+        else:
+            if lows[k] <= top:
+                retested = True
+            if retested and closes[k] > top:
+                rejected_idx = k
+                break
+            if retested and closes[k] < bottom:
+                return None
+
+    if rejected_idx is None:
+        return None
+
+    a = float(atr[rejected_idx]) if rejected_idx < len(atr) and atr[rejected_idx] > 0 else (top - bottom)
+    displacement_atr = abs(closes[rejected_idx] - closes[break_close_idx]) / a if a > 0 else 0.0
+    flipped_type = "bearish" if original_bias == "BULLISH" else "bullish"
+
+    score = 30.0  # breakers start lower -- they're a flipped level, not fresh
+    score += min(30, displacement_atr * 15)
+    score += 15  # confirmed retest-and-reject is itself real evidence
+    confidence = max(0, min(100, int(round(score))))
+    if confidence < min_confidence:
+        return None
+
+    return {
+        "type": flipped_type,
+        "top": top,
+        "bottom": bottom,
+        "formed_index": ob_idx,
+        "break_index": break_close_idx,
+        "retest_index": rejected_idx,
+        "displacement_atr": round(displacement_atr, 2),
+        "freshness": "tested-held",
+        "confidence": confidence,
+        "grade": "strong" if confidence >= 65 else "moderate",
+        "is_breaker": True,
+    }
 
 
 def structure_trade_permission(htf_bias, structure):
@@ -717,6 +887,147 @@ def level_volume_bonus(profile, price_level, tolerance_frac=0.0015):
     if bin_volumes[idx] < 0.15 * max_vol:
         return -5.0
     return 0.0
+
+
+def build_poc_trendline(df, order_blocks=None, volume_profile=None, pivots=None,
+                         direction=None):
+    """
+    Structural trendline anchored at the Point of Control (the heaviest-
+    traded price level), extended to the most recent qualifying pivot --
+    replaces the old "OB-extreme to current pivot" anchor. POC is a
+    better anchor than the OB's own high/low because it's where the
+    market actually spent the most time/volume agreeing on fair value,
+    not just the wick extreme of one candle.
+
+    direction: 'support' (bullish -- anchor to swing LOWS, only keep
+    higher lows so the line "walks up" with structure) or 'resistance'
+    (bearish -- anchor to swing HIGHS, only keep lower highs). If not
+    given, inferred from current close vs POC.
+
+    Rule this implements (per spec):
+      - While close stays above a 'support' POC-line -> bullish bias
+        intact, no sell allowed.
+      - A candle BODY close below the line -> sell trigger, target =
+        the nearest unmitigated bullish OB beneath it (that's the level
+        being invalidated).
+      - Mirror logic for 'resistance' lines and bearish OBs.
+
+    Returns None if there isn't enough data/no POC, else a dict:
+      { direction, poc_price, anchor:(x,y), recent_pivot:(x,y),
+        line:{x0,y0,x1,y1}, current_value, triggered, target,
+        target_ob, note }
+    """
+    if df is None or len(df) < 20:
+        return None
+
+    n = len(df)
+    profile = volume_profile if volume_profile is not None else compute_volume_profile(df)
+    if not profile:
+        return None
+    poc = profile["poc_price"]
+
+    highs = df["High"].values
+    lows = df["Low"].values
+    closes = df["Close"].values
+    opens = df["Open"].values
+    close_now = float(closes[-1])
+
+    if direction is None:
+        direction = "support" if close_now >= poc else "resistance"
+
+    # Anchor A: earliest bar in this window where price actually traded
+    # through the POC -- that's the origin of "the market agreed this was
+    # fair value here", which is what the line should be measured from.
+    anchor_idx = None
+    for i in range(n):
+        if lows[i] <= poc <= highs[i]:
+            anchor_idx = i
+            break
+    if anchor_idx is None or anchor_idx >= n - 3:
+        return None
+    anchor = (anchor_idx, poc)
+
+    if pivots is None:
+        pivots = hybrid_pivots(df, depth=4, deviation_atr=0.30)
+    pivot_type = "low" if direction == "support" else "high"
+    candidates = [p for p in pivots if p["index"] > anchor_idx and p["type"] == pivot_type]
+
+    # Walk the chain, keeping only pivots that extend the structure in the
+    # expected way (higher lows for support, lower highs for resistance).
+    # A pivot that breaks the chain (e.g. a new low under a "higher low"
+    # sequence) means the OB itself is being retested/mitigated, not
+    # respected -- restart the chain from there instead.
+    chain = []
+    for p in candidates:
+        if not chain:
+            chain.append(p)
+            continue
+        if direction == "support" and p["price"] >= chain[-1]["price"]:
+            chain.append(p)
+        elif direction == "resistance" and p["price"] <= chain[-1]["price"]:
+            chain.append(p)
+        else:
+            chain = [p]  # structure invalidated -- restart from here
+
+    if not chain:
+        return None
+    recent_pivot = (chain[-1]["index"], chain[-1]["price"])
+    if recent_pivot[0] <= anchor[0]:
+        return None
+
+    x0, y0 = anchor
+    x1, y1 = recent_pivot
+    slope = (y1 - y0) / (x1 - x0)
+    line_value_now = y0 + slope * ((n - 1) - x0)
+
+    body_close = close_now  # use candle body close, not wick, per spec
+    if direction == "support":
+        triggered = body_close < line_value_now
+    else:
+        triggered = body_close > line_value_now
+
+    # Target on trigger: the nearest still-unmitigated OB on the far side
+    # of the line -- that's the zone this break is expected to run into.
+    target = None
+    target_ob = None
+    if triggered and order_blocks:
+        want_type = "bullish" if direction == "support" else "bearish"
+        obs = [ob for ob in order_blocks if ob["type"] == want_type and not ob.get("is_breaker")]
+        if obs:
+            if direction == "support":
+                below = [ob for ob in obs if ob["top"] <= body_close]
+                target_ob = max(below, key=lambda o: o["top"]) if below else min(obs, key=lambda o: o["top"])
+                target = target_ob["top"]
+            else:
+                above = [ob for ob in obs if ob["bottom"] >= body_close]
+                target_ob = min(above, key=lambda o: o["bottom"]) if above else max(obs, key=lambda o: o["bottom"])
+                target = target_ob["bottom"]
+
+    if direction == "support":
+        note = (f"POC trendline (support) — anchored at POC {poc:.5f}, mapped through "
+                f"{len(chain)} higher-low pivot(s). "
+                + (f"⚠ Closed BELOW the line — bullish structure invalidated, targeting "
+                   f"the unmitigated bullish OB near {target:.5f}." if triggered else
+                   "Price holding above — bullish bias intact, no sell permitted here."))
+    else:
+        note = (f"POC trendline (resistance) — anchored at POC {poc:.5f}, mapped through "
+                f"{len(chain)} lower-high pivot(s). "
+                + (f"⚠ Closed ABOVE the line — bearish structure invalidated, targeting "
+                   f"the unmitigated bearish OB near {target:.5f}." if triggered else
+                   "Price holding below — bearish bias intact, no buy permitted here."))
+
+    return {
+        "direction": direction,
+        "poc_price": poc,
+        "anchor": anchor,
+        "recent_pivot": recent_pivot,
+        "line": {"x0": x0, "y0": y0, "x1": x1, "y1": y1},
+        "current_value": line_value_now,
+        "triggered": triggered,
+        "target": target,
+        "target_ob": target_ob,
+        "note": note,
+    }
 
 
 # ============================================================
@@ -974,11 +1285,11 @@ def detect_confirmation_candle(df, bias):
 # ----------------------------------------------------------------------------
 def find_pivots(df, left=3, right=3):
     """
-    Swing pivot detection, sourced from the shared ZigZag engine
-    (market_structure.zigzag_swings) so pattern scanning agrees with
-    everything else in the bot (chart drawing, trendlines, SMC zones,
-    structure engine) instead of running its own separate fractal calc
-    that could disagree and produce conflicting reads across strategies.
+    Swing pivot detection for the pattern scanner -- now hybrid (see
+    hybrid_pivots docstring): a wick pivot is only kept if a matching
+    close-based ("line chart") turn confirms it nearby. This is what
+    keeps Double Tops / H&S / triangles etc. from firing off a single
+    noisy stop-hunt wick that price never actually accepted.
 
     left/right are kept as the public knobs (unchanged call signature)
     and mapped onto ZigZag's `depth` so nothing else has to change.
@@ -987,7 +1298,7 @@ def find_pivots(df, left=3, right=3):
         pivot_highs, pivot_lows
     """
     depth = max(2, left + right)
-    pivots = zigzag_swings(df, depth=depth, deviation_atr=0.30)
+    pivots = hybrid_pivots(df, depth=depth, deviation_atr=0.30)
     pivot_highs = [p["index"] for p in pivots if p["type"] == "high"]
     pivot_lows = [p["index"] for p in pivots if p["type"] == "low"]
     return pivot_highs, pivot_lows
@@ -1580,6 +1891,77 @@ def scan_all_patterns(df, left=3, right=3, volume_profile=None):
         if bonus > 0:
             p.confidence = float(np.clip(p.confidence + bonus, 0.0, 100.0))
             p.note += f" Trigger aligns with a well-defended S/R zone -- reinforced."
+
+    detected.sort(key=lambda p: (_PRIORITY.get(p.name, 40) + p.confidence), reverse=True)
+
+    # --- OB / breaker / POC-trendline gate ----------------------------
+    # Reversal patterns (Double/Triple Top/Bottom, H&S) were being picked
+    # purely on their own geometry, with zero awareness that price might
+    # be sitting inside a fresh, unmitigated OB on the OTHER side (e.g. a
+    # SELL pattern firing right as price taps an untested bullish OB).
+    # Veto/downgrade that case here instead of just hoping the OB gets
+    # noticed downstream. An active BREAKER in the pattern's own favor
+    # gets a confidence boost instead, since that's real confluence.
+    try:
+        order_blocks = detect_order_blocks(df, lookback=len(df))
+    except Exception:
+        order_blocks = []
+    try:
+        vp_for_gate = volume_profile if volume_profile is not None else compute_volume_profile(df)
+        poc_line = build_poc_trendline(df, order_blocks=order_blocks, volume_profile=vp_for_gate)
+    except Exception:
+        poc_line = None
+
+    close_now = float(df["Close"].iloc[-1])
+    active_ob = None
+    for ob in order_blocks:
+        if float(ob["bottom"]) <= close_now <= float(ob["top"]):
+            active_ob = ob
+            break
+
+    REVERSAL_BEARISH = {"Double Top", "Triple Top", "Head and Shoulders", "Rising Wedge"}
+    REVERSAL_BULLISH = {"Double Bottom", "Triple Bottom", "Inverse Head and Shoulders", "Falling Wedge"}
+
+    for p in detected:
+        # Fresh, unmitigated (non-breaker) OB on the wrong side -> veto.
+        if active_ob and not active_ob.get("is_breaker"):
+            if p.name in REVERSAL_BEARISH and active_ob["type"] == "bullish":
+                p.confidence = float(np.clip(p.confidence - 35, 0.0, 100.0))
+                p.note += (" ⚠️ VETO RISK: price is sitting inside an unmitigated bullish "
+                           "order block -- selling into fresh demand, do not trust this "
+                           "trigger without a confirmed break of the OB first.")
+            elif p.name in REVERSAL_BULLISH and active_ob["type"] == "bearish":
+                p.confidence = float(np.clip(p.confidence - 35, 0.0, 100.0))
+                p.note += (" ⚠️ VETO RISK: price is sitting inside an unmitigated bearish "
+                           "order block -- buying into fresh supply, do not trust this "
+                           "trigger without a confirmed break of the OB first.")
+        # A confirmed breaker block in the pattern's own direction is real
+        # confluence -- reinforce it.
+        if active_ob and active_ob.get("is_breaker"):
+            if (p.name in REVERSAL_BEARISH and active_ob["type"] == "bearish") or \
+               (p.name in REVERSAL_BULLISH and active_ob["type"] == "bullish") or \
+               (p.bias == "SELL" and active_ob["type"] == "bearish") or \
+               (p.bias == "BUY" and active_ob["type"] == "bullish"):
+                p.confidence = float(np.clip(p.confidence + 12, 0.0, 100.0))
+                p.note += " ✅ Reinforced by a confirmed breaker block in this direction."
+        # POC trendline: if structure hasn't broken yet, a reversal pattern
+        # betting against it is premature; if it HAS broken, that's
+        # confirmation in the pattern's favor.
+        if poc_line:
+            if poc_line["direction"] == "support" and p.name in REVERSAL_BEARISH:
+                if not poc_line["triggered"]:
+                    p.confidence = float(np.clip(p.confidence - 20, 0.0, 100.0))
+                    p.note += " ⚠️ POC trendline still holds as support -- bullish structure not yet broken."
+                else:
+                    p.confidence = float(np.clip(p.confidence + 10, 0.0, 100.0))
+                    p.note += " ✅ POC trendline (support) already broken -- confirms this direction."
+            elif poc_line["direction"] == "resistance" and p.name in REVERSAL_BULLISH:
+                if not poc_line["triggered"]:
+                    p.confidence = float(np.clip(p.confidence - 20, 0.0, 100.0))
+                    p.note += " ⚠️ POC trendline still holds as resistance -- bearish structure not yet broken."
+                else:
+                    p.confidence = float(np.clip(p.confidence + 10, 0.0, 100.0))
+                    p.note += " ✅ POC trendline (resistance) already broken -- confirms this direction."
 
     detected.sort(key=lambda p: (_PRIORITY.get(p.name, 40) + p.confidence), reverse=True)
     return detected[0], detected
