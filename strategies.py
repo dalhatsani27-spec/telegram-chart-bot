@@ -368,8 +368,10 @@ def _detect_mw_pattern(pivots, df):
         return None
     atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1]))
     atr = max(atr, 1e-9)
-    max_rel_diff = 0.0055  # ~0.55% — matches the stricter classic detector
-    min_bars = 6
+    # Aligned with the stricter classic Double Top/Bottom detectors
+    max_rel_diff = 0.0035  # 0.35%
+    min_bars = 12
+    min_depth_atr = 1.4
     highs = [p for p in pivots if p["type"] == "high"]
     lows = [p for p in pivots if p["type"] == "low"]
 
@@ -383,15 +385,18 @@ def _detect_mw_pattern(pivots, df):
             rel = abs(p2 - p1) / max(abs(p1), 1e-9)
             if rel > max_rel_diff:
                 continue
-            # Reject higher-high continuation (second top clearly above first)
-            if p2 > p1 * 1.0015:  # >0.15% higher → not a Double Top
+            # Reject higher-high continuation
+            if p2 > p1 * 1.002:
                 continue
             between = [p for p in lows if h1["index"] < p["index"] < h2["index"]]
             if not between:
                 continue
             neck = min(between, key=lambda p: p["price"])
             depth = max(p1, p2) - float(neck["price"])
-            if depth < 0.9 * atr:
+            if depth < min_depth_atr * atr:
+                continue
+            # Freshness
+            if (len(df) - 1 - h2["index"]) > 25:
                 continue
             return {
                 "pattern": "M",
@@ -400,7 +405,7 @@ def _detect_mw_pattern(pivots, df):
                 "neckline": neck["price"],
                 "neck_index": neck["index"],
                 "bias": "SELL",
-                "note": f"M pattern — neckline at {neck['price']:.5f} (peaks within {rel*100:.2f}%)",
+                "note": f"Clean M pattern — neckline at {neck['price']:.5f} (peaks within {rel*100:.2f}%)",
             }
 
     # Double bottom (W)
@@ -413,15 +418,17 @@ def _detect_mw_pattern(pivots, df):
             rel = abs(p2 - p1) / max(abs(p1), 1e-9)
             if rel > max_rel_diff:
                 continue
-            # Reject lower-low continuation (second bottom clearly below first)
-            if p2 < p1 * 0.9985:  # >0.15% lower → not a Double Bottom
+            # Reject lower-low continuation
+            if p2 < p1 * 0.998:
                 continue
             between = [p for p in highs if l1["index"] < p["index"] < l2["index"]]
             if not between:
                 continue
             neck = max(between, key=lambda p: p["price"])
             height = float(neck["price"]) - min(p1, p2)
-            if height < 0.9 * atr:
+            if height < min_depth_atr * atr:
+                continue
+            if (len(df) - 1 - l2["index"]) > 25:
                 continue
             return {
                 "pattern": "W",
@@ -430,7 +437,7 @@ def _detect_mw_pattern(pivots, df):
                 "neckline": neck["price"],
                 "neck_index": neck["index"],
                 "bias": "BUY",
-                "note": f"W pattern — neckline at {neck['price']:.5f} (bottoms within {rel*100:.2f}%)",
+                "note": f"Clean W pattern — neckline at {neck['price']:.5f} (bottoms within {rel*100:.2f}%)",
             }
     return None
 
@@ -515,7 +522,7 @@ def _entry_confirmation(df: pd.DataFrame, direction: str) -> Dict[str, Any]:
         "rsi": (False, "no RSI data"),
     }
     if df is None or len(df) < 20 or direction not in ("BUY", "SELL"):
-        return {"checks": checks, "passed": 0, "required": 2, "confirmed": False}
+        return {"checks": checks, "passed": 0, "required": 3, "confirmed": False}
 
     found, name = detect_confirmation_candle(df, direction)
     checks["candle"] = (found, name or "no matching pattern in last 3 bars")
@@ -541,7 +548,9 @@ def _entry_confirmation(df: pd.DataFrame, direction: str) -> Dict[str, Any]:
         checks["rsi"] = (rsi_ok, f"RSI {rsi:.1f}")
 
     passed = sum(1 for ok, _ in checks.values() if ok)
-    required = 2  # at least half the checklist -- "confirmation", not "perfection"
+    # Strict mode: require 3 out of 4 for a high-probability setup.
+    # Mediocre 2/4 setups are no longer considered confirmed.
+    required = 3
     return {"checks": checks, "passed": passed, "required": required, "confirmed": passed >= required}
 
 
@@ -1915,7 +1924,7 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     if mw and mw.get("pattern") == "M":
         has_bull_cont = False
         for p in (family.get("scanned_patterns") or []):
-            if p.get("name") in ("Bull Flag", "Bullish Pennant", "Ascending Triangle", "Ascending Channel") and float(p.get("confidence") or 0) >= 58:
+            if p.get("name") in ("Bull Flag", "Bullish Pennant", "Ascending Triangle", "Ascending Channel") and float(p.get("confidence") or 0) >= 68:
                 has_bull_cont = True
                 break
         if has_bull_cont or (family_kind == "ascending" and direction == "BUY"):
@@ -1936,19 +1945,19 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
         sp_conf = float(sp.get("confidence") or 0)
         is_strong_bullish_rev = (
             sp_name in ("Inverse Head and Shoulders", "Double Bottom", "Triple Bottom")
-            and sp_bias == "BUY" and sp_conf >= 62
+            and sp_bias == "BUY" and sp_conf >= 72
         )
         is_strong_bearish_rev = (
             sp_name in ("Head and Shoulders", "Double Top", "Triple Top")
-            and sp_bias == "SELL" and sp_conf >= 62
+            and sp_bias == "SELL" and sp_conf >= 72
         )
         is_bullish_cont = (
             sp_name in ("Bull Flag", "Bullish Pennant", "Ascending Triangle", "Ascending Channel")
-            and sp_conf >= 58
+            and sp_conf >= 68
         )
         is_bearish_cont = (
             sp_name in ("Bear Flag", "Bearish Pennant", "Descending Triangle", "Descending Channel")
-            and sp_conf >= 58
+            and sp_conf >= 68
         )
 
         # Continuation patterns own the bias when they are clear
