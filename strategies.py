@@ -964,14 +964,66 @@ def _liquidity_targets(pivots, direction: str, entry: float) -> List[float]:
     return cleaned
 
 
+# Minimum acceptable reward:risk on the FIRST partial (TP1). A signal
+# whose nearest liquidity pool sits closer than this to entry is not
+# useful risk management, so TP1 (and TP2) are chosen from liquidity
+# levels that actually clear this bar -- falling back to a synthetic
+# risk-multiple target (never a real level closer than that) if nothing
+# in the liquidity list does. This guarantees every position container
+# this function returns has rr_tp1 >= MIN_RR, no exceptions.
+MIN_RR = 1.5
+
+# If price has already run more than this many ATRs beyond the rail it
+# broke, a "confirmed" breakout still shouldn't be chased at market --
+# same rule the classic chart-pattern engine (execution_engine's
+# ConfirmationEngine) already applies. Route to a Fibonacci pullback
+# zone instead.
+FAR_ATR_MULTIPLE = 2.0
+FIB_ZONE_ENTRY_ANCHOR = 0.618
+
+
+def _fib_pullback_entry(trigger_price: float, extreme_price: float, direction: str) -> float:
+    """61.8% retracement anchor of the trigger->extreme leg, used as the
+    LIMIT entry when price is already stretched past FAR_ATR_MULTIPLE."""
+    if direction == "BUY":
+        leg = extreme_price - trigger_price
+        return extreme_price - leg * FIB_ZONE_ENTRY_ANCHOR
+    leg = trigger_price - extreme_price
+    return extreme_price + leg * FIB_ZONE_ENTRY_ANCHOR
+
+
+def _select_tp_targets(liq: List[float], entry: float, risk: float, direction: str,
+                        min_rr: float = MIN_RR) -> Tuple[float, float, bool]:
+    """Pick TP1/TP2 from real liquidity levels, but only ones that clear
+    min_rr against the actual risk. Returns (tp1, tp2, tp1_is_synthetic).
+    If no real level clears the bar, TP1/TP2 fall back to fixed
+    risk-multiples (min_rr and 2*min_rr) so the signal is never handed
+    out with a sub-minimum R:R."""
+    if risk <= 0:
+        sign = 1 if direction == "BUY" else -1
+        return entry + sign * risk, entry + sign * risk * 2, True
+    sign = 1 if direction == "BUY" else -1
+    valid = [lvl for lvl in liq if (abs(lvl - entry) / risk) >= min_rr]
+    if valid:
+        tp1 = valid[0]
+        tp2 = valid[1] if len(valid) > 1 else entry + sign * risk * min_rr * 2
+        return tp1, tp2, False
+    tp1 = entry + sign * risk * min_rr
+    tp2 = entry + sign * risk * min_rr * 2
+    return tp1, tp2, True
+
+
 def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -> Optional[Dict[str, Any]]:
     """
     Position box with DYNAMIC R:R from real liquidity distance.
 
-    Entry  : nearest structure rail / close
+    Entry  : nearest structure rail / close (or a Fibonacci pullback zone
+             if price is already stretched too far to chase -- see
+             FAR_ATR_MULTIPLE below)
     SL     : beyond invalidation (last opposing swing or rail break)
-    TP1/TP2: nearest / next liquidity pools (swing highs or lows)
-    R:R    : |TP1 - Entry| / |Entry - SL|  (not a fixed multiple)
+    TP1/TP2: nearest / next liquidity pools that clear MIN_RR; falls back
+             to a fixed risk-multiple if no real level does
+    R:R    : |TP1 - Entry| / |Entry - SL|  -- guaranteed >= MIN_RR
     """
     if not family or family.get("error"):
         return None
@@ -1045,9 +1097,6 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
         if not liq and projs:
             liq = [float(p["price"]) for p in projs if p["price"] > entry]
 
-        tp1 = liq[0] if liq else entry + atr * 1.5
-        tp2 = liq[1] if len(liq) > 1 else (liq[0] if liq else entry + atr * 2.5)
-
         order_type = "LIMIT" if entry < close - atr * 0.08 else "MARKET"
         entry_note = None
         # A breakout that isn't confirmed yet (weak/developing) shouldn't be
@@ -1059,8 +1108,24 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
                           f"broken rail at {entry:.5f} instead of chasing at market")
             sl = min(sl, entry - atr * 0.5)
+        elif order_type == "MARKET" and atr > 0 and (close - entry) > FAR_ATR_MULTIPLE * atr:
+            # Breakout IS confirmed, but price already ran too far past the
+            # rail to chase at market -- same rule the classic-pattern
+            # engine applies. Route to a 61.8% pullback of the rail->close
+            # leg instead.
+            pullback_entry = _fib_pullback_entry(entry, close, "BUY")
+            entry_note = (f"Price extended {(close - entry) / atr:.1f}x ATR beyond the broken rail -- "
+                          f"entry routed to a pullback at {pullback_entry:.5f} instead of chasing at market")
+            entry = pullback_entry
+            order_type = "LIMIT"
+            sl = min(sl, entry - atr * 0.5)
 
         risk = abs(entry - sl)
+        tp1, tp2, tp1_synthetic = _select_tp_targets(liq, entry, risk, "BUY", MIN_RR)
+        if tp1_synthetic:
+            entry_note = ((entry_note + " " if entry_note else "") +
+                          f"No liquidity level cleared the {MIN_RR:.1f}R minimum for TP1 -- "
+                          f"using a fixed {MIN_RR:.1f}R target instead.")
         reward_tp1 = abs(tp1 - entry)
         # Headline reward/R:R quoted against TP2 ("next resistance", a real
         # target) rather than TP1 ("previous high" -- often the very next
@@ -1154,9 +1219,6 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
         if not liq and projs:
             liq = [float(p["price"]) for p in projs if p["price"] < entry]
 
-        tp1 = liq[0] if liq else entry - atr * 1.5
-        tp2 = liq[1] if len(liq) > 1 else (liq[0] if liq else entry - atr * 2.5)
-
         order_type = "LIMIT" if entry > close + atr * 0.08 else "MARKET"
         entry_note = None
         if brk and brk["strength"] != "confirmed":
@@ -1165,8 +1227,24 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
                           f"broken rail at {entry:.5f} instead of chasing at market")
             sl = max(sl, entry + atr * 0.5)
+        elif order_type == "MARKET" and atr > 0 and (entry - close) > FAR_ATR_MULTIPLE * atr:
+            # Breakout IS confirmed, but price already ran too far past the
+            # rail to chase at market -- same rule the classic-pattern
+            # engine applies. Route to a 61.8% pullback of the rail->close
+            # leg instead.
+            pullback_entry = _fib_pullback_entry(entry, close, "SELL")
+            entry_note = (f"Price extended {(entry - close) / atr:.1f}x ATR beyond the broken rail -- "
+                          f"entry routed to a pullback at {pullback_entry:.5f} instead of chasing at market")
+            entry = pullback_entry
+            order_type = "LIMIT"
+            sl = max(sl, entry + atr * 0.5)
 
         risk = abs(sl - entry)
+        tp1, tp2, tp1_synthetic = _select_tp_targets(liq, entry, risk, "SELL", MIN_RR)
+        if tp1_synthetic:
+            entry_note = ((entry_note + " " if entry_note else "") +
+                          f"No liquidity level cleared the {MIN_RR:.1f}R minimum for TP1 -- "
+                          f"using a fixed {MIN_RR:.1f}R target instead.")
         reward_tp1 = abs(entry - tp1)
         reward = abs(entry - tp2) if tp2 is not None else reward_tp1
         rr = (reward / risk) if risk > 0 else 0.0
@@ -1551,8 +1629,11 @@ def _evaluate_entry(
     rr = (reward / risk) if risk > 0 else 0.0
 
     score = max(0, min(100, score))
-    # No longer invalidate just because higher TF disagrees
-    valid = direction in ("BUY", "SELL") and score >= 58 and in_zone and rr >= 1.2
+    # No longer invalidate just because higher TF disagrees. RR floor
+    # matches MIN_RR used by the Trendline strategy's position container --
+    # a signal below this is not worth the risk regardless of how clean
+    # the Fan/Expansion read looks.
+    valid = direction in ("BUY", "SELL") and score >= 58 and in_zone and rr >= MIN_RR
 
     ticket = {
         "side": "LONG" if direction == "BUY" else "SHORT",
