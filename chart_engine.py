@@ -461,8 +461,8 @@ def generate_trendline_map(
     pivots = family.get("pivots") or []
     if not pivots:
         try:
-            from market_analysis import hybrid_pivots
-            pivots = hybrid_pivots(df, depth=4, deviation_atr=0.28)
+            from market_analysis import zigzag_swings
+            pivots = zigzag_swings(df, depth=4, deviation_atr=0.28)
         except Exception:
             pivots = []
 
@@ -820,9 +820,28 @@ def generate_trendline_map(
         line2 = f"Pattern: {pattern_title}  |  Confidence: {conf:.0f}%"
     else:
         line2 = "No named pattern — trading directional bias only"
+
+    # 4H/1H top-down alignment -- was already computed and penalizing/boosting
+    # strength, but only showed up in the text caption next to the chart, not
+    # on the image itself. Surface it directly so it's visible at a glance.
+    topdown = family.get("topdown") or {}
+    td_dir = topdown.get("direction", "NEUTRAL")
+    line3 = None
+    title_color = COLORS["text"]
+    if direction in ("BUY", "SELL") and td_dir in ("BUY", "SELL"):
+        if td_dir == direction:
+            tag = "✅ aligned" if topdown.get("allowed") else "aligned, 1H permission pending"
+            line3 = f"4H/1H bias: {td_dir} — {tag}"
+        else:
+            line3 = f"⚠️ 4H/1H bias: {td_dir} — conflicts with this {direction}, counter-trend risk"
+            title_color = "#ffb74d"
+
+    title_text = f"{line1}\n{line2}"
+    if line3:
+        title_text += f"\n{line3}"
     fig.suptitle(
-        f"{line1}\n{line2}",
-        color=COLORS["text"],
+        title_text,
+        color=title_color,
         fontsize=9.5,
         fontweight="bold",
         y=0.99,
