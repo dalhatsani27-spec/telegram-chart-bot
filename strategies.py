@@ -675,6 +675,28 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     elif resistance:
         primary, family_kind = resistance, "descending"
 
+    # HARD RULE: yellow bias line must stay on the correct side of price.
+    # Uptrend  → line BELOW price (support)
+    # Downtrend → line ABOVE price (resistance)
+    # If the fitted primary violates this on the most recent bars, discard it
+    # so we never draw a "support" line cutting through or above price.
+    if primary is not None:
+        line_now = float(primary.get("y_end", primary.get("y1", 0)))
+        atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else abs(close) * 0.002
+        buffer = max(atr_now * 0.15, 1e-9)
+        if family_kind == "ascending":
+            # Must be support: recent closes should be at or above the line
+            recent_closes = df["Close"].iloc[-6:].astype(float)
+            if (recent_closes < line_now - buffer).sum() >= 3 or close < line_now - buffer * 2:
+                # Line is not acting as support — invalidate
+                primary = None
+                family_kind = "none"
+        elif family_kind == "descending":
+            recent_closes = df["Close"].iloc[-6:].astype(float)
+            if (recent_closes > line_now + buffer).sum() >= 3 or close > line_now + buffer * 2:
+                primary = None
+                family_kind = "none"
+
     family_lines = []
     channel = None
     if primary:
@@ -858,14 +880,44 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # whatever the trendline geometry decided.
     order_blocks = detect_order_blocks(df, lookback=len(df))
     active_ob = None
+    nearest_unmit_primary = None
+    atr_ref = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else abs(close) * 0.002
     for ob in order_blocks:
         if float(ob["bottom"]) <= close <= float(ob["top"]):
             active_ob = ob
-            break  # list is nearest-to-price first
+            break
+        if (ob.get("freshness") == "untested" and not ob.get("is_inducement")
+                and nearest_unmit_primary is None):
+            dist = min(abs(close - float(ob["top"])), abs(close - float(ob["bottom"])))
+            if dist < atr_ref * 2.8:
+                nearest_unmit_primary = ob
+
+    # Prefer unmitigated primary OB as the entry zone when price is close
+    if nearest_unmit_primary is not None and active_ob is None:
+        nob = nearest_unmit_primary
+        nob_side = nob["type"]
+        if (direction == "BUY" and nob_side == "bullish") or (direction == "SELL" and nob_side == "bearish"):
+            reasons.append(
+                f"📍 Preferred entry: unmitigated {nob_side} OB ({nob['confidence']}%) nearby — "
+                f"wait for confirmation at this zone"
+            )
+            strength = min(100, strength + 6)
+        elif direction in ("BUY", "SELL") and nob_side != ("bullish" if direction == "BUY" else "bearish"):
+            reasons.append(
+                f"⚠ Unmitigated opposite OB nearby — treat with caution / wait for clear reaction"
+            )
+
     if active_ob:
         ob_side = active_ob["type"]  # 'bullish' or 'bearish'
+        role_tag = " [INDUCEMENT]" if active_ob.get("is_inducement") else ""
         ob_desc = (f"{ob_side.capitalize()} order block ({active_ob['grade']}, "
-                   f"{active_ob['confidence']}%, {active_ob['freshness']})")
+                   f"{active_ob['confidence']}%, {active_ob['freshness']}){role_tag}")
+        if active_ob.get("is_inducement"):
+            reasons.append(
+                f"⚠ Price inside INDUCEMENT OB — expect liquidity grab then move toward the "
+                f"primary unmitigated zone"
+            )
+            strength = max(0, strength - 8)
         if direction == "BUY" and ob_side == "bearish":
             strength = max(0, strength - 20)
             reasons.append(f"⚠️ Price is trading INSIDE a {ob_desc} — supply zone overhead, "
@@ -1846,16 +1898,38 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     reasons = list(family.get("reasons") or [])
 
     # ------------------------------------------------------------------
-    # Pattern conflict resolution
-    # Fixes the common error of printing SELL on a weak Double Top (M)
-    # while a cleaner Inverse Head & Shoulders / W + bullish OB is present.
+    # Pattern conflict resolution (v2)
     # Priority of truth:
-    #   1. Clear trendline geometry (already set in build_trendline_family)
-    #   2. Strong classic reversal from the full scanner (Inverse H&S etc.)
-    #   3. Tightened M/W detector
-    #   4. Order-block reaction (already applied)
+    #   1. Clear trendline geometry (already set)
+    #   2. Strong continuation (Bull/Bear Flag, channels) — preferred over forced reversals
+    #   3. Strong classic reversal (Inverse H&S etc.)
+    #   4. Tightened M/W detector
+    #   5. Order-block reaction
+    # Also demotes Double Top (M) when ascending structure or Bull Flag is present.
     # ------------------------------------------------------------------
     sp = family.get("scanned_pattern")
+    close = float(df_30m["Close"].iloc[-1])
+    family_kind = family.get("family_kind", "none")
+
+    # Demote Double Top (M) when structure is clearly bullish continuation
+    if mw and mw.get("pattern") == "M":
+        has_bull_cont = False
+        for p in (family.get("scanned_patterns") or []):
+            if p.get("name") in ("Bull Flag", "Bullish Pennant", "Ascending Triangle", "Ascending Channel") and float(p.get("confidence") or 0) >= 58:
+                has_bull_cont = True
+                break
+        if has_bull_cont or (family_kind == "ascending" and direction == "BUY"):
+            reasons.append(
+                "⚠ Demoted Double Top (M) — bullish continuation / ascending structure is cleaner"
+            )
+            family["mw_pattern"] = None
+            mw = None
+            if has_bull_cont and sp and sp.get("name") in ("Bull Flag", "Bullish Pennant", "Ascending Triangle"):
+                family["active_pattern"] = "scanned"
+                family["pattern_confidence"] = int(sp.get("confidence") or 70)
+            elif family_kind == "ascending":
+                family["active_pattern"] = "channel" if family.get("channel") else "none"
+
     if sp:
         sp_name = sp.get("name", "")
         sp_bias = sp.get("bias", "NEUTRAL")
@@ -1868,49 +1942,67 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
             sp_name in ("Head and Shoulders", "Double Top", "Triple Top")
             and sp_bias == "SELL" and sp_conf >= 62
         )
+        is_bullish_cont = (
+            sp_name in ("Bull Flag", "Bullish Pennant", "Ascending Triangle", "Ascending Channel")
+            and sp_conf >= 58
+        )
+        is_bearish_cont = (
+            sp_name in ("Bear Flag", "Bearish Pennant", "Descending Triangle", "Descending Channel")
+            and sp_conf >= 58
+        )
 
-        close = float(df_30m["Close"].iloc[-1])
+        # Continuation patterns own the bias when they are clear
+        if is_bullish_cont and direction in ("SELL", "NEUTRAL"):
+            direction = "BUY"
+            strength = max(strength, int(sp_conf) - 2)
+            reasons.append(f"✅ {sp_name} ({sp_conf:.0f}%) — bullish continuation preferred")
+            family["active_pattern"] = "scanned"
+            family["pattern_confidence"] = int(sp_conf)
+            if mw and mw.get("pattern") == "M":
+                family["mw_pattern"] = None
+                mw = None
+        elif is_bearish_cont and direction in ("BUY", "NEUTRAL"):
+            direction = "SELL"
+            strength = max(strength, int(sp_conf) - 2)
+            reasons.append(f"✅ {sp_name} ({sp_conf:.0f}%) — bearish continuation preferred")
+            family["active_pattern"] = "scanned"
+            family["pattern_confidence"] = int(sp_conf)
+            if mw and mw.get("pattern") == "W":
+                family["mw_pattern"] = None
+                mw = None
 
-        # Case 1: strong Inverse H&S / Double Bottom vs weak M or NEUTRAL
-        if is_strong_bullish_rev and direction in ("SELL", "NEUTRAL"):
+        # Strong Inverse H&S / Double Bottom vs weak M or NEUTRAL
+        elif is_strong_bullish_rev and direction in ("SELL", "NEUTRAL"):
             head_price = None
             for kp in (sp.get("key_points") or []):
                 if len(kp) >= 3 and "Head" in str(kp[2]):
                     head_price = float(kp[1])
                     break
             head_broken = head_price is None or close > head_price * 1.001
-
             bullish_ob_support = False
             for ob in (family.get("order_blocks") or []):
                 if ob.get("type") == "bullish":
                     ob_top = float(ob.get("top", 0))
                     ob_bot = float(ob.get("bottom", 0))
-                    if ob_bot <= close <= ob_top * 1.015:
+                    if ob_bot <= close <= ob_top * 1.015 or abs(close - ob_top) / max(close, 1e-9) < 0.005:
                         bullish_ob_support = True
                         break
-                    if abs(close - ob_top) / max(close, 1e-9) < 0.005:
-                        bullish_ob_support = True
-                        break
-
             if head_broken or bullish_ob_support or sp_conf >= 70:
                 old_dir = direction
                 direction = "BUY"
                 strength = max(strength, int(sp_conf) - 4)
                 if mw and mw.get("pattern") == "M":
                     reasons.append(
-                        f"⚠ Overrode weak Double Top (M) — {sp_name} ({sp_conf:.0f}%) is the cleaner "
-                        f"structure (head broken / bullish OB). Bias {old_dir} → BUY"
+                        f"⚠ Overrode weak Double Top (M) — {sp_name} ({sp_conf:.0f}%) cleaner "
+                        f"(head broken / bullish OB). Bias {old_dir} → BUY"
                     )
                     family["mw_pattern"] = None
-                    family["active_pattern"] = "scanned"
                 else:
-                    reasons.append(
-                        f"✅ {sp_name} ({sp_conf:.0f}%) confirms bullish reversal — bias set to BUY"
-                    )
-                    family["active_pattern"] = "scanned"
+                    reasons.append(f"✅ {sp_name} ({sp_conf:.0f}%) confirms bullish reversal")
+                family["active_pattern"] = "scanned"
                 family["pattern_confidence"] = max(int(family.get("pattern_confidence") or 0), int(sp_conf))
 
-        # Case 2: strong H&S / Double Top vs weak W or NEUTRAL
+        # Strong H&S / Double Top vs weak W or NEUTRAL
         elif is_strong_bearish_rev and direction in ("BUY", "NEUTRAL"):
             head_price = None
             for kp in (sp.get("key_points") or []):
@@ -1918,26 +2010,21 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
                     head_price = float(kp[1])
                     break
             head_broken = head_price is None or close < head_price * 0.999
-
             if head_broken or sp_conf >= 70:
                 old_dir = direction
                 direction = "SELL"
                 strength = max(strength, int(sp_conf) - 4)
                 if mw and mw.get("pattern") == "W":
                     reasons.append(
-                        f"⚠ Overrode weak Double Bottom (W) — {sp_name} ({sp_conf:.0f}%) is cleaner. "
+                        f"⚠ Overrode weak Double Bottom (W) — {sp_name} ({sp_conf:.0f}%) cleaner. "
                         f"Bias {old_dir} → SELL"
                     )
                     family["mw_pattern"] = None
-                    family["active_pattern"] = "scanned"
                 else:
-                    reasons.append(
-                        f"✅ {sp_name} ({sp_conf:.0f}%) confirms bearish reversal — bias set to SELL"
-                    )
-                    family["active_pattern"] = "scanned"
+                    reasons.append(f"✅ {sp_name} ({sp_conf:.0f}%) confirms bearish reversal")
+                family["active_pattern"] = "scanned"
                 family["pattern_confidence"] = max(int(family.get("pattern_confidence") or 0), int(sp_conf))
 
-        # Case 3: scanned pattern agrees → mild boost
         elif sp_bias == direction and sp_conf >= 65:
             strength = min(100, strength + 8)
             reasons.append(f"✅ {sp_name} ({sp_conf:.0f}%) aligns with current bias — conviction +")
