@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 import market_data
-from market_analysis import zigzag_swings, hybrid_pivots, find_swings, compute_volume_profile, detect_confirmation_candle, analyse_structure, detect_order_blocks, scan_all_patterns, build_poc_trendline
+from market_analysis import zigzag_swings, find_swings, compute_volume_profile, detect_confirmation_candle, analyse_structure, detect_order_blocks, scan_all_patterns
 from topdown_engine import get_topdown_bias, format_topdown_summary
 
 
@@ -535,15 +535,12 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
 
     n = len(df)
     # LOCKED: only non-ranging swings (zigzag_swings now filters ranging legs)
-    # Prefer cleaner, larger pivots so lines follow real directional structure.
-    # Hybrid = wick pivot validated by a close-based ("line chart") turn --
-    # keeps a single noisy wick from anchoring a trendline that price never
-    # actually respected. See hybrid_pivots() docstring.
-    pivots = hybrid_pivots(df, depth=4, deviation_atr=0.30)
+    # Prefer cleaner, larger pivots so lines follow real directional structure
+    pivots = zigzag_swings(df, depth=4, deviation_atr=0.30)
     if len(pivots) < 4:
-        pivots = hybrid_pivots(df, depth=3, deviation_atr=0.25)
+        pivots = zigzag_swings(df, depth=3, deviation_atr=0.25)
     if len(pivots) < 3:
-        pivots = hybrid_pivots(df, depth=3, deviation_atr=0.18)
+        pivots = zigzag_swings(df, depth=3, deviation_atr=0.18)
 
     # Recent-only candidate pool for the DIAGONAL fit (see docstring).
     cutoff = max(0, n - lookback_bars)
@@ -794,28 +791,23 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
             active_ob = ob
             break  # list is nearest-to-price first
     if active_ob:
-        ob_side = active_ob["type"]  # 'bullish' or 'bearish' (breakers already flipped)
-        is_breaker = active_ob.get("is_breaker", False)
-        tag = "breaker block" if is_breaker else "order block"
-        ob_desc = (f"{ob_side.capitalize()} {tag} ({active_ob['grade']}, "
+        ob_side = active_ob["type"]  # 'bullish' or 'bearish'
+        ob_desc = (f"{ob_side.capitalize()} order block ({active_ob['grade']}, "
                    f"{active_ob['confidence']}%, {active_ob['freshness']})")
-        # A fresh, unmitigated (non-breaker) OB on the wrong side is a hard
-        # veto risk, not just a discount -- don't sell into an untested
-        # bullish OB, don't buy into an untested bearish OB.
-        if direction == "BUY" and ob_side == "bearish" and not is_breaker:
+        if direction == "BUY" and ob_side == "bearish":
             strength = max(0, strength - 20)
             reasons.append(f"⚠️ Price is trading INSIDE a {ob_desc} — supply zone overhead, "
                             f"counter-trend risk, expect rejection before continuation")
-        elif direction == "SELL" and ob_side == "bullish" and not is_breaker:
+        elif direction == "SELL" and ob_side == "bullish":
             strength = max(0, strength - 20)
             reasons.append(f"⚠️ Price is trading INSIDE a {ob_desc} — demand zone below, "
                             f"counter-trend risk, expect rejection before continuation")
         elif direction == "SELL" and ob_side == "bearish":
-            strength = min(100, strength + (14 if is_breaker else 10))
+            strength = min(100, strength + 10)
             reasons.append(f"✅ Price reacting inside the {ob_desc} that's driving this move — "
                             f"aligned with direction")
         elif direction == "BUY" and ob_side == "bullish":
-            strength = min(100, strength + (14 if is_breaker else 10))
+            strength = min(100, strength + 10)
             reasons.append(f"✅ Price reacting inside the {ob_desc} that's driving this move — "
                             f"aligned with direction")
         elif direction == "NEUTRAL":
@@ -823,38 +815,6 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
             strength = max(strength, 50)
             reasons.append(f"Price sitting inside an untested {ob_desc} with no trendline bias otherwise — "
                             f"reacting off the zone")
-
-    # --- POC-anchored trendline gate --------------------------------
-    # Anchored at the Point of Control (not the raw OB extreme), mapped
-    # through the higher-low/lower-high pivot chain out to the current
-    # bar. While price holds on the "structure intact" side of this line,
-    # a reversal call the other way is premature no matter what the
-    # channel/wedge geometry above concluded. A confirmed body-close
-    # through it is what actually earns the reversal call, targeting the
-    # nearest unmitigated OB on the far side.
-    try:
-        poc_line = build_poc_trendline(df, order_blocks=order_blocks, volume_profile=vp)
-    except Exception:
-        poc_line = None
-    if poc_line:
-        if poc_line["direction"] == "support":
-            if direction == "SELL" and not poc_line["triggered"]:
-                strength = max(0, strength - 25)
-                reasons.append("⚠️ " + poc_line["note"])
-            elif direction == "SELL" and poc_line["triggered"]:
-                strength = min(100, strength + 10)
-                reasons.append("✅ " + poc_line["note"])
-            elif direction in ("NEUTRAL", "BUY") and not poc_line["triggered"]:
-                reasons.append(poc_line["note"])
-        else:  # resistance
-            if direction == "BUY" and not poc_line["triggered"]:
-                strength = max(0, strength - 25)
-                reasons.append("⚠️ " + poc_line["note"])
-            elif direction == "BUY" and poc_line["triggered"]:
-                strength = min(100, strength + 10)
-                reasons.append("✅ " + poc_line["note"])
-            elif direction in ("NEUTRAL", "SELL") and not poc_line["triggered"]:
-                reasons.append(poc_line["note"])
 
     # Series for chart (only the parallel family — clean)
     upper_line = np.full(n, np.nan)
@@ -913,7 +873,6 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         # Previously excluded by design; added back deliberately now.
         "order_blocks": order_blocks,
         "active_order_block": active_ob,
-        "poc_trendline": poc_line,
     }
 
 
