@@ -582,16 +582,19 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         resistance = None
         shallow_rejected = True
 
-    # LOCKED RULE:
-    #   Uptrend  → map pivot LOWS  (ascending support)
-    #   Downtrend → map pivot HIGHS (descending resistance)
+    # LOCKED RULE (updated):
+    #   Uptrend  → map sequential pivot LOWS (A→N higher lows / ascending support)
+    #   Downtrend → map sequential pivot HIGHS (lower highs / descending resistance)
     # Prefer the directional family that matches structure; do not mix.
+    # Short-term trendline structure is PRIMARY — we adapt to what price is
+    # actually doing instead of fighting it with lagging higher-timeframe bias.
     close = float(df["Close"].iloc[-1])
     primary = None
     family_kind = "none"
 
     # Detect simple structure bias from recent non-ranging pivots
-    recent = pivots[-6:] if len(pivots) >= 4 else pivots
+    # Prefer sequential higher lows (A→N) for bullish, sequential lower highs for bearish.
+    recent = pivots[-8:] if len(pivots) >= 4 else pivots
     highs = [p for p in recent if p["type"] == "high"]
     lows = [p for p in recent if p["type"] == "low"]
     struct_bias = "NEUTRAL"
@@ -604,9 +607,14 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
             struct_bias = "BULLISH"
         elif lh and ll:
             struct_bias = "BEARISH"
+        # Also accept pure sequential higher lows even without clear HH yet
+        elif len(lows) >= 3 and lows[-1]["price"] > lows[-2]["price"] > lows[-3]["price"]:
+            struct_bias = "BULLISH"
+        elif len(highs) >= 3 and highs[-1]["price"] < highs[-2]["price"] < highs[-3]["price"]:
+            struct_bias = "BEARISH"
 
     if struct_bias == "BULLISH" and support:
-        # Uptrend: only map pivot lows
+        # Uptrend: only map pivot lows (sequential A→N)
         primary, family_kind = support, "ascending"
     elif struct_bias == "BEARISH" and resistance:
         # Downtrend: only map pivot highs
@@ -614,9 +622,14 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     elif support and resistance:
         s_end = support["y_end"]
         r_end = resistance["y_end"]
-        if support["touches"] >= resistance["touches"] and close >= s_end * 0.998:
+        # Prefer ascending when price is clearly above the rising support
+        if close >= s_end * 0.998:
             primary, family_kind = support, "ascending"
-        elif resistance["touches"] > support["touches"] and close <= r_end * 1.002:
+        elif close <= r_end * 1.002:
+            primary, family_kind = resistance, "descending"
+        elif support["touches"] >= resistance["touches"]:
+            primary, family_kind = support, "ascending"
+        elif resistance["touches"] > support["touches"]:
             primary, family_kind = resistance, "descending"
         elif close > (s_end + r_end) / 2:
             primary, family_kind = support, "ascending"
@@ -662,17 +675,21 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         }.get(primary.get("quality"), f"{primary['touches']} touches")
 
         if family_kind == "ascending":
+            # HARD RULE: price clearly above rising support → BUY only.
+            # We adapt to the short-term trendline structure instead of
+            # fighting it with lagging higher-timeframe direction.
             if close >= lower:
                 direction = "BUY"
-                strength = 55 + min(25, primary["touches"] * 7)
+                strength = 60 + min(25, primary["touches"] * 7)
                 reasons.append(f"Ascending family · {touch_note}")
+                reasons.append("Short-term Trend: BUY (price above rising support A→N)")
                 if primary.get("quality") == "unconfirmed":
-                    strength -= 12
+                    strength -= 10
                 elif primary.get("quality") == "crowded":
-                    strength -= 6
+                    strength -= 5
                 if close > mid:
                     reasons.append("Price in upper half of channel — bullish control")
-                    strength += 10
+                    strength += 12
                 else:
                     reasons.append("Price near support rail — watch bounce / break")
             else:
@@ -683,6 +700,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
                     reasons.append(f"Confirmed break below ascending support — "
                                     f"{brk['penetration_atr']} ATR beyond, {brk['consecutive_closes']} closes, "
                                     f"body {brk['body_ratio']}")
+                    reasons.append("Short-term Trend: SELL (break of rising support)")
                 elif brk["strength"] == "developing":
                     strength = 52
                     reasons.append(f"Developing break below support ({brk['consecutive_closes']} close(s), "
@@ -695,17 +713,19 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
                 reasons.append(touch_note)
                 breakout_grade = brk
         else:  # descending
+            # HARD RULE: price clearly below falling resistance → SELL only.
             if close <= upper:
                 direction = "SELL"
-                strength = 55 + min(25, primary["touches"] * 7)
+                strength = 60 + min(25, primary["touches"] * 7)
                 reasons.append(f"Descending family · {touch_note}")
+                reasons.append("Short-term Trend: SELL (price below falling resistance)")
                 if primary.get("quality") == "unconfirmed":
-                    strength -= 12
+                    strength -= 10
                 elif primary.get("quality") == "crowded":
-                    strength -= 6
+                    strength -= 5
                 if close < mid:
                     reasons.append("Price in lower half of channel — bearish control")
-                    strength += 10
+                    strength += 12
                 else:
                     reasons.append("Price near resistance rail — watch reject / break")
             else:
@@ -716,6 +736,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
                     reasons.append(f"Confirmed break above descending resistance — "
                                     f"{brk['penetration_atr']} ATR beyond, {brk['consecutive_closes']} closes, "
                                     f"body {brk['body_ratio']}")
+                    reasons.append("Short-term Trend: BUY (break of falling resistance)")
                 elif brk["strength"] == "developing":
                     strength = 52
                     reasons.append(f"Developing break above resistance ({brk['consecutive_closes']} close(s), "
@@ -1191,8 +1212,10 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
         "confirmed": "✅ CONFIRMED",
         "crowded": "⚠️ CROWDED (5+ touches)",
     }.get(quality, "")
+    short_sig = family.get("short_term_signal") or family.get("direction", "NEUTRAL")
     lines = [
-        f"📐 TRENDLINE  |  {symbol}  (4H → 1H → 30M top-down)",
+        f"📐 TRENDLINE  |  {symbol}  (Short-term structure primary)",
+        f"Short-term Trend: {short_sig}",
     ]
     topdown = family.get("topdown")
     if topdown:
@@ -1473,20 +1496,23 @@ def _evaluate_entry(
         score += 8
         reasons.append(f"{len(expansions)} Expansion targets projected")
 
-    # --- gate against the 4H/1H top-down bias ---
+    # --- gate against the 4H/1H top-down bias (advisory only) ---
+    # Short-term impulse / trendline structure is PRIMARY. Higher TF no longer blocks.
     td_dir = (topdown or {}).get("direction", "NEUTRAL")
     td_allowed = bool((topdown or {}).get("allowed"))
     if td_dir in ("BUY", "SELL"):
         if td_dir == direction and td_allowed:
-            score += 15
-            reasons.append(f"✅ Aligned with 4H/1H top-down bias ({td_dir}) -- structure permission granted")
+            score += 12
+            reasons.append(f"✅ Short-term impulse ({direction}) aligned with 4H/1H top-down ({td_dir})")
         elif td_dir == direction and not td_allowed:
-            reasons.append(f"Aligned with top-down direction ({td_dir}) but 1H structure permission not yet granted")
+            reasons.append(f"Short-term impulse ({direction}) matches top-down but 1H permission pending")
         else:
-            score -= 25
-            reasons.append(f"⚠️ 30M impulse direction ({direction}) conflicts with 4H/1H top-down bias ({td_dir})")
+            score -= 8
+            reasons.append(
+                f"Short-term impulse: {direction} — higher TF still {td_dir} (advisory only, not blocking)"
+            )
     else:
-        reasons.append("4H/1H top-down read is NEUTRAL -- 30M impulse direction stands on its own")
+        reasons.append(f"Short-term impulse: {direction} — higher TF neutral")
 
     # Build ticket
     entry = close
@@ -1507,9 +1533,8 @@ def _evaluate_entry(
     rr = (reward / risk) if risk > 0 else 0.0
 
     score = max(0, min(100, score))
-    valid = direction in ("BUY", "SELL") and score >= 58 and in_zone and rr >= 1.2 and not (
-        td_dir in ("BUY", "SELL") and td_dir != direction
-    )
+    # No longer invalidate just because higher TF disagrees
+    valid = direction in ("BUY", "SELL") and score >= 58 and in_zone and rr >= 1.2
 
     ticket = {
         "side": "LONG" if direction == "BUY" else "SHORT",
@@ -1686,24 +1711,33 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     td_dir = topdown.get("direction", "NEUTRAL")
     gating_notes = []
 
+    # SHORT-TERM TRENDLINE IS PRIMARY.
+    # We adapt to the structure the trendlines show instead of fighting it
+    # with lagging higher-timeframe direction. 4H/1H is now advisory only.
     if direction in ("BUY", "SELL"):
         if td_dir == direction and topdown.get("allowed"):
-            strength = min(100, strength + 15)
-            gating_notes.append(f"✅ Aligned with 4H/1H top-down bias ({td_dir}) -- structure permission granted")
+            strength = min(100, strength + 12)
+            gating_notes.append(
+                f"✅ Short-term trend ({direction}) aligned with 4H/1H top-down ({td_dir})"
+            )
         elif td_dir == direction and not topdown.get("allowed"):
             gating_notes.append(
-                f"Aligned with top-down direction ({td_dir}) but 1H structure permission not yet "
-                f"granted -- treat as lower conviction"
+                f"Short-term trend ({direction}) matches top-down direction but 1H permission "
+                f"not yet granted — still valid, slightly lower conviction"
             )
         elif td_dir == "NEUTRAL":
-            gating_notes.append("4H/1H top-down read is NEUTRAL -- 30M trendline direction stands on its own")
-        else:
-            strength = max(0, strength - 25)
             gating_notes.append(
-                f"⚠️ 30M trendline direction ({direction}) conflicts with 4H/1H top-down bias "
-                f"({td_dir}) -- high risk of counter-trend trade"
+                f"Short-term Trend: {direction} (trendline structure) — higher TF neutral"
+            )
+        else:
+            # Conflict: keep the short-term signal, only mild confidence reduction
+            strength = max(0, strength - 8)
+            gating_notes.append(
+                f"Short-term Trend: {direction} (from trendline) — higher TF still {td_dir} "
+                f"(advisory only, not blocking)"
             )
 
     family["strength"] = strength
     family["gating_notes"] = gating_notes
+    family["short_term_signal"] = direction  # explicit short-term read for reports
     return family
