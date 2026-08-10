@@ -536,6 +536,90 @@ def generate_trendline_map(
                 va="bottom" if is_bull else "top",
                 alpha=0.95 if is_unmitigated else 0.55, zorder=9)
 
+    # --- Classic chart pattern (triangle/wedge/flag/pennant/rectangle/H&S) -
+    # Drawn straight from strategies.py's scanned_pattern (market_analysis
+    # .scan_all_patterns output). One generic renderer handles every
+    # pattern type since they all share the same Pattern schema:
+    # trigger_line (the breakout level to watch) + key_points (labeled
+    # boundary/marker points). For triangles/wedges/rectangles, key_points
+    # carries BOTH boundary sides labeled separately, so group-by-label
+    # reconstructs the full two-line shape instead of just the one trigger
+    # side that gets stored in trigger_line.
+    sp = family.get("scanned_pattern")
+    if sp:
+        p_bias = sp.get("bias")
+        p_color = "#26a69a" if p_bias == "BUY" else "#ef5350" if p_bias == "SELL" else "#ffb74d"
+        key_points = sp.get("key_points") or []
+        trigger_line = sp.get("trigger_line") or []
+        name = sp.get("name", "")
+
+        def _cx(idx):
+            return idx - offset
+
+        if name in ("Bull Flag", "Bear Flag", "Bullish Pennant", "Bearish Pennant"):
+            # Pole: diagonal line through the two labeled pole points.
+            pole_pts = sorted(key_points, key=lambda kp: kp[0])
+            if len(pole_pts) >= 2:
+                (px0, py0, _), (px1, py1, _) = pole_pts[0], pole_pts[-1]
+                ax.plot([_cx(px0), _cx(px1)], [py0, py1], color=p_color,
+                        linewidth=1.6, alpha=0.85, zorder=6)
+            # Flag/pennant box: the consolidation boundary stored as trigger_line.
+            if len(trigger_line) == 2:
+                (fx0, fy0), (fx1, fy1) = trigger_line
+                ax.plot([_cx(fx0), _cx(fx1)], [fy0, fy1], color=p_color,
+                        linewidth=1.4, linestyle="--", alpha=0.9, zorder=6)
+        else:
+            # Group labeled key_points -> reconstruct both boundary lines
+            # (triangle/wedge/rectangle) or plot bare markers (H&S, double
+            # top/bottom, where each label is a single point, not a line).
+            groups: Dict[str, List[Tuple[float, float]]] = {}
+            for kp in key_points:
+                if len(kp) >= 3:
+                    x, y, lbl = kp[0], kp[1], kp[2]
+                else:
+                    x, y, lbl = kp[0], kp[1], "pt"
+                groups.setdefault(lbl, []).append((x, y))
+
+            any_line_drawn = False
+            for lbl, pts in groups.items():
+                if len(pts) < 2:
+                    continue
+                pts_sorted = sorted(pts, key=lambda p: p[0])
+                (x0, y0), (x1, y1) = pts_sorted[0], pts_sorted[-1]
+                x_end = chart_len - 1  # extend the boundary out to the current bar
+                if x1 != x0:
+                    slope = (y1 - y0) / (x1 - x0)
+                    y_end = y0 + slope * ((x_end + offset) - x0)
+                else:
+                    y_end = y1
+                ax.plot([_cx(x0), x_end], [y0, y_end], color=p_color,
+                        linewidth=1.5, alpha=0.85, zorder=6)
+                any_line_drawn = True
+
+            if not any_line_drawn:
+                # Marker-point pattern (H&S / double top-bottom / triple).
+                for lbl, pts in groups.items():
+                    for x, y in pts:
+                        ax.plot(_cx(x), y, marker="o", markersize=4,
+                                color=p_color, zorder=7)
+                        ax.annotate(lbl, (_cx(x), y), fontsize=6, color=p_color,
+                                    xytext=(3, 3), textcoords="offset points", zorder=8)
+                # Neckline / trigger line, still drawn straight across.
+                if len(trigger_line) == 2:
+                    (tx0, ty0), (tx1, ty1) = trigger_line
+                    ax.plot([_cx(tx0), chart_len - 1], [ty0, ty0 if ty0 == ty1 else ty1],
+                            color=p_color, linewidth=1.2, linestyle="--", alpha=0.8, zorder=6)
+
+        trig_price = sp.get("trigger_price")
+        if trig_price is not None:
+            ax.axhline(y=trig_price, color=p_color, linestyle=":", linewidth=1.0, alpha=0.55, zorder=5)
+
+        label_x = _cx(min((kp[0] for kp in key_points), default=offset))
+        label_y = max((kp[1] for kp in key_points), default=trig_price or 0)
+        ax.text(max(2, label_x), label_y, f"{name} ({sp.get('confidence', 0):.0f}%)",
+                fontsize=7, color=p_color, fontweight="bold", va="bottom", zorder=10,
+                bbox=dict(boxstyle="round", facecolor="black", edgecolor=p_color, alpha=0.6, pad=0.2))
+
     # --- Pick exactly ONE structure to draw as "the pattern" -------------
     # Priority set upstream in strategies.py (active_pattern): a specific
     # named reversal (M/W) beats a converging wedge/triangle beats a plain
