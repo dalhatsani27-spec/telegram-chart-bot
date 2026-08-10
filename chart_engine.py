@@ -539,18 +539,13 @@ def generate_trendline_map(
                 alpha=0.95 if is_unmitigated else 0.55, zorder=9)
 
     # --- Classic chart pattern (triangle/wedge/flag/pennant/rectangle/H&S) -
-    # Drawn straight from strategies.py's scanned_pattern (market_analysis
-    # .scan_all_patterns output). One generic renderer handles every
-    # pattern type since they all share the same Pattern schema:
-    # trigger_line (the breakout level to watch) + key_points (labeled
-    # boundary/marker points). For triangles/wedges/rectangles, key_points
-    # carries BOTH boundary sides labeled separately, so group-by-label
-    # reconstructs the full two-line shape instead of just the one trigger
-    # side that gets stored in trigger_line.
+    # Clean educational-style rendering: thick clear lines, proper labels,
+    # minimal clutter. Only high-confidence patterns reach this point.
     sp = family.get("scanned_pattern")
     if sp:
         p_bias = sp.get("bias")
-        p_color = "#26a69a" if p_bias == "BUY" else "#ef5350" if p_bias == "SELL" else "#ffb74d"
+        # Strong educational-chart colors
+        p_color = "#00c853" if p_bias == "BUY" else "#ff1744" if p_bias == "SELL" else "#ffb300"
         key_points = sp.get("key_points") or []
         trigger_line = sp.get("trigger_line") or []
         name = sp.get("name", "")
@@ -559,21 +554,19 @@ def generate_trendline_map(
             return idx - offset
 
         if name in ("Bull Flag", "Bear Flag", "Bullish Pennant", "Bearish Pennant"):
-            # Pole: diagonal line through the two labeled pole points.
+            # Pole: solid diagonal
             pole_pts = sorted(key_points, key=lambda kp: kp[0])
             if len(pole_pts) >= 2:
                 (px0, py0, _), (px1, py1, _) = pole_pts[0], pole_pts[-1]
                 ax.plot([_cx(px0), _cx(px1)], [py0, py1], color=p_color,
-                        linewidth=1.6, alpha=0.85, zorder=6)
-            # Flag/pennant box: the consolidation boundary stored as trigger_line.
+                        linewidth=2.4, alpha=0.95, zorder=6, solid_capstyle="round")
+            # Flag/pennant consolidation boundary
             if len(trigger_line) == 2:
                 (fx0, fy0), (fx1, fy1) = trigger_line
                 ax.plot([_cx(fx0), _cx(fx1)], [fy0, fy1], color=p_color,
-                        linewidth=1.4, linestyle="--", alpha=0.9, zorder=6)
+                        linewidth=2.0, linestyle="--", alpha=0.9, zorder=6)
         else:
-            # Group labeled key_points -> reconstruct both boundary lines
-            # (triangle/wedge/rectangle) or plot bare markers (H&S, double
-            # top/bottom, where each label is a single point, not a line).
+            # Group labeled key_points
             groups: Dict[str, List[Tuple[float, float]]] = {}
             for kp in key_points:
                 if len(kp) >= 3:
@@ -588,39 +581,57 @@ def generate_trendline_map(
                     continue
                 pts_sorted = sorted(pts, key=lambda p: p[0])
                 (x0, y0), (x1, y1) = pts_sorted[0], pts_sorted[-1]
-                x_end = chart_len - 1  # extend the boundary out to the current bar
+                x_end = chart_len - 1
                 if x1 != x0:
                     slope = (y1 - y0) / (x1 - x0)
                     y_end = y0 + slope * ((x_end + offset) - x0)
                 else:
                     y_end = y1
                 ax.plot([_cx(x0), x_end], [y0, y_end], color=p_color,
-                        linewidth=1.5, alpha=0.85, zorder=6)
+                        linewidth=2.2, alpha=0.92, zorder=6, solid_capstyle="round")
                 any_line_drawn = True
 
             if not any_line_drawn:
-                # Marker-point pattern (H&S / double top-bottom / triple).
+                # Marker-point patterns (H&S, Inverse H&S, Double Top/Bottom)
+                # Large clear markers + bold labels like educational charts
                 for lbl, pts in groups.items():
                     for x, y in pts:
-                        ax.plot(_cx(x), y, marker="o", markersize=4,
-                                color=p_color, zorder=7)
-                        ax.annotate(lbl, (_cx(x), y), fontsize=6, color=p_color,
-                                    xytext=(3, 3), textcoords="offset points", zorder=8)
-                # Neckline / trigger line, still drawn straight across.
-                if len(trigger_line) == 2:
-                    (tx0, ty0), (tx1, ty1) = trigger_line
-                    ax.plot([_cx(tx0), chart_len - 1], [ty0, ty0 if ty0 == ty1 else ty1],
-                            color=p_color, linewidth=1.2, linestyle="--", alpha=0.8, zorder=6)
+                        cx = _cx(x)
+                        if not (0 <= cx < chart_len):
+                            continue
+                        ax.scatter([cx], [y], s=90, c=p_color, edgecolors="#ffffff",
+                                   linewidths=1.8, zorder=9, marker="o")
+                        # Place label below for lows, above for highs
+                        is_low_label = any(k in str(lbl).lower() for k in ("shoulder", "head", "bottom"))
+                        y_off = -14 if is_low_label else 12
+                        ax.annotate(str(lbl), (cx, y), fontsize=8.5, color="#ffffff",
+                                    fontweight="bold", xytext=(0, y_off),
+                                    textcoords="offset points", ha="center", zorder=10,
+                                    bbox=dict(boxstyle="round,pad=0.25", facecolor=p_color,
+                                              edgecolor="none", alpha=0.92))
+                # Clean neckline
+                if len(trigger_line) >= 2:
+                    (tx0, ty0), (tx1, ty1) = trigger_line[0], trigger_line[-1]
+                    # Draw actual sloped neckline when the two points differ
+                    y_left, y_right = ty0, ty1
+                    if abs(ty0 - ty1) < 1e-9:
+                        # Flat neckline – extend cleanly
+                        ax.plot([_cx(tx0), chart_len - 1], [ty0, ty0],
+                                color=p_color, linewidth=2.0, linestyle="--", alpha=0.9, zorder=6)
+                    else:
+                        slope = (ty1 - ty0) / max(tx1 - tx0, 1)
+                        y_end = ty0 + slope * ((chart_len - 1 + offset) - tx0)
+                        ax.plot([_cx(tx0), chart_len - 1], [ty0, y_end],
+                                color=p_color, linewidth=2.0, linestyle="--", alpha=0.9, zorder=6)
+                    ax.text(chart_len * 0.02, ty0, "Neckline", fontsize=8,
+                            color=p_color, fontweight="bold", va="bottom", zorder=12)
 
-        trig_price = sp.get("trigger_price")
-        if trig_price is not None:
-            ax.axhline(y=trig_price, color=p_color, linestyle=":", linewidth=1.0, alpha=0.55, zorder=5)
-
-        label_x = _cx(min((kp[0] for kp in key_points), default=offset))
-        label_y = max((kp[1] for kp in key_points), default=trig_price or 0)
-        ax.text(max(2, label_x), label_y, f"{name} ({sp.get('confidence', 0):.0f}%)",
-                fontsize=7, color=p_color, fontweight="bold", va="bottom", zorder=10,
-                bbox=dict(boxstyle="round", facecolor="black", edgecolor=p_color, alpha=0.6, pad=0.2))
+        # Pattern title badge (clean, high-contrast)
+        conf = sp.get("confidence", 0)
+        title_txt = f"{name}  ·  {conf:.0f}%"
+        ax.text(0.015, 0.97, title_txt, transform=ax.transAxes,
+                fontsize=10, color="#ffffff", fontweight="bold", va="top", zorder=15,
+                bbox=dict(boxstyle="round,pad=0.4", facecolor=p_color, edgecolor="none", alpha=0.92))
 
     # --- Pick exactly ONE structure to draw as "the pattern" -------------
     # Priority set upstream in strategies.py (active_pattern):
@@ -645,25 +656,34 @@ def generate_trendline_map(
 
     elif active_pattern == "mw" and mw and mw.get("neckline") is not None:
         pattern_title = mw.get("name", "M/W Pattern")
-        # Neckline: one line, extended to the chart edge (the level to watch)
+        mw_color = "#ff1744" if mw.get("pattern") == "M" else "#00c853"
+        # Clean neckline
         neck_x0 = max(0, int(mw.get("neck_index", 0)) - offset)
         ax.plot([neck_x0, chart_len - 1], [mw["neckline"], mw["neckline"]],
-                color="#ff9800", linestyle="--", linewidth=1.4, alpha=0.85, zorder=5)
-        ax.text(chart_len * 0.015, mw["neckline"], "Neckline", fontsize=7.5,
-                color="#ffb74d", fontweight="bold", va="bottom", zorder=12)
-        # The two matching peaks/troughs that define the pattern
+                color=mw_color, linestyle="--", linewidth=2.1, alpha=0.9, zorder=5)
+        ax.text(chart_len * 0.015, mw["neckline"], "Neckline", fontsize=8.5,
+                color=mw_color, fontweight="bold", va="bottom", zorder=12)
+        # Clear Top / Bottom markers
         left, right = mw.get("left"), mw.get("right")
         tag = "Top" if mw["pattern"] == "M" else "Bottom"
         close_x = (left and right and abs(int(left["index"]) - int(right["index"])) < chart_len * 0.05)
         for i, p in enumerate((left, right)):
             if p:
                 px = int(p["index"]) - offset
-                _pivot_dot(px, float(p["price"]), tag, "#ff9800", offset_idx=(i if close_x else 0))
+                if 0 <= px < chart_len:
+                    ax.scatter([px], [float(p["price"])], s=90, c=mw_color,
+                               edgecolors="#ffffff", linewidths=1.8, zorder=9)
+                    ax.annotate(tag, (px, float(p["price"])), fontsize=8.5, color="#ffffff",
+                                fontweight="bold", xytext=(0, 12 if tag == "Top" else -14),
+                                textcoords="offset points", ha="center", zorder=10,
+                                bbox=dict(boxstyle="round,pad=0.25", facecolor=mw_color,
+                                          edgecolor="none", alpha=0.92))
 
     elif active_pattern == "wedge" and wedge:
         pattern_title = wedge["pattern"]
         apex = wedge.get("apex_index")
-        for rail, color, tag in ((wedge["lower"], "#26a69a", "Lower"), (wedge["upper"], "#ef5350", "Upper")):
+        # Educational-style: green lower, red upper for rising/falling wedges
+        for rail, color, tag in ((wedge["lower"], "#00c853", "Lower"), (wedge["upper"], "#ff1744", "Upper")):
             x0 = max(0, int(rail["x0"]) - offset)
             x1 = chart_len - 1
             if apex is not None:
@@ -673,8 +693,8 @@ def generate_trendline_map(
             y0 = _line_at(rail, max(int(rail["x0"]), 0))
             y1 = _line_at(rail, x1 + offset)
             if x0 < chart_len:
-                ax.plot([x0, x1], [y0, y1], color=color, linewidth=1.7, alpha=0.9, zorder=4)
-            # Label only the two real pivots that anchor this rail
+                ax.plot([x0, x1], [y0, y1], color=color, linewidth=2.3, alpha=0.95,
+                        zorder=5, solid_capstyle="round")
             for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
                 px = int(rail[ax_key]) - offset
                 _pivot_dot(px, float(rail[ay_key]), tag, color)
@@ -682,6 +702,8 @@ def generate_trendline_map(
     elif active_pattern == "channel" and family.get("channel"):
         pattern_title = f"{family_kind.capitalize()} Channel" if family_kind != "none" else "Channel"
         ch = family["channel"]
+        # Clean parallel channel rails (matching educational ascending/descending channel)
+        ch_color = "#00c853" if family_kind == "ascending" else "#ff1744" if family_kind == "descending" else "#90a4ae"
         for rail, tag in ((ch.get("lower"), "Lower"), (ch.get("upper"), "Upper")):
             if not rail:
                 continue
@@ -689,32 +711,35 @@ def generate_trendline_map(
             y0 = _line_at(rail, max(int(rail["x0"]), 0))
             y1 = float(rail.get("y_end", rail.get("y1", 0)))
             if x0 < chart_len:
-                ax.plot([x0, chart_len - 1], [y0, y1], color=bias_color, linewidth=1.4, alpha=0.75, zorder=4)
+                ax.plot([x0, chart_len - 1], [y0, y1], color=ch_color, linewidth=2.1,
+                        alpha=0.88, zorder=4, solid_capstyle="round")
 
-    # --- Directional bias trendline: ALWAYS drawn on top -------------
-    # Connects swing lows in an uptrend / swing highs in a downtrend.
-    # Only the two defining pivots of the primary line are marked (clean diamonds).
-    # No A/B/C labels — ZigZag noise made sequential lettering unreliable.
+    # --- Primary directional trendline (educational style) -------------
+    # Clean solid uptrend (green) or downtrend (red) line connecting key swings.
+    # Matches the classic "Uptrend Line" / "Downtrend Line" from the reference charts.
     primary = (family.get("uptrends") or family.get("downtrends") or [None])[0]
     if primary:
+        is_up = family_kind == "ascending" or (family.get("uptrends") and primary in (family.get("uptrends") or []))
+        tl_color = "#00c853" if is_up else "#ff1744"
         x0 = max(0, int(primary["x0"]) - offset)
         y0 = _line_at(primary, max(int(primary["x0"]), 0))
         y1 = float(primary.get("y_end", primary.get("y1", 0)))
         if x0 < chart_len:
-            ax.plot([x0, chart_len - 1], [y0, y1], color="#ffd600", linestyle="--",
-                     linewidth=2.2, alpha=0.95, zorder=8)
+            # Solid thick line like the educational examples
+            ax.plot([x0, chart_len - 1], [y0, y1], color=tl_color, linestyle="-",
+                    linewidth=2.6, alpha=0.95, zorder=8, solid_capstyle="round")
         end_pts_x = set()
         for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
             px = int(primary[ax_key]) - offset
             end_pts_x.add(px)
             if 0 <= px < chart_len:
-                ax.scatter([px], [float(primary[ay_key])], s=70, c="#ffd600",
-                           edgecolors="#000000", linewidths=1.2, zorder=11, marker="D")
+                ax.scatter([px], [float(primary[ay_key])], s=85, c=tl_color,
+                           edgecolors="#ffffff", linewidths=1.6, zorder=11, marker="o")
 
-        # Clean touch markers only (hollow circles, no letter labels)
+        # Subtle touch markers (hollow)
         touches = [tp for tp in (family.get("bias_touch_points") or [])
                    if (int(tp["index"]) - offset) not in end_pts_x]
-        MAX_TOUCH_MARKERS = 6
+        MAX_TOUCH_MARKERS = 5
         if len(touches) > MAX_TOUCH_MARKERS:
             step = len(touches) / MAX_TOUCH_MARKERS
             touches = [touches[int(i * step)] for i in range(MAX_TOUCH_MARKERS)]
@@ -722,8 +747,8 @@ def generate_trendline_map(
             px = int(tp["index"]) - offset
             if not (0 <= px < chart_len):
                 continue
-            ax.scatter([px], [float(tp["price"])], s=38, facecolors="none",
-                       edgecolors="#ffd600", linewidths=1.3, zorder=10)
+            ax.scatter([px], [float(tp["price"])], s=42, facecolors="none",
+                       edgecolors=tl_color, linewidths=1.5, zorder=10)
 
     # Discrete pattern-scanner output (Double Top/Bottom, H&S, Triangle,
     # Wedge, Flag, Rectangle -- from patterns.py). This payload shape is
