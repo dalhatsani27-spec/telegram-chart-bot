@@ -235,7 +235,8 @@ def _draw_position_panel(fig, panel_ax, pos: Optional[Dict], reasons: Optional[L
 
     rows = [("ENTRY", entry, COLORS["entry"], None)]
     if tp3 is not None:
-        rows.append(("TP3", tp3, "#00e676", "RR 1:2/1:3 target"))
+        tp3_sub = pos.get("tp3_basis") or "RR 1:2/1:3 target"
+        rows.append(("TP3", tp3, "#00e676", tp3_sub))
     if tp2 is not None:
         rows.append(("TP2", tp2, "#00e676", "next resistance/support"))
     if tp1 is not None:
@@ -788,20 +789,15 @@ def generate_trendline_map(
     # dedicated place for fib levels; keep this chart to pattern + bias +
     # position only.
 
-    # Volume Profile — keep POC + Value Area (useful), no heavy histogram clutter
+    # Volume Profile — POC only, kept subtle. Value Area band/lines removed:
+    # they were adding two more dotted lines + labels right in the same
+    # price region as everything else (OBs, trendlines, S/R, signal box),
+    # for a level that duplicates what S/R clustering already shows.
     vp = family.get("volume_profile") or setup.get("volume_profile")
-    if vp:
-        if vp.get("poc_price") is not None:
-            ax.axhline(vp["poc_price"], color=COLORS["poc"], linestyle=":", linewidth=1.25, alpha=0.9)
-            ax.text(chart_len * 0.55, vp["poc_price"], "POC", fontsize=7, color=COLORS["poc"], va="bottom")
-        if vp.get("value_area_low") is not None and vp.get("value_area_high") is not None:
-            # Light Value Area band (not the old heavy orange box)
-            ax.axhspan(vp["value_area_low"], vp["value_area_high"],
-                       facecolor="#ff9800", alpha=0.05, zorder=1)
-            ax.axhline(vp["value_area_high"], color="#ffb74d", linestyle=":", linewidth=0.8, alpha=0.7)
-            ax.axhline(vp["value_area_low"], color="#ffb74d", linestyle=":", linewidth=0.8, alpha=0.7)
-            ax.text(chart_len * 0.01, vp["value_area_high"], "VA-H", fontsize=6, color="#ffb74d", va="bottom")
-            ax.text(chart_len * 0.01, vp["value_area_low"], "VA-L", fontsize=6, color="#ffb74d", va="top")
+    if vp and vp.get("poc_price") is not None:
+        ax.axhline(vp["poc_price"], color=COLORS["poc"], linestyle=":", linewidth=0.8, alpha=0.5, zorder=2)
+        ax.text(chart_len * 0.55, vp["poc_price"], "POC", fontsize=6, color=COLORS["poc"],
+                va="bottom", alpha=0.6)
 
     # Position: thin reference lines on the chart, full readout in the side panel
     pos = setup.get("position") or family.get("position")
