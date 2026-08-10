@@ -682,11 +682,9 @@ def generate_trendline_map(
                 ax.plot([x0, chart_len - 1], [y0, y1], color=bias_color, linewidth=1.4, alpha=0.75, zorder=4)
 
     # --- Directional bias trendline: ALWAYS drawn on top -------------
-    # Connects swing lows in an uptrend / swing highs in a downtrend --
-    # this is the single line that answers "what's the bias", independent
-    # of whichever pattern shape (if any) is drawn above.
-    # Sequential clean swings are labelled A, B, C... so the structure is
-    # immediately readable (exactly as a trader would mark higher lows).
+    # Connects swing lows in an uptrend / swing highs in a downtrend.
+    # Only the two defining pivots of the primary line are marked (clean diamonds).
+    # No A/B/C labels — ZigZag noise made sequential lettering unreliable.
     primary = (family.get("uptrends") or family.get("downtrends") or [None])[0]
     if primary:
         x0 = max(0, int(primary["x0"]) - offset)
@@ -700,38 +698,13 @@ def generate_trendline_map(
             px = int(primary[ax_key]) - offset
             end_pts_x.add(px)
             if 0 <= px < chart_len:
-                ax.scatter([px], [float(primary[ay_key])], s=60, c="#ffd600",
-                           edgecolors="#000000", linewidths=1.0, zorder=11, marker="D")
+                ax.scatter([px], [float(primary[ay_key])], s=70, c="#ffd600",
+                           edgecolors="#000000", linewidths=1.2, zorder=11, marker="D")
 
-        # Label sequential swing points that form the structure (A → B → C)
-        # Prefer the actual pivot lows/highs that define the primary line +
-        # any extra clean touches so the eye can follow the sequence.
-        seq_pivots = []
-        want_type = "low" if family_kind == "ascending" else "high"
-        for p in pivots:
-            if p.get("type") != want_type:
-                continue
-            px = int(p["index"]) - offset
-            if 0 <= px < chart_len:
-                seq_pivots.append(p)
-        # Keep only the most recent 6 sequential points so labels stay readable
-        seq_pivots = seq_pivots[-6:]
-        labels = "ABCDEFGH"
-        for i, p in enumerate(seq_pivots):
-            px = int(p["index"]) - offset
-            py = float(p["price"])
-            lbl = labels[i] if i < len(labels) else str(i + 1)
-            ax.scatter([px], [py], s=55, c="#ffd600", edgecolors="#000000",
-                       linewidths=1.1, zorder=12, marker="o")
-            ax.annotate(lbl, (px, py), fontsize=9, color="#ffd600", fontweight="bold",
-                        xytext=(0, 12 if want_type == "low" else -16),
-                        textcoords="offset points", ha="center", zorder=13)
-
-        # Every other wick that actually touched the line -- small hollow
-        # circles, like a trader circling each bounce off the trendline.
+        # Clean touch markers only (hollow circles, no letter labels)
         touches = [tp for tp in (family.get("bias_touch_points") or [])
                    if (int(tp["index"]) - offset) not in end_pts_x]
-        MAX_TOUCH_MARKERS = 8
+        MAX_TOUCH_MARKERS = 6
         if len(touches) > MAX_TOUCH_MARKERS:
             step = len(touches) / MAX_TOUCH_MARKERS
             touches = [touches[int(i * step)] for i in range(MAX_TOUCH_MARKERS)]
@@ -739,8 +712,8 @@ def generate_trendline_map(
             px = int(tp["index"]) - offset
             if not (0 <= px < chart_len):
                 continue
-            ax.scatter([px], [float(tp["price"])], s=42, facecolors="none",
-                       edgecolors="#ffd600", linewidths=1.4, zorder=10)
+            ax.scatter([px], [float(tp["price"])], s=38, facecolors="none",
+                       edgecolors="#ffd600", linewidths=1.3, zorder=10)
 
     # Discrete pattern-scanner output (Double Top/Bottom, H&S, Triangle,
     # Wedge, Flag, Rectangle -- from patterns.py). This payload shape is
