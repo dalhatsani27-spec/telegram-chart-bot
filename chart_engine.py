@@ -685,6 +685,8 @@ def generate_trendline_map(
     # Connects swing lows in an uptrend / swing highs in a downtrend --
     # this is the single line that answers "what's the bias", independent
     # of whichever pattern shape (if any) is drawn above.
+    # Sequential clean swings are labelled A, B, C... so the structure is
+    # immediately readable (exactly as a trader would mark higher lows).
     primary = (family.get("uptrends") or family.get("downtrends") or [None])[0]
     if primary:
         x0 = max(0, int(primary["x0"]) - offset)
@@ -700,14 +702,36 @@ def generate_trendline_map(
             if 0 <= px < chart_len:
                 ax.scatter([px], [float(primary[ay_key])], s=60, c="#ffd600",
                            edgecolors="#000000", linewidths=1.0, zorder=11, marker="D")
+
+        # Label sequential swing points that form the structure (A → B → C)
+        # Prefer the actual pivot lows/highs that define the primary line +
+        # any extra clean touches so the eye can follow the sequence.
+        seq_pivots = []
+        want_type = "low" if family_kind == "ascending" else "high"
+        for p in pivots:
+            if p.get("type") != want_type:
+                continue
+            px = int(p["index"]) - offset
+            if 0 <= px < chart_len:
+                seq_pivots.append(p)
+        # Keep only the most recent 6 sequential points so labels stay readable
+        seq_pivots = seq_pivots[-6:]
+        labels = "ABCDEFGH"
+        for i, p in enumerate(seq_pivots):
+            px = int(p["index"]) - offset
+            py = float(p["price"])
+            lbl = labels[i] if i < len(labels) else str(i + 1)
+            ax.scatter([px], [py], s=55, c="#ffd600", edgecolors="#000000",
+                       linewidths=1.1, zorder=12, marker="o")
+            ax.annotate(lbl, (px, py), fontsize=9, color="#ffd600", fontweight="bold",
+                        xytext=(0, 12 if want_type == "low" else -16),
+                        textcoords="offset points", ha="center", zorder=13)
+
         # Every other wick that actually touched the line -- small hollow
         # circles, like a trader circling each bounce off the trendline.
-        # Capped and evenly re-sampled so a very tight/long-lived line
-        # (dozens of touches) still reads as "circled bounces", not a
-        # second solid line drawn out of overlapping markers.
         touches = [tp for tp in (family.get("bias_touch_points") or [])
                    if (int(tp["index"]) - offset) not in end_pts_x]
-        MAX_TOUCH_MARKERS = 10
+        MAX_TOUCH_MARKERS = 8
         if len(touches) > MAX_TOUCH_MARKERS:
             step = len(touches) / MAX_TOUCH_MARKERS
             touches = [touches[int(i * step)] for i in range(MAX_TOUCH_MARKERS)]
@@ -820,28 +844,9 @@ def generate_trendline_map(
         line2 = f"Pattern: {pattern_title}  |  Confidence: {conf:.0f}%"
     else:
         line2 = "No named pattern — trading directional bias only"
-
-    # 4H/1H top-down alignment -- was already computed and penalizing/boosting
-    # strength, but only showed up in the text caption next to the chart, not
-    # on the image itself. Surface it directly so it's visible at a glance.
-    topdown = family.get("topdown") or {}
-    td_dir = topdown.get("direction", "NEUTRAL")
-    line3 = None
-    title_color = COLORS["text"]
-    if direction in ("BUY", "SELL") and td_dir in ("BUY", "SELL"):
-        if td_dir == direction:
-            tag = "✅ aligned" if topdown.get("allowed") else "aligned, 1H permission pending"
-            line3 = f"4H/1H bias: {td_dir} — {tag}"
-        else:
-            line3 = f"⚠️ 4H/1H bias: {td_dir} — conflicts with this {direction}, counter-trend risk"
-            title_color = "#ffb74d"
-
-    title_text = f"{line1}\n{line2}"
-    if line3:
-        title_text += f"\n{line3}"
     fig.suptitle(
-        title_text,
-        color=title_color,
+        f"{line1}\n{line2}",
+        color=COLORS["text"],
         fontsize=9.5,
         fontweight="bold",
         y=0.99,
