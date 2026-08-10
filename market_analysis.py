@@ -1088,20 +1088,28 @@ class Pattern:
 #    Each takes (df, pivot_highs, pivot_lows) and returns a Pattern or None.
 # ----------------------------------------------------------------------------
 
-def detect_double_top(df, ph, pl, min_bars=8, min_depth_atr=1.0, max_peak_diff=0.006):
+def detect_double_top(df, ph, pl, min_bars=12, min_depth_atr=1.4, max_peak_diff=0.0035):
     """
-    Stricter Double Top for lower noise (especially on 30m).
-    - Peaks within max_peak_diff (~0.6%)
-    - At least min_bars between the two tops
-    - Trough depth >= min_depth_atr * ATR
+    High-quality Double Top only.
+    Requirements for a clean setup:
+    - Two peaks within 0.35% of each other
+    - At least 12 bars between tops
+    - Trough depth >= 1.4× ATR (meaningful pullback)
+    - Right peak must be the most recent significant high (not buried)
+    - Price must still be near or below the neckline zone (not already far below or making new highs)
+    - Prefer patterns where the second top is slightly lower or equal (classic)
     """
     if len(ph) < 2:
         return None
     i2, i1 = ph[-1], ph[-2]
     if (i2 - i1) < min_bars:
         return None
+    # Prefer the last two clear highs; reject if a much higher high sits between them
     h1, h2 = float(df['High'].iloc[i1]), float(df['High'].iloc[i2])
     if abs(_pct(h2, h1)) > max_peak_diff:
+        return None
+    # Second top should not be significantly higher than the first (classic DT is equal or lower)
+    if h2 > h1 * 1.002:
         return None
     between_lows = [p for p in pl if i1 < p < i2]
     if not between_lows:
@@ -1113,29 +1121,39 @@ def detect_double_top(df, ph, pl, min_bars=8, min_depth_atr=1.0, max_peak_diff=0
     if depth < min_depth_atr * atr:
         return None
     current = float(df['Close'].iloc[-1])
-    if current > max(h1, h2):
+    # Reject if price has already made a new high above both tops
+    if current > max(h1, h2) * 1.001:
         return None
-    equality_bonus = min(12, (1 - abs(_pct(h2, h1)) * 100) * 8)
-    depth_bonus = min(10, (depth / atr - min_depth_atr) * 4)
-    conf = 58 + equality_bonus + depth_bonus
+    # Reject if price is already deep below the neckline (pattern already played out)
+    if current < neckline - 1.8 * atr:
+        return None
+    # Time freshness: right top should be relatively recent
+    bars_since_right = len(df) - 1 - i2
+    if bars_since_right > 25:
+        return None
+
+    equality_bonus = min(15, (1 - abs(_pct(h2, h1)) * 100) * 12)
+    depth_bonus = min(12, (depth / atr - min_depth_atr) * 5)
+    conf = 62 + equality_bonus + depth_bonus
+    # Small bonus if second top is lower (more classic distribution)
+    if h2 <= h1:
+        conf += 3
     return Pattern(
         "Double Top", "reversal", "SELL",
         trigger_price=neckline,
         trigger_line=[(i1, neckline), (i2, neckline)],
         key_points=[(i1, h1, "Top 1"), (i2, h2, "Top 2"), (trough_i, neckline, "Neckline")],
-        confidence=float(np.clip(conf, 55, 88)),
-        note=(f"Two near-equal highs ({h1:.5f} / {h2:.5f}) separated by {i2 - i1} bars. "
-              f"Neckline {neckline:.5f} (depth {depth / atr:.1f}×ATR). "
-              f"Close below neckline confirms breakdown.")
+        confidence=float(np.clip(conf, 65, 92)),
+        note=(f"Clean Double Top: highs {h1:.5f} / {h2:.5f} ({abs(_pct(h2,h1))*100:.2f}% apart), "
+              f"{i2 - i1} bars, neckline {neckline:.5f} (depth {depth / atr:.1f}×ATR). "
+              f"Close below neckline confirms.")
     )
 
 
-def detect_double_bottom(df, ph, pl, min_bars=8, min_depth_atr=1.0, max_peak_diff=0.006):
+def detect_double_bottom(df, ph, pl, min_bars=12, min_depth_atr=1.4, max_peak_diff=0.0035):
     """
-    Stricter Double Bottom for lower noise (especially on 30m).
-    - Bottoms within max_peak_diff (~0.6%)
-    - At least min_bars between the two bottoms
-    - Peak height >= min_depth_atr * ATR
+    High-quality Double Bottom only.
+    Same strictness as Double Top (mirrored).
     """
     if len(pl) < 2:
         return None
@@ -1144,6 +1162,9 @@ def detect_double_bottom(df, ph, pl, min_bars=8, min_depth_atr=1.0, max_peak_dif
         return None
     l1, l2 = float(df['Low'].iloc[i1]), float(df['Low'].iloc[i2])
     if abs(_pct(l2, l1)) > max_peak_diff:
+        return None
+    # Second bottom should not be significantly lower than the first
+    if l2 < l1 * 0.998:
         return None
     between_highs = [p for p in ph if i1 < p < i2]
     if not between_highs:
@@ -1155,20 +1176,28 @@ def detect_double_bottom(df, ph, pl, min_bars=8, min_depth_atr=1.0, max_peak_dif
     if height < min_depth_atr * atr:
         return None
     current = float(df['Close'].iloc[-1])
-    if current < min(l1, l2):
+    if current < min(l1, l2) * 0.999:
         return None
-    equality_bonus = min(12, (1 - abs(_pct(l2, l1)) * 100) * 8)
-    depth_bonus = min(10, (height / atr - min_depth_atr) * 4)
-    conf = 58 + equality_bonus + depth_bonus
+    if current > neckline + 1.8 * atr:
+        return None
+    bars_since_right = len(df) - 1 - i2
+    if bars_since_right > 25:
+        return None
+
+    equality_bonus = min(15, (1 - abs(_pct(l2, l1)) * 100) * 12)
+    depth_bonus = min(12, (height / atr - min_depth_atr) * 5)
+    conf = 62 + equality_bonus + depth_bonus
+    if l2 >= l1:
+        conf += 3
     return Pattern(
         "Double Bottom", "reversal", "BUY",
         trigger_price=neckline,
         trigger_line=[(i1, neckline), (i2, neckline)],
         key_points=[(i1, l1, "Bottom 1"), (i2, l2, "Bottom 2"), (peak_i, neckline, "Neckline")],
-        confidence=float(np.clip(conf, 55, 88)),
-        note=(f"Two near-equal lows ({l1:.5f} / {l2:.5f}) separated by {i2 - i1} bars. "
-              f"Neckline {neckline:.5f} (height {height / atr:.1f}×ATR). "
-              f"Close above neckline confirms breakout.")
+        confidence=float(np.clip(conf, 65, 92)),
+        note=(f"Clean Double Bottom: lows {l1:.5f} / {l2:.5f} ({abs(_pct(l2,l1))*100:.2f}% apart), "
+              f"{i2 - i1} bars, neckline {neckline:.5f} (height {height / atr:.1f}×ATR). "
+              f"Close above neckline confirms.")
     )
 
 
@@ -1225,13 +1254,31 @@ def detect_triple_bottom(df, ph, pl):
 
 
 def detect_head_shoulders(df, ph, pl):
+    """
+    High-probability Head & Shoulders only.
+    Strict rules for clean, tradeable setups:
+    - Clear head higher than both shoulders
+    - Shoulders within ~2.2% of each other (symmetry)
+    - Head must stand out meaningfully vs shoulders (at least ~0.4% or 0.7×ATR)
+    - Both troughs (neckline points) must exist and form a sensible neckline
+    - Right shoulder must be relatively recent
+    - Price should not already be deep below the neckline (stale)
+    - Prefer patterns where the right shoulder is complete and price is testing / near neckline
+    """
     if len(ph) < 3:
         return None
     i1, i2, i3 = ph[-3], ph[-2], ph[-1]
-    ls, head, rs = df['High'].iloc[i1], df['High'].iloc[i2], df['High'].iloc[i3]
+    ls, head, rs = float(df['High'].iloc[i1]), float(df['High'].iloc[i2]), float(df['High'].iloc[i3])
     if not (head > ls and head > rs):
         return None
-    if abs(_pct(rs, ls)) > 0.03:  # shoulders should be roughly symmetric
+    # Tighter symmetry
+    if abs(_pct(rs, ls)) > 0.022:
+        return None
+    atr = _atr(df) or 1e-9
+    # Head must be a clear standout
+    shoulder_avg = (ls + rs) / 2
+    head_rise = head - shoulder_avg
+    if head_rise < max(0.004 * head, 0.7 * atr):
         return None
     between1 = [p for p in pl if i1 < p < i2]
     between2 = [p for p in pl if i2 < p < i3]
@@ -1239,30 +1286,58 @@ def detect_head_shoulders(df, ph, pl):
         return None
     t1 = min(between1, key=lambda p: df['Low'].iloc[p])
     t2 = min(between2, key=lambda p: df['Low'].iloc[p])
-    slope, intercept = _line_through((t1, df['Low'].iloc[t1]), (t2, df['Low'].iloc[t2]))
+    n1, n2 = float(df['Low'].iloc[t1]), float(df['Low'].iloc[t2])
+    slope, intercept = _line_through((t1, n1), (t2, n2))
     neckline_now = slope * (len(df) - 1) + intercept
     current = float(df['Close'].iloc[-1])
-    if current < neckline_now * 0.99:
-        return None  # already broke down further back, stale
+    # Stale if already well below neckline
+    if current < neckline_now - 1.5 * atr:
+        return None
+    # Right shoulder freshness
+    if (len(df) - 1 - i3) > 22:
+        return None
+    # Minimum bars between key points for proper structure
+    if (i2 - i1) < 6 or (i3 - i2) < 6:
+        return None
+
+    conf = 70
+    # Symmetry bonus
+    conf += min(8, (1 - abs(_pct(rs, ls)) * 100) * 6)
+    # Head prominence bonus
+    conf += min(8, (head_rise / atr) * 2.5)
+    # Prefer when price is still above or near the neckline (setup not yet triggered hard)
+    if current > neckline_now * 0.998:
+        conf += 4
     return Pattern(
         "Head and Shoulders", "reversal", "SELL",
         trigger_price=float(neckline_now),
-        trigger_line=[(t1, float(df['Low'].iloc[t1])), (t2, float(df['Low'].iloc[t2]))],
+        trigger_line=[(t1, n1), (t2, n2)],
         key_points=[(i1, ls, "L Shoulder"), (i2, head, "Head"), (i3, rs, "R Shoulder")],
-        confidence=72,
-        note=f"Classic H&S: head {head:.5f} above shoulders {ls:.5f}/{rs:.5f}. "
-             f"Neckline (sloped) currently ~{neckline_now:.5f} — close below confirms."
+        confidence=float(np.clip(conf, 68, 93)),
+        note=(f"Clean H&S: head {head:.5f} > shoulders {ls:.5f}/{rs:.5f} "
+              f"(sym {_pct(rs,ls)*100:+.2f}%). Neckline ~{neckline_now:.5f}. "
+              f"Close below confirms.")
     )
 
 
 def detect_inverse_head_shoulders(df, ph, pl):
+    """
+    High-probability Inverse Head & Shoulders only.
+    Same strictness as classic H&S (mirrored). This is the pattern quality
+    standard the user wants (see clean XAUUSD example).
+    """
     if len(pl) < 3:
         return None
     i1, i2, i3 = pl[-3], pl[-2], pl[-1]
-    ls, head, rs = df['Low'].iloc[i1], df['Low'].iloc[i2], df['Low'].iloc[i3]
+    ls, head, rs = float(df['Low'].iloc[i1]), float(df['Low'].iloc[i2]), float(df['Low'].iloc[i3])
     if not (head < ls and head < rs):
         return None
-    if abs(_pct(rs, ls)) > 0.03:
+    if abs(_pct(rs, ls)) > 0.022:
+        return None
+    atr = _atr(df) or 1e-9
+    shoulder_avg = (ls + rs) / 2
+    head_drop = shoulder_avg - head
+    if head_drop < max(0.004 * head, 0.7 * atr):
         return None
     between1 = [p for p in ph if i1 < p < i2]
     between2 = [p for p in ph if i2 < p < i3]
@@ -1270,19 +1345,32 @@ def detect_inverse_head_shoulders(df, ph, pl):
         return None
     t1 = max(between1, key=lambda p: df['High'].iloc[p])
     t2 = max(between2, key=lambda p: df['High'].iloc[p])
-    slope, intercept = _line_through((t1, df['High'].iloc[t1]), (t2, df['High'].iloc[t2]))
+    n1, n2 = float(df['High'].iloc[t1]), float(df['High'].iloc[t2])
+    slope, intercept = _line_through((t1, n1), (t2, n2))
     neckline_now = slope * (len(df) - 1) + intercept
     current = float(df['Close'].iloc[-1])
-    if current > neckline_now * 1.01:
+    # Stale if already well above neckline
+    if current > neckline_now + 1.5 * atr:
         return None
+    if (len(df) - 1 - i3) > 22:
+        return None
+    if (i2 - i1) < 6 or (i3 - i2) < 6:
+        return None
+
+    conf = 70
+    conf += min(8, (1 - abs(_pct(rs, ls)) * 100) * 6)
+    conf += min(8, (head_drop / atr) * 2.5)
+    if current < neckline_now * 1.002:
+        conf += 4
     return Pattern(
         "Inverse Head and Shoulders", "reversal", "BUY",
         trigger_price=float(neckline_now),
-        trigger_line=[(t1, float(df['High'].iloc[t1])), (t2, float(df['High'].iloc[t2]))],
+        trigger_line=[(t1, n1), (t2, n2)],
         key_points=[(i1, ls, "L Shoulder"), (i2, head, "Head"), (i3, rs, "R Shoulder")],
-        confidence=72,
-        note=f"Inverse H&S: head {head:.5f} below shoulders {ls:.5f}/{rs:.5f}. "
-             f"Neckline (sloped) currently ~{neckline_now:.5f} — close above confirms."
+        confidence=float(np.clip(conf, 68, 93)),
+        note=(f"Clean Inverse H&S: head {head:.5f} < shoulders {ls:.5f}/{rs:.5f} "
+              f"(sym {_pct(rs,ls)*100:+.2f}%). Neckline ~{neckline_now:.5f}. "
+              f"Close above confirms.")
     )
 
 
@@ -1612,6 +1700,14 @@ def scan_all_patterns(df, left=3, right=3, volume_profile=None):
         if bonus > 0:
             p.confidence = float(np.clip(p.confidence + bonus, 0.0, 100.0))
             p.note += f" Trigger aligns with a well-defended S/R zone -- reinforced."
+
+    # Hard quality floor: discard mediocre patterns so the bot stays silent
+    # instead of pushing low-probability setups. Only high-conviction structures
+    # (roughly matching the clean XAUUSD Inverse H&S standard) survive.
+    MIN_CONFIDENCE = 68.0
+    detected = [p for p in detected if p.confidence >= MIN_CONFIDENCE]
+    if not detected:
+        return None, []
 
     detected.sort(key=lambda p: (_PRIORITY.get(p.name, 40) + p.confidence), reverse=True)
     return detected[0], detected
