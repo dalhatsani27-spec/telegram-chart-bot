@@ -43,7 +43,7 @@ def _line_value(x0: float, y0: float, x1: float, y1: float, x: float) -> float:
 
 
 def _count_touches(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
-                   kind: str, tol_atr: float = 0.40) -> int:
+                   kind: str, tol_atr: float = 0.35) -> int:
     if df is None or len(df) < 5:
         return 0
     atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
@@ -62,12 +62,34 @@ def _count_touches(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
     return touches
 
 
+def _count_violations(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
+                      kind: str, tol_atr: float = 0.25) -> int:
+    """
+    How many times price CLOSED on the wrong side of the candidate line.
+    A clean support should rarely close below it; a clean resistance should
+    rarely close above it. Heavy violations = the line is not real structure.
+    """
+    if df is None or len(df) < 5:
+        return 0
+    atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
+    closes = df["Close"].values
+    violations = 0
+    lo, hi = min(x0, x1), max(x0, x1)
+    # Only score the segment after the first pivot (structure is being built)
+    for i in range(lo, min(hi + 1, len(df))):
+        lv = _line_value(x0, y0, x1, y1, i)
+        a = float(atr[i]) if i < len(atr) and atr[i] > 0 else abs(y1 - y0) * 0.05
+        tol = max(a * tol_atr, 1e-9)
+        if kind == "support" and closes[i] < lv - tol:
+            violations += 1
+        elif kind == "resistance" and closes[i] > lv + tol:
+            violations += 1
+    return violations
+
+
 def _touch_points(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
-                   kind: str, tol_atr: float = 0.40) -> List[Dict]:
-    """Same tolerance test as _count_touches, but returns the actual
-    (index, price) of each touching wick instead of just a count, so the
-    chart can mark every bounce along the trendline the way a trader
-    circles them by hand -- not just the two pivots that defined the line."""
+                   kind: str, tol_atr: float = 0.35) -> List[Dict]:
+    """Return actual (index, price) of each touching wick for chart markers."""
     if df is None or len(df) < 5:
         return []
     atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
@@ -87,60 +109,72 @@ def _touch_points(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
 
 
 def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
-    """Best 2-point primary line of given kind (support=lows, resistance=highs).
+    """
+    Best primary trendline of given kind (support=lows, resistance=highs).
 
-    Professional validation standard: a 2-point line is only a *candidate* --
-    it takes a 3rd touch for traders to actually respect it as real structure.
-    We still return 2-touch lines (better than nothing), but tag them
-    "unconfirmed" so downstream scoring/reporting can be honest about it.
-    5+ touches is flagged "crowded": the level has been tested so many times
-    the order flow defending it is likely used up, and the next test is
-    statistically more likely to fail than hold.
+    Scoring priority (what makes a line "perfect" for trading decisions):
+      1. Cleanliness  – few closes on the wrong side of the line
+      2. Real touches – price actually respected the line multiple times
+      3. Recency      – last defining pivot is recent enough to still matter
+      4. Structure    – higher lows (support) / lower highs (resistance)
 
-    The line's 2nd point must be recent enough that extrapolating it to the
-    current bar is still meaningful -- otherwise you get a line anchored to
-    an old pivot, stretched flat across everything that's happened since,
-    cutting through unrelated later price action instead of tracking it.
+    A 2-point line is only a candidate. 3+ clean touches = confirmed.
+    5+ touches with rising violations = crowded / weakening.
     """
     pts = [p for p in pivots if p["type"] == ("low" if kind == "support" else "high")]
     if len(pts) < 2:
         return None
-    # The most recent defining touch has to sit within the last ~40% of
-    # the window (min 20 bars) -- a line whose last touch is ancient
-    # relative to the current bar has no business being extrapolated
-    # across everything since.
-    recency_floor = max(0, n - max(20, int((max(p["index"] for p in pts) - min(p["index"] for p in pts) or n) * 0.4)))
+
+    # Last defining pivot must be reasonably recent
+    recency_floor = max(0, n - max(25, int(n * 0.45)))
     best = None
-    best_score = -1
+    best_score = -1e9
+
     for i in range(len(pts) - 1):
         for j in range(i + 1, len(pts)):
             a, b = pts[i], pts[j]
             if b["index"] <= a["index"]:
                 continue
             if b["index"] < recency_floor:
-                continue  # last touch too stale to extrapolate from
-            # Uptrend support needs higher low; downtrend resistance needs lower high
-            if kind == "support" and b["price"] <= a["price"]:
                 continue
-            if kind == "resistance" and b["price"] >= a["price"]:
+            # Directional structure requirement
+            if kind == "support" and b["price"] <= a["price"] * 0.9995:
                 continue
-            slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
+            if kind == "resistance" and b["price"] >= a["price"] * 1.0005:
+                continue
+
+            span = b["index"] - a["index"]
+            if span < 6:
+                continue  # too tight to be meaningful structure
+
+            slope = (b["price"] - a["price"]) / max(span, 1)
             touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind)
-            # Prefer more touches + a recent 2nd touch. NOTE: deliberately no
-            # reward for a wide a-b span -- that used to bias the fit toward
-            # an old, distant starting pivot just because it made the line
-            # "look" more established, which produced lines extrapolated far
-            # past anything they were actually still tracking.
-            touch_score = touches * 10
-            if touches >= 5:
-                touch_score -= (touches - 4) * 3  # fatigue penalty, doesn't erase the line
-            score = touch_score + (b["index"] / max(n, 1)) * 8
+            violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind)
+
+            # Reject lines that are more broken than respected
+            if touches >= 2 and violations > touches * 1.5:
+                continue
+            if touches < 2:
+                continue
+
+            # --- Score ---
+            # Cleanliness is king: each violation hurts more than a touch helps
+            cleanliness = touches * 12.0 - violations * 18.0
+            # Recency of the right-hand pivot
+            recency = (b["index"] / max(n, 1)) * 15.0
+            # Prefer moderate span (not tiny, not ancient)
+            span_score = min(span, 40) * 0.15
+            # Fatigue: very many touches without room to breathe is weaker
+            fatigue = max(0, touches - 5) * 4.0
+
+            score = cleanliness + recency + span_score - fatigue
+
             if score > best_score:
                 best_score = score
                 y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
-                if touches < 3:
+                if touches < 3 or violations > 2:
                     quality = "unconfirmed"
-                elif touches <= 4:
+                elif touches <= 5 and violations <= 2:
                     quality = "confirmed"
                 else:
                     quality = "crowded"
@@ -150,10 +184,12 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Opt
                     "y_end": y_end,
                     "slope": slope,
                     "touches": touches,
-                    "confirmed": touches >= 3,
+                    "violations": violations,
+                    "confirmed": quality == "confirmed",
                     "quality": quality,
                     "kind": kind,
                     "bars_since_last_touch": n - 1 - b["index"],
+                    "score": score,
                 }
     return best
 
@@ -576,20 +612,23 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}
 
     n = len(df)
-    # LOCKED: only non-ranging swings (zigzag_swings now filters ranging legs)
-    # Prefer cleaner, larger pivots so lines follow real directional structure
-    pivots = zigzag_swings(df, depth=4, deviation_atr=0.30)
+    # Prefer cleaner, larger pivots so lines follow real directional structure.
+    # Slightly higher deviation filters out micro-noise that pollutes the fit.
+    pivots = zigzag_swings(df, depth=5, deviation_atr=0.38)
+    if len(pivots) < 5:
+        pivots = zigzag_swings(df, depth=4, deviation_atr=0.30)
     if len(pivots) < 4:
         pivots = zigzag_swings(df, depth=3, deviation_atr=0.25)
     if len(pivots) < 3:
         pivots = zigzag_swings(df, depth=3, deviation_atr=0.18)
 
-    # Recent-only candidate pool for the DIAGONAL fit (see docstring).
+    # Recent-only candidate pool for the DIAGONAL fit.
+    # A bit tighter window so the line tracks the live structure, not history.
     cutoff = max(0, n - lookback_bars)
     recent_pivots = [p for p in pivots if p["index"] >= cutoff]
+    if len(recent_pivots) < 4:
+        recent_pivots = [p for p in pivots if p["index"] >= max(0, n - int(lookback_bars * 1.5))]
     if len(recent_pivots) < 3:
-        # Not enough recent structure -- widen gradually rather than
-        # snapping straight back to the full, stale-prone history.
         recent_pivots = [p for p in pivots if p["index"] >= max(0, n - lookback_bars * 2)]
     if len(recent_pivots) < 2:
         recent_pivots = pivots
@@ -604,9 +643,9 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # "ascending" rail is misleading -- it should be left for the
     # horizontal S/R clustering below (_detect_horizontal_levels) to pick
     # up instead, which is exactly what that layer is for.
-    MIN_TREND_MOVE_ATR = 0.9  # total rise/fall across the line's full span, in ATRs
-    # Lowered so sequential higher lows (A→B→C) that form a clear rising
-    # support above an OB still get drawn even when the slope is moderate.
+    # Minimum total rise/fall across the line span (in ATR). Too shallow =
+    # range noise, not a real trendline a trader would draw by hand.
+    MIN_TREND_MOVE_ATR = 1.15
     atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
 
     def _has_meaningful_slope(line):
@@ -843,9 +882,11 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # around the entry zone. The report path can still ask for more via
     # max_levels if it wants the full picture.
     horizontal_levels = _detect_horizontal_levels(df, pivots, n, max_levels=2)
-    if wedge and direction == "NEUTRAL" and wedge["bias"] != "NEUTRAL":
+    # Only let a wedge set direction when it is reasonably strong.
+    # Weak converging geometry should not create trade bias.
+    if wedge and direction == "NEUTRAL" and wedge["bias"] != "NEUTRAL" and strength >= 55:
         direction = wedge["bias"]
-        strength = max(strength, 58)
+        strength = max(strength, 60)
         reasons.append(f"{wedge['pattern']} — rails converging toward apex")
 
     projections = _measured_move_projections(df, pivots, direction)
@@ -989,8 +1030,14 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         # M/W (specific reversal structure, high signal) > wedge/triangle
         # (specific continuation/reversal structure) > plain channel/bias
         # line (just "this is the trend", not a named pattern).
+        # Only promote wedge/channel as the active pattern when strength is
+        # meaningful. Low-strength geometry (e.g. 43%) is noise — keep it
+        # for context drawing but do not present it as a tradeable pattern.
         "active_pattern": (
-            "mw" if mw else "wedge" if wedge else "channel" if channel else "none"
+            "mw" if mw else
+            "wedge" if (wedge and strength >= 60) else
+            "channel" if (channel and strength >= 55) else
+            "none"
         ),
         "pattern_confidence": max(0, min(100, int(strength))),
         # Every wick that actually touches the bias line within tolerance --
@@ -1072,7 +1119,12 @@ MIN_RR = 1.5
 # same rule the classic chart-pattern engine (execution_engine's
 # ConfirmationEngine) already applies. Route to a Fibonacci pullback
 # zone instead.
-FAR_ATR_MULTIPLE = 2.0
+# Lowered from 2.0 → 1.3 so we stop chasing extended moves much earlier.
+FAR_ATR_MULTIPLE = 1.3
+# Beyond this many ATRs we refuse to build an entry container at all
+# (trend already ran without us — wait for a real pullback instead of
+# catching the falling knife / chasing the top).
+TOO_EXTENDED_ATR = 2.4
 FIB_ZONE_ENTRY_ANCHOR = 0.618
 
 
@@ -1161,41 +1213,49 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
         elif channel and channel.get("lower"):
             entry = float(channel["lower"].get("y_end", close))
 
+        # Hard rule: if price has already run too far without us, do NOT
+        # build a chase entry near market. Wait for a real pullback.
+        extension_atr = (close - entry) / atr if atr > 0 else 0
+        if extension_atr > TOO_EXTENDED_ATR:
+            return {
+                "direction": "BUY",
+                "entry": None,
+                "sl": None,
+                "tp1": None,
+                "tp2": None,
+                "tp3": None,
+                "rr": 0,
+                "confirmed": False,
+                "order_type": None,
+                "entry_note": (f"Trend already extended {extension_atr:.1f}×ATR — "
+                               f"no entry. Wait for pullback toward structure instead of chasing."),
+                "too_extended": True,
+            }
+
         # SL: below last swing low under entry (structural invalidation)
         swing_lows = [float(p["price"]) for p in pivots if p.get("type") == "low" and p["price"] < entry]
         if swing_lows:
-            sl = min(swing_lows[-2:], default=min(swing_lows))  # recent low
-            sl = min(swing_lows) if len(swing_lows) == 1 else sorted(swing_lows)[-1]
-            # use nearest swing low below entry
             below_entry = [x for x in swing_lows if x < entry]
             sl = max(below_entry) if below_entry else entry - atr * atr_mult_sl
             sl = sl - atr * 0.15  # buffer beyond liquidity
         else:
             sl = entry - atr * atr_mult_sl
-        # "below recent swing low / trendline" -- use whichever is further
-        # from entry, but capped: a stop should never balloon past ~3x ATR
-        # just because a (possibly stale) trendline sat further away.
         if trendline_val is not None and trendline_val < entry:
             max_reasonable_risk = max(atr * 3.0, (entry - sl) * 1.4)
             candidate_sl = trendline_val - atr * 0.15
             if (entry - candidate_sl) <= max_reasonable_risk:
                 sl = min(sl, candidate_sl)
 
-        # Targets = buy-side liquidity (swing highs above) + neckline if W + POC if above
         liq = _liquidity_targets(pivots, "BUY", entry)
         if mw and mw.get("pattern") == "W" and mw.get("neckline", 0) > entry:
             liq = sorted(set(liq + [float(mw["neckline"])]))
         if vp.get("poc_price") and vp["poc_price"] > entry:
             liq = sorted(set(liq + [float(vp["poc_price"])]))
-        # fallback measured move only if no swing liquidity
         if not liq and projs:
             liq = [float(p["price"]) for p in projs if p["price"] > entry]
 
         order_type = "LIMIT" if entry < close - atr * 0.08 else "MARKET"
         entry_note = None
-        # A breakout that isn't confirmed yet (weak/developing) shouldn't be
-        # chased at market -- route the entry to the break-and-retest zone
-        # instead, per standard breakout-trading practice.
         if brk and brk["strength"] != "confirmed":
             entry = brk["retest_level"]
             order_type = "LIMIT"
@@ -1203,13 +1263,9 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
                           f"broken rail at {entry:.5f} instead of chasing at market")
             sl = min(sl, entry - atr * 0.5)
         elif order_type == "MARKET" and atr > 0 and (close - entry) > FAR_ATR_MULTIPLE * atr:
-            # Breakout IS confirmed, but price already ran too far past the
-            # rail to chase at market -- same rule the classic-pattern
-            # engine applies. Route to a 61.8% pullback of the rail->close
-            # leg instead.
             pullback_entry = _fib_pullback_entry(entry, close, "BUY")
-            entry_note = (f"Price extended {(close - entry) / atr:.1f}x ATR beyond the broken rail -- "
-                          f"entry routed to a pullback at {pullback_entry:.5f} instead of chasing at market")
+            entry_note = (f"Price extended {(close - entry) / atr:.1f}x ATR beyond the rail -- "
+                          f"entry routed to a pullback at {pullback_entry:.5f} instead of chasing")
             entry = pullback_entry
             order_type = "LIMIT"
             sl = min(sl, entry - atr * 0.5)
@@ -1288,6 +1344,24 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
         elif channel and channel.get("upper"):
             entry = float(channel["upper"].get("y_end", close))
 
+        # Hard rule: do not chase an already-extended down move
+        extension_atr = (entry - close) / atr if atr > 0 else 0
+        if extension_atr > TOO_EXTENDED_ATR:
+            return {
+                "direction": "SELL",
+                "entry": None,
+                "sl": None,
+                "tp1": None,
+                "tp2": None,
+                "tp3": None,
+                "rr": 0,
+                "confirmed": False,
+                "order_type": None,
+                "entry_note": (f"Trend already extended {extension_atr:.1f}×ATR — "
+                               f"no entry. Wait for pullback toward structure instead of catching the falling knife."),
+                "too_extended": True,
+            }
+
         swing_highs = [float(p["price"]) for p in pivots if p.get("type") == "high" and p["price"] > entry]
         if swing_highs:
             above_entry = [x for x in swing_highs if x > entry]
@@ -1295,15 +1369,12 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             sl = sl + atr * 0.15
         else:
             sl = entry + atr * atr_mult_sl
-        # "below recent swing low / trendline" mirrored for shorts: SL
-        # above recent swing high OR the trendline (capped the same way).
         if trendline_val is not None and trendline_val > entry:
             max_reasonable_risk = max(atr * 3.0, (sl - entry) * 1.4)
             candidate_sl = trendline_val + atr * 0.15
             if (candidate_sl - entry) <= max_reasonable_risk:
                 sl = max(sl, candidate_sl)
 
-        # Sell-side liquidity (swing lows below) + M neckline + POC
         liq = _liquidity_targets(pivots, "SELL", entry)
         if mw and mw.get("pattern") == "M" and mw.get("neckline", 0) < entry:
             liq_set = list(liq) + [float(mw["neckline"])]
@@ -1322,13 +1393,9 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
                           f"broken rail at {entry:.5f} instead of chasing at market")
             sl = max(sl, entry + atr * 0.5)
         elif order_type == "MARKET" and atr > 0 and (entry - close) > FAR_ATR_MULTIPLE * atr:
-            # Breakout IS confirmed, but price already ran too far past the
-            # rail to chase at market -- same rule the classic-pattern
-            # engine applies. Route to a 61.8% pullback of the rail->close
-            # leg instead.
             pullback_entry = _fib_pullback_entry(entry, close, "SELL")
-            entry_note = (f"Price extended {(entry - close) / atr:.1f}x ATR beyond the broken rail -- "
-                          f"entry routed to a pullback at {pullback_entry:.5f} instead of chasing at market")
+            entry_note = (f"Price extended {(entry - close) / atr:.1f}x ATR beyond the rail -- "
+                          f"entry routed to a pullback at {pullback_entry:.5f} instead of chasing")
             entry = pullback_entry
             order_type = "LIMIT"
             sl = max(sl, entry + atr * 0.5)
