@@ -1303,6 +1303,9 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
     brk = family.get("breakout_grade")
     entry_rules = family.get("entry_rules")
     confirmed = bool(entry_rules and entry_rules.get("confirmed"))
+    # Pattern still FORMING or FAKEOUT → never mark confirmed / ACTIVE
+    if family.get("force_wait_pattern"):
+        confirmed = False
 
     # Trendline value at the current bar -- used as the other half of the
     # "SL below recent swing low / trendline" rule, alongside the swing-low
@@ -1406,7 +1409,19 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
 
         order_type = "LIMIT" if entry < close - atr * 0.08 else "MARKET"
         entry_note = None
-        if brk and brk["strength"] != "confirmed":
+        # Pattern neckline retest preferred over chasing the breakout
+        if family.get("prefer_retest_entry") and family.get("retest_level") is not None:
+            retest = float(family["retest_level"])
+            if retest < close:
+                entry = retest
+                order_type = "LIMIT"
+                entry_note = (
+                    f"Pattern {family.get('pattern_stage', 'TRIGGERED')} — "
+                    f"entry routed to neckline retest at {entry:.5f} (do not chase breakout)"
+                )
+                if sl >= entry:
+                    sl = entry - atr * 1.0
+        elif brk and brk["strength"] != "confirmed":
             entry = brk["retest_level"]
             order_type = "LIMIT"
             entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
@@ -1576,7 +1591,18 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
 
         order_type = "LIMIT" if entry > close + atr * 0.08 else "MARKET"
         entry_note = None
-        if brk and brk["strength"] != "confirmed":
+        if family.get("prefer_retest_entry") and family.get("retest_level") is not None:
+            retest = float(family["retest_level"])
+            if retest > close:
+                entry = retest
+                order_type = "LIMIT"
+                entry_note = (
+                    f"Pattern {family.get('pattern_stage', 'TRIGGERED')} — "
+                    f"entry routed to neckline retest at {entry:.5f} (do not chase breakout)"
+                )
+                if sl <= entry:
+                    sl = entry + atr * 1.0
+        elif brk and brk["strength"] != "confirmed":
             entry = brk["retest_level"]
             order_type = "LIMIT"
             entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
@@ -2189,6 +2215,47 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     sp = family.get("scanned_pattern")
     close = float(df_30m["Close"].iloc[-1])
     family_kind = family.get("family_kind", "none")
+
+    # ------------------------------------------------------------------
+    # Neckline stage gate (FORMING / TRIGGERED / CONFIRMED / FAKEOUT)
+    # Never treat an unbroken pattern as a live entry. Liquidity grabs
+    # that spike the neckline and reclaim are marked FAKEOUT.
+    # ------------------------------------------------------------------
+    reversal_names = {
+        "Double Top", "Double Bottom", "Triple Top", "Triple Bottom",
+        "Head and Shoulders", "Inverse Head and Shoulders",
+        "Double Top (M)", "Double Bottom (W)",
+    }
+    if sp and sp.get("name") in reversal_names:
+        stage = str(sp.get("stage") or "FORMING").upper()
+        stage_note = sp.get("stage_note") or ""
+        reasons.append(f"Pattern stage: {stage} — {stage_note}")
+        family["pattern_stage"] = stage
+        if stage == "FORMING":
+            # Shape only — force WAIT, do not let pattern override to ACTIVE
+            gating_notes.append("⏳ Pattern FORMING — neckline not broken by close. No entry yet.")
+            # Soften strength so entry_rules alone cannot flip to confirmed trade
+            strength = min(strength, 55)
+            family["force_wait_pattern"] = True
+        elif stage == "FAKEOUT":
+            gating_notes.append("🚫 Pattern FAKEOUT — neckline reclaimed (liquidity grab). Invalidated.")
+            strength = max(0, strength - 25)
+            family["force_wait_pattern"] = True
+            # Do not let a fakeout pattern set direction
+            if family.get("active_pattern") == "scanned":
+                family["active_pattern"] = "none"
+        elif stage == "TRIGGERED":
+            gating_notes.append(
+                f"⚡ Pattern TRIGGERED — real neckline break. Prefer retest entry near "
+                f"{sp.get('retest_level') or sp.get('trigger_price')}"
+            )
+            family["prefer_retest_entry"] = True
+            family["retest_level"] = sp.get("retest_level") or sp.get("trigger_price")
+        elif stage == "CONFIRMED":
+            gating_notes.append("✅ Pattern CONFIRMED — break + retest held. Highest quality trigger.")
+            strength = min(100, strength + 8)
+            family["prefer_retest_entry"] = True
+            family["retest_level"] = sp.get("retest_level") or sp.get("trigger_price")
 
     # Demote Double Top (M) when structure is clearly bullish continuation
     if mw and mw.get("pattern") == "M":
