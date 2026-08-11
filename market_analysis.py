@@ -1199,7 +1199,121 @@ class Pattern:
             "name": self.name, "category": self.category, "bias": self.bias,
             "trigger_price": self.trigger_price, "trigger_line": self.trigger_line,
             "key_points": self.key_points, "confidence": self.confidence, "note": self.note,
+            "stage": getattr(self, "stage", None),
+            "stage_note": getattr(self, "stage_note", None),
         }
+
+
+def classify_pattern_stage(df, pattern) -> dict:
+    """
+    Classify whether a classic pattern is still forming or has a real trigger.
+
+    Stages:
+      FORMING   — shape exists, neckline not broken by close
+      TRIGGERED — close beyond neckline (real break, not just a wick)
+      CONFIRMED — broke neckline, then retested and held (best entry quality)
+      FAKEOUT   — broke neckline then closed back inside (liquidity grab)
+
+    Trading rule:
+      FORMING  → WAIT only (do not predict the break)
+      FAKEOUT  → invalidate / stay out
+      TRIGGERED → prefer limit on retest, not chase
+      CONFIRMED → highest quality entry
+    """
+    if df is None or pattern is None or len(df) < 5:
+        return {"stage": "FORMING", "stage_note": "Insufficient data", "retest_level": None}
+
+    neck = float(pattern.trigger_price) if pattern.trigger_price is not None else None
+    if neck is None:
+        return {"stage": "FORMING", "stage_note": "No neckline level", "retest_level": None}
+
+    bias = str(pattern.bias or "").upper()
+    closes = df["Close"].values
+    highs = df["High"].values
+    lows = df["Low"].values
+    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else abs(closes[-1]) * 0.002
+    atr = max(atr, 1e-9)
+    tol = atr * 0.15
+
+    # Look back over recent bars for break / reclaim behaviour
+    look = min(20, len(df) - 1)
+    broke = False
+    break_idx = None
+    for i in range(len(df) - look, len(df)):
+        c = float(closes[i])
+        if bias == "BUY" and c > neck + tol:
+            broke = True
+            break_idx = i
+            break
+        if bias == "SELL" and c < neck - tol:
+            broke = True
+            break_idx = i
+            break
+
+    if not broke:
+        # Wick-only probe through neckline = still FORMING (possible liquidity grab setup)
+        wick_probe = False
+        for i in range(len(df) - min(8, len(df)), len(df)):
+            if bias == "BUY" and float(highs[i]) > neck + tol and float(closes[i]) <= neck + tol:
+                wick_probe = True
+            if bias == "SELL" and float(lows[i]) < neck - tol and float(closes[i]) >= neck - tol:
+                wick_probe = True
+        note = "Neckline not broken by close — pattern FORMING. Wait for real break."
+        if wick_probe:
+            note = "Wick probed neckline but close rejected — possible liquidity grab. Still FORMING."
+        return {"stage": "FORMING", "stage_note": note, "retest_level": neck}
+
+    # Broke at some point — check if still beyond or reclaimed (fakeout)
+    last_close = float(closes[-1])
+    if bias == "BUY":
+        still_beyond = last_close > neck - tol
+        reclaimed = last_close < neck - tol
+    else:
+        still_beyond = last_close < neck + tol
+        reclaimed = last_close > neck + tol
+
+    if reclaimed:
+        return {
+            "stage": "FAKEOUT",
+            "stage_note": (
+                f"Neckline broken then reclaimed — likely liquidity grab. "
+                f"Pattern invalidated for now. Wait for fresh structure."
+            ),
+            "retest_level": neck,
+        }
+
+    # Still beyond neckline after break — check for retest
+    retested = False
+    if break_idx is not None:
+        for i in range(break_idx + 1, len(df)):
+            if bias == "BUY":
+                # Retest = low comes back near/into neckline then holds
+                if float(lows[i]) <= neck + atr * 0.35 and float(closes[i]) > neck - tol:
+                    retested = True
+                    break
+            else:
+                if float(highs[i]) >= neck - atr * 0.35 and float(closes[i]) < neck + tol:
+                    retested = True
+                    break
+
+    if retested and still_beyond:
+        return {
+            "stage": "CONFIRMED",
+            "stage_note": (
+                f"Neckline broken by close and retested successfully. "
+                f"Highest quality trigger. Prefer entry on the retest zone ~{neck:.5f}."
+            ),
+            "retest_level": neck,
+        }
+
+    return {
+        "stage": "TRIGGERED",
+        "stage_note": (
+            f"Neckline broken by close — real break. "
+            f"Do not chase; prefer limit entry on retest of {neck:.5f}."
+        ),
+        "retest_level": neck,
+    }
 
 
 # ----------------------------------------------------------------------------
@@ -1827,6 +1941,28 @@ def scan_all_patterns(df, left=3, right=3, volume_profile=None):
     detected = [p for p in detected if p.confidence >= MIN_CONFIDENCE]
     if not detected:
         return None, []
+
+    # Attach neckline stage (FORMING / TRIGGERED / CONFIRMED / FAKEOUT)
+    # so the bot never treats an unbroken pattern as a live entry signal.
+    for p in detected:
+        try:
+            st = classify_pattern_stage(df, p)
+            p.stage = st["stage"]
+            p.stage_note = st["stage_note"]
+            p.retest_level = st.get("retest_level")
+            # Soft confidence adjustment by stage
+            if p.stage == "FORMING":
+                p.confidence = float(np.clip(p.confidence - 8, 0, 100))
+            elif p.stage == "FAKEOUT":
+                p.confidence = float(np.clip(p.confidence - 20, 0, 100))
+            elif p.stage == "CONFIRMED":
+                p.confidence = float(np.clip(p.confidence + 6, 0, 100))
+            if p.stage_note:
+                p.note = f"{p.note} [{p.stage}] {p.stage_note}"
+        except Exception as e:
+            p.stage = "FORMING"
+            p.stage_note = f"Stage classify failed: {e!r}"
+            p.retest_level = p.trigger_price
 
     detected.sort(key=lambda p: (_PRIORITY.get(p.name, 40) + p.confidence), reverse=True)
     return detected[0], detected
