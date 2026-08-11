@@ -108,90 +108,167 @@ def _touch_points(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
     return points
 
 
+def _significant_swings(pivots: List[Dict], df: pd.DataFrame, kind: str,
+                        min_leg_atr: float = 0.85, max_points: int = 6) -> List[Dict]:
+    """
+    Keep only the most meaningful swings of the requested type.
+    Rank by leg size (ATR multiples) so micro-noise is dropped and the
+    line is built from the same pivots a careful trader would use.
+    """
+    want = "low" if kind == "support" else "high"
+    pts = [p for p in pivots if p["type"] == want]
+    if len(pts) < 2 or df is None or len(df) < 10:
+        return pts[:max_points]
+
+    atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).rolling(14).mean().values
+    scored = []
+    for i, p in enumerate(pts):
+        # leg size vs previous opposite-type pivot or previous same-type
+        prev = pts[i - 1] if i > 0 else None
+        a = float(atr[min(p["index"], len(atr) - 1)]) if len(atr) else 0.0
+        a = max(a, 1e-9)
+        leg = abs(p["price"] - prev["price"]) / a if prev else 2.0
+        scored.append((leg, p))
+    # Keep the strongest legs, then re-sort by time
+    scored.sort(key=lambda t: t[0], reverse=True)
+    kept = [p for leg, p in scored if leg >= min_leg_atr][:max_points]
+    if len(kept) < 2:
+        kept = [p for _, p in scored[:max(2, max_points // 2)]]
+    kept.sort(key=lambda p: p["index"])
+    return kept
+
+
+def _theil_sen_line(points: List[Dict], n: int) -> Optional[Dict]:
+    """
+    Theil-Sen robust line through swing points.
+    Median of all pairwise slopes → resistant to outlier pivots.
+    Intercept chosen so the line sits on the median residual (passes
+    through the 'middle' of the structure, not pulled by one extreme).
+    """
+    if len(points) < 2:
+        return None
+    xs = [float(p["index"]) for p in points]
+    ys = [float(p["price"]) for p in points]
+    slopes = []
+    for i in range(len(points)):
+        for j in range(i + 1, len(points)):
+            dx = xs[j] - xs[i]
+            if abs(dx) < 1e-9:
+                continue
+            slopes.append((ys[j] - ys[i]) / dx)
+    if not slopes:
+        return None
+    slopes.sort()
+    slope = slopes[len(slopes) // 2]  # median slope
+
+    intercepts = [ys[i] - slope * xs[i] for i in range(len(points))]
+    intercepts.sort()
+    intercept = intercepts[len(intercepts) // 2]
+
+    x0, x1 = int(xs[0]), int(xs[-1])
+    y0 = slope * x0 + intercept
+    y1 = slope * x1 + intercept
+    y_end = slope * (n - 1) + intercept
+    return {
+        "x0": x0, "y0": float(y0),
+        "x1": x1, "y1": float(y1),
+        "y_end": float(y_end),
+        "slope": float(slope),
+        "intercept": float(intercept),
+    }
+
+
 def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
     """
-    Best primary trendline of given kind (support=lows, resistance=highs).
+    Primary trendline via significant swings + Theil-Sen robust fit.
 
-    Scoring priority (what makes a line "perfect" for trading decisions):
-      1. Cleanliness  – few closes on the wrong side of the line
-      2. Real touches – price actually respected the line multiple times
-      3. Recency      – last defining pivot is recent enough to still matter
-      4. Structure    – higher lows (support) / lower highs (resistance)
-
-    A 2-point line is only a candidate. 3+ clean touches = confirmed.
-    5+ touches with rising violations = crowded / weakening.
+    Steps:
+      1. Keep only meaningful swings (large legs in ATR)
+      2. Require correct structure direction (HL for support, LH for resistance)
+      3. Fit Theil-Sen line (median pairwise slope) — resists noisy pivots
+      4. Validate with touches / violations
+      5. Prefer the cleanest recent structure
     """
-    pts = [p for p in pivots if p["type"] == ("low" if kind == "support" else "high")]
+    pts = _significant_swings(pivots, df, kind, min_leg_atr=0.75, max_points=7)
     if len(pts) < 2:
         return None
 
-    # Last defining pivot must be reasonably recent
-    recency_floor = max(0, n - max(25, int(n * 0.45)))
-    best = None
-    best_score = -1e9
+    # Enforce directional structure on the selected points
+    if kind == "support":
+        # Keep a rising sequence of lows (drop any that break the HL chain from the end)
+        cleaned = [pts[0]]
+        for p in pts[1:]:
+            if p["price"] > cleaned[-1]["price"] * 0.999:
+                cleaned.append(p)
+            else:
+                # allow one lower low if later points resume higher — keep most recent chain
+                cleaned = [p]
+        pts = cleaned
+    else:
+        cleaned = [pts[0]]
+        for p in pts[1:]:
+            if p["price"] < cleaned[-1]["price"] * 1.001:
+                cleaned.append(p)
+            else:
+                cleaned = [p]
+        pts = cleaned
 
-    for i in range(len(pts) - 1):
-        for j in range(i + 1, len(pts)):
-            a, b = pts[i], pts[j]
-            if b["index"] <= a["index"]:
-                continue
-            if b["index"] < recency_floor:
-                continue
-            # Directional structure requirement
-            if kind == "support" and b["price"] <= a["price"] * 0.9995:
-                continue
-            if kind == "resistance" and b["price"] >= a["price"] * 1.0005:
-                continue
+    if len(pts) < 2:
+        return None
 
-            span = b["index"] - a["index"]
-            if span < 6:
-                continue  # too tight to be meaningful structure
+    # Prefer the most recent 3–5 points for the live structure
+    if len(pts) > 5:
+        pts = pts[-5:]
 
-            slope = (b["price"] - a["price"]) / max(span, 1)
-            touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind)
-            violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind)
+    # Recency: last pivot should not be ancient
+    if pts[-1]["index"] < n - max(30, int(n * 0.5)):
+        return None
 
-            # Reject lines that are more broken than respected
-            if touches >= 2 and violations > touches * 1.5:
-                continue
-            if touches < 2:
-                continue
+    line = _theil_sen_line(pts, n)
+    if not line:
+        return None
 
-            # --- Score ---
-            # Cleanliness is king: each violation hurts more than a touch helps
-            cleanliness = touches * 12.0 - violations * 18.0
-            # Recency of the right-hand pivot
-            recency = (b["index"] / max(n, 1)) * 15.0
-            # Prefer moderate span (not tiny, not ancient)
-            span_score = min(span, 40) * 0.15
-            # Fatigue: very many touches without room to breathe is weaker
-            fatigue = max(0, touches - 5) * 4.0
+    # Must have meaningful slope
+    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
+    if atr_now and atr_now > 0:
+        total_move = abs(line["y1"] - line["y0"])
+        if total_move < 1.0 * atr_now:
+            return None
 
-            score = cleanliness + recency + span_score - fatigue
+    # Direction check on the fitted slope
+    if kind == "support" and line["slope"] <= 0:
+        return None
+    if kind == "resistance" and line["slope"] >= 0:
+        return None
 
-            if score > best_score:
-                best_score = score
-                y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
-                if touches < 3 or violations > 2:
-                    quality = "unconfirmed"
-                elif touches <= 5 and violations <= 2:
-                    quality = "confirmed"
-                else:
-                    quality = "crowded"
-                best = {
-                    "x0": a["index"], "y0": a["price"],
-                    "x1": b["index"], "y1": b["price"],
-                    "y_end": y_end,
-                    "slope": slope,
-                    "touches": touches,
-                    "violations": violations,
-                    "confirmed": quality == "confirmed",
-                    "quality": quality,
-                    "kind": kind,
-                    "bars_since_last_touch": n - 1 - b["index"],
-                    "score": score,
-                }
-    return best
+    touches = _count_touches(df, line["x0"], line["y0"], line["x1"], line["y1"], kind, tol_atr=0.40)
+    violations = _count_violations(df, line["x0"], line["y0"], line["x1"], line["y1"], kind, tol_atr=0.30)
+
+    if touches < 2:
+        return None
+    if violations > touches + 2:
+        return None
+
+    if touches < 3 or violations > 3:
+        quality = "unconfirmed"
+    elif touches <= 6 and violations <= 2:
+        quality = "confirmed"
+    else:
+        quality = "crowded"
+
+    return {
+        "x0": line["x0"], "y0": line["y0"],
+        "x1": line["x1"], "y1": line["y1"],
+        "y_end": line["y_end"],
+        "slope": line["slope"],
+        "touches": touches,
+        "violations": violations,
+        "confirmed": quality == "confirmed",
+        "quality": quality,
+        "kind": kind,
+        "bars_since_last_touch": n - 1 - line["x1"],
+        "method": "theil_sen",
+    }
 
 
 def _fit_line_any_slope(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
@@ -612,22 +689,18 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}
 
     n = len(df)
-    # Prefer cleaner, larger pivots so lines follow real directional structure.
-    # Slightly higher deviation filters out micro-noise that pollutes the fit.
-    pivots = zigzag_swings(df, depth=5, deviation_atr=0.38)
+    # Balanced pivot detection — enough structure without micro-noise
+    pivots = zigzag_swings(df, depth=4, deviation_atr=0.32)
     if len(pivots) < 5:
-        pivots = zigzag_swings(df, depth=4, deviation_atr=0.30)
-    if len(pivots) < 4:
         pivots = zigzag_swings(df, depth=3, deviation_atr=0.25)
     if len(pivots) < 3:
         pivots = zigzag_swings(df, depth=3, deviation_atr=0.18)
 
-    # Recent-only candidate pool for the DIAGONAL fit.
-    # A bit tighter window so the line tracks the live structure, not history.
+    # Recent window for diagonal fit
     cutoff = max(0, n - lookback_bars)
     recent_pivots = [p for p in pivots if p["index"] >= cutoff]
     if len(recent_pivots) < 4:
-        recent_pivots = [p for p in pivots if p["index"] >= max(0, n - int(lookback_bars * 1.5))]
+        recent_pivots = [p for p in pivots if p["index"] >= max(0, n - int(lookback_bars * 1.6))]
     if len(recent_pivots) < 3:
         recent_pivots = [p for p in pivots if p["index"] >= max(0, n - lookback_bars * 2)]
     if len(recent_pivots) < 2:
@@ -643,9 +716,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # "ascending" rail is misleading -- it should be left for the
     # horizontal S/R clustering below (_detect_horizontal_levels) to pick
     # up instead, which is exactly what that layer is for.
-    # Minimum total rise/fall across the line span (in ATR). Too shallow =
-    # range noise, not a real trendline a trader would draw by hand.
-    MIN_TREND_MOVE_ATR = 1.15
+    MIN_TREND_MOVE_ATR = 1.0
     atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
 
     def _has_meaningful_slope(line):
