@@ -23,7 +23,10 @@ import numpy as np
 import pandas as pd
 
 import market_data
-from market_analysis import zigzag_swings, find_swings, compute_volume_profile, detect_confirmation_candle, analyse_structure, detect_order_blocks, scan_all_patterns
+from market_analysis import (
+    zigzag_swings, find_swings, compute_volume_profile, detect_confirmation_candle,
+    analyse_structure, detect_order_blocks, scan_all_patterns, detect_market_sequence,
+)
 from topdown_engine import get_topdown_bias, format_topdown_summary
 
 
@@ -973,6 +976,43 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     else:
         mw = None
 
+    # --- Market sequence: RBR / DBD / RBD / DBR -------------------------
+    # Core context layer. Continuation sequences (RBR/DBD) support flags
+    # and trend continuation. Reversal leans (RBD/DBR) warn against
+    # chasing the prior impulse and favor M/W/H&S style setups.
+    market_seq = None
+    try:
+        market_seq = detect_market_sequence(df, lookback=min(90, len(df)))
+    except Exception as e:
+        print(f"[build_trendline_family] market sequence failed: {e!r}")
+        market_seq = None
+    if market_seq:
+        reasons.append(market_seq["note"])
+        seq = market_seq["sequence"]
+        seq_bias = market_seq["bias"]
+        seq_conf = float(market_seq.get("confidence") or 0)
+        if seq in ("RBR", "DBD") and seq_conf >= 60:
+            # Continuation sequence — reinforce matching direction
+            if direction == "NEUTRAL":
+                direction = seq_bias
+                strength = max(strength, int(seq_conf) - 5)
+            elif direction == seq_bias:
+                strength = min(100, strength + 10)
+            else:
+                # Sequence disagrees with geometry — reduce conviction
+                strength = max(0, strength - 12)
+                reasons.append(f"⚠ {seq} sequence conflicts with current bias — prefer WAIT for confirmation")
+        elif seq in ("RBD", "DBR") and seq_conf >= 58:
+            # Reversal lean — do not let continuation patterns force entry
+            if direction == seq_bias:
+                strength = min(100, strength + 6)
+            else:
+                strength = max(0, strength - 10)
+                reasons.append(
+                    f"⚠ {seq} (reversal lean) — avoid chasing prior impulse; "
+                    f"prefer M/W/H&S or wait for break & retest"
+                )
+
     # --- Entry confirmation gate (Core Rule: wait for confirmation, never
     # force a trade). This did not exist before -- direction was decided
     # purely from price-vs-rail geometry above. It still is, but now we
@@ -1086,6 +1126,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         "horizontal_levels": horizontal_levels,
         "projections": projections,
         "mw_pattern": mw,
+        "market_sequence": market_seq,
         "pivots": pivots[-16:],
         "volume_profile": vp,
         "upper_line": upper_line,
@@ -1303,19 +1344,57 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
                 "too_extended": True,
             }
 
-        # SL: below last swing low under entry (structural invalidation)
-        swing_lows = [float(p["price"]) for p in pivots if p.get("type") == "low" and p["price"] < entry]
+        # SL: beyond real structural invalidation (not micro-noise).
+        # Priority: pattern extreme (W bottom / H&S head) > significant swing low
+        # > trendline > ATR fallback. Buffer = 0.35×ATR beyond the level.
+        sl_candidates = []
+        sp = family.get("scanned_pattern")
+        if sp and sp.get("bias") == "BUY":
+            for kp in (sp.get("key_points") or []):
+                if len(kp) >= 3 and any(t in str(kp[2]).lower() for t in ("bottom", "head", "shoulder")):
+                    sl_candidates.append(float(kp[1]))
+        if mw and mw.get("pattern") == "W":
+            for side in ("left", "right"):
+                p = mw.get(side)
+                if p and p.get("price") is not None:
+                    sl_candidates.append(float(p["price"]))
+        # Significant swing lows only (skip tiny noise pivots)
+        swing_lows = []
+        for p in pivots:
+            if p.get("type") != "low":
+                continue
+            px = float(p["price"])
+            if px >= entry:
+                continue
+            swing_lows.append(px)
         if swing_lows:
-            below_entry = [x for x in swing_lows if x < entry]
-            sl = max(below_entry) if below_entry else entry - atr * atr_mult_sl
-            sl = sl - atr * 0.15  # buffer beyond liquidity
-        else:
-            sl = entry - atr * atr_mult_sl
+            # Prefer the lowest of the last 2 significant lows under entry
+            recent = sorted(swing_lows)[:2] if len(swing_lows) >= 2 else swing_lows
+            sl_candidates.extend(recent)
+            sl_candidates.append(min(swing_lows))  # structural extreme
         if trendline_val is not None and trendline_val < entry:
-            max_reasonable_risk = max(atr * 3.0, (entry - sl) * 1.4)
-            candidate_sl = trendline_val - atr * 0.15
-            if (entry - candidate_sl) <= max_reasonable_risk:
-                sl = min(sl, candidate_sl)
+            sl_candidates.append(trendline_val)
+
+        if sl_candidates:
+            # SL must be below entry; pick the level that gives room (not the tightest)
+            below = [x for x in sl_candidates if x < entry - atr * 0.15]
+            if below:
+                # Use the highest level that still has at least ~0.6 ATR risk
+                # (avoids ultra-tight stops) but never wider than ~2.8 ATR
+                viable = [x for x in below if (entry - x) >= atr * 0.55]
+                if viable:
+                    sl = max(viable)  # closest viable = tightest still-valid structure
+                else:
+                    sl = min(below)  # only deep structure available
+            else:
+                sl = entry - atr * max(atr_mult_sl, 1.0)
+            sl = sl - atr * 0.35  # buffer beyond the invalidation level
+        else:
+            sl = entry - atr * max(atr_mult_sl, 1.2)
+
+        # Cap risk so SL never balloons past ~3 ATR
+        if atr > 0 and (entry - sl) > atr * 3.0:
+            sl = entry - atr * 3.0
 
         liq = _liquidity_targets(pivots, "BUY", entry)
         if mw and mw.get("pattern") == "W" and mw.get("neckline", 0) > entry:
@@ -1332,16 +1411,25 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             order_type = "LIMIT"
             entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
                           f"broken rail at {entry:.5f} instead of chasing at market")
-            sl = min(sl, entry - atr * 0.5)
+            # Rebuild SL relative to new entry
+            if sl >= entry:
+                sl = entry - atr * 1.0
         elif order_type == "MARKET" and atr > 0 and (close - entry) > FAR_ATR_MULTIPLE * atr:
             pullback_entry = _fib_pullback_entry(entry, close, "BUY")
             entry_note = (f"Price extended {(close - entry) / atr:.1f}x ATR beyond the rail -- "
                           f"entry routed to a pullback at {pullback_entry:.5f} instead of chasing")
             entry = pullback_entry
             order_type = "LIMIT"
-            sl = min(sl, entry - atr * 0.5)
+            if sl >= entry:
+                sl = entry - atr * 1.0
 
         risk = abs(entry - sl)
+        # Reject absurdly tight stops (noise, not structure)
+        if atr > 0 and risk < atr * 0.45:
+            sl = entry - atr * 0.80
+            risk = abs(entry - sl)
+            entry_note = ((entry_note + " " if entry_note else "") +
+                          "SL widened to minimum structure distance (0.8×ATR).")
         tp1, tp2, tp1_synthetic = _select_tp_targets(liq, entry, risk, "BUY", MIN_RR)
         if tp1_synthetic:
             entry_note = ((entry_note + " " if entry_note else "") +
@@ -1433,18 +1521,49 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
                 "too_extended": True,
             }
 
-        swing_highs = [float(p["price"]) for p in pivots if p.get("type") == "high" and p["price"] > entry]
+        # SL: beyond real structural invalidation (mirror of BUY logic)
+        sl_candidates = []
+        sp = family.get("scanned_pattern")
+        if sp and sp.get("bias") == "SELL":
+            for kp in (sp.get("key_points") or []):
+                if len(kp) >= 3 and any(t in str(kp[2]).lower() for t in ("top", "head", "shoulder")):
+                    sl_candidates.append(float(kp[1]))
+        if mw and mw.get("pattern") == "M":
+            for side in ("left", "right"):
+                p = mw.get(side)
+                if p and p.get("price") is not None:
+                    sl_candidates.append(float(p["price"]))
+        swing_highs = []
+        for p in pivots:
+            if p.get("type") != "high":
+                continue
+            px = float(p["price"])
+            if px <= entry:
+                continue
+            swing_highs.append(px)
         if swing_highs:
-            above_entry = [x for x in swing_highs if x > entry]
-            sl = min(above_entry) if above_entry else entry + atr * atr_mult_sl
-            sl = sl + atr * 0.15
-        else:
-            sl = entry + atr * atr_mult_sl
+            recent = sorted(swing_highs, reverse=True)[:2] if len(swing_highs) >= 2 else swing_highs
+            sl_candidates.extend(recent)
+            sl_candidates.append(max(swing_highs))
         if trendline_val is not None and trendline_val > entry:
-            max_reasonable_risk = max(atr * 3.0, (sl - entry) * 1.4)
-            candidate_sl = trendline_val + atr * 0.15
-            if (candidate_sl - entry) <= max_reasonable_risk:
-                sl = max(sl, candidate_sl)
+            sl_candidates.append(trendline_val)
+
+        if sl_candidates:
+            above = [x for x in sl_candidates if x > entry + atr * 0.15]
+            if above:
+                viable = [x for x in above if (x - entry) >= atr * 0.55]
+                if viable:
+                    sl = min(viable)  # closest viable structure above
+                else:
+                    sl = max(above)
+            else:
+                sl = entry + atr * max(atr_mult_sl, 1.0)
+            sl = sl + atr * 0.35  # buffer beyond invalidation
+        else:
+            sl = entry + atr * max(atr_mult_sl, 1.2)
+
+        if atr > 0 and (sl - entry) > atr * 3.0:
+            sl = entry + atr * 3.0
 
         liq = _liquidity_targets(pivots, "SELL", entry)
         if mw and mw.get("pattern") == "M" and mw.get("neckline", 0) < entry:
@@ -1462,16 +1581,23 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             order_type = "LIMIT"
             entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
                           f"broken rail at {entry:.5f} instead of chasing at market")
-            sl = max(sl, entry + atr * 0.5)
+            if sl <= entry:
+                sl = entry + atr * 1.0
         elif order_type == "MARKET" and atr > 0 and (entry - close) > FAR_ATR_MULTIPLE * atr:
             pullback_entry = _fib_pullback_entry(entry, close, "SELL")
             entry_note = (f"Price extended {(entry - close) / atr:.1f}x ATR beyond the rail -- "
                           f"entry routed to a pullback at {pullback_entry:.5f} instead of chasing")
             entry = pullback_entry
             order_type = "LIMIT"
-            sl = max(sl, entry + atr * 0.5)
+            if sl <= entry:
+                sl = entry + atr * 1.0
 
         risk = abs(sl - entry)
+        if atr > 0 and risk < atr * 0.45:
+            sl = entry + atr * 0.80
+            risk = abs(sl - entry)
+            entry_note = ((entry_note + " " if entry_note else "") +
+                          "SL widened to minimum structure distance (0.8×ATR).")
         tp1, tp2, tp1_synthetic = _select_tp_targets(liq, entry, risk, "SELL", MIN_RR)
         if tp1_synthetic:
             entry_note = ((entry_note + " " if entry_note else "") +
@@ -1570,6 +1696,12 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
     sp = family.get("scanned_pattern")
     if sp:
         lines.append(f"Chart pattern: {sp['name']} ({sp['bias']}, {sp['confidence']:.0f}%) — {sp['note']}")
+
+    mseq = family.get("market_sequence")
+    if mseq:
+        lines.append(
+            f"Market sequence: {mseq['sequence']} ({mseq['bias']}, {mseq['confidence']:.0f}%) — {mseq['note']}"
+        )
 
     hz = family.get("horizontal_levels") or []
     if hz:
