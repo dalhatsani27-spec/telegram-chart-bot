@@ -946,6 +946,86 @@ def is_bearish_engulfing(prior, current):
     return prior_bullish and current_bearish and engulfs
 
 
+def is_bullish_marubozu(bar, atr=None):
+    """Full-body bullish candle — almost no wicks. Strong continuation / break confirmation."""
+    o, h, l, c = bar
+    if c <= o:
+        return False
+    rng = _range(h, l)
+    if rng <= 0:
+        return False
+    body = _body(o, c)
+    upper = h - c
+    lower = o - l
+    # Body dominates; wicks are tiny
+    if body / rng < 0.70:
+        return False
+    if upper > 0.15 * body or lower > 0.15 * body:
+        return False
+    if atr is not None and atr > 0 and rng < 0.4 * atr:
+        return False  # too small to count as decisive
+    return True
+
+
+def is_bearish_marubozu(bar, atr=None):
+    """Full-body bearish candle — almost no wicks."""
+    o, h, l, c = bar
+    if c >= o:
+        return False
+    rng = _range(h, l)
+    if rng <= 0:
+        return False
+    body = _body(o, c)
+    upper = h - o
+    lower = c - l
+    if body / rng < 0.70:
+        return False
+    if upper > 0.15 * body or lower > 0.15 * body:
+        return False
+    if atr is not None and atr > 0 and rng < 0.4 * atr:
+        return False
+    return True
+
+
+def is_bullish_continuation_candle(bar, atr=None):
+    """
+    Strong bullish continuation / break candle:
+    Marubozu, or large bullish body with small upper wick (closing near high).
+    """
+    o, h, l, c = bar
+    if is_bullish_marubozu(bar, atr):
+        return True, "Bullish Marubozu"
+    if c <= o:
+        return False, None
+    rng = _range(h, l)
+    if rng <= 0:
+        return False, None
+    body = _body(o, c)
+    upper = h - c
+    if body / rng >= 0.60 and upper <= 0.25 * body:
+        if atr is None or atr <= 0 or rng >= 0.45 * atr:
+            return True, "Strong bullish close"
+    return False, None
+
+
+def is_bearish_continuation_candle(bar, atr=None):
+    """Strong bearish continuation / break candle: Marubozu or large body closing near low."""
+    o, h, l, c = bar
+    if is_bearish_marubozu(bar, atr):
+        return True, "Bearish Marubozu"
+    if c >= o:
+        return False, None
+    rng = _range(h, l)
+    if rng <= 0:
+        return False, None
+    body = _body(o, c)
+    lower = c - l
+    if body / rng >= 0.60 and lower <= 0.25 * body:
+        if atr is None or atr <= 0 or rng >= 0.45 * atr:
+            return True, "Strong bearish close"
+    return False, None
+
+
 def is_hammer(bar, atr):
     o, h, l, c = bar
     rng = _range(h, l)
@@ -1201,6 +1281,9 @@ class Pattern:
             "key_points": self.key_points, "confidence": self.confidence, "note": self.note,
             "stage": getattr(self, "stage", None),
             "stage_note": getattr(self, "stage_note", None),
+            "entry_style": getattr(self, "entry_style", None),
+            "entry_reason": getattr(self, "entry_reason", None),
+            "retest_level": getattr(self, "retest_level", None),
         }
 
 
@@ -1304,15 +1387,106 @@ def classify_pattern_stage(df, pattern) -> dict:
                 f"Highest quality trigger. Prefer entry on the retest zone ~{neck:.5f}."
             ),
             "retest_level": neck,
+            "entry_style": "RETEST",
+            "entry_reason": "Break + retest held — polarity flip confirmed. Enter on retest zone.",
         }
+
+    # TRIGGERED: choose BREAK_CANDLE vs RETEST using real candlestick patterns.
+    # Priority confirmation: Marubozu, then strong continuation close, then engulfing.
+    # Weak break without these → wait for retest.
+    entry_style = "RETEST"
+    entry_reason = f"Break is not decisive enough — wait for retest of {neck:.5f}."
+    if break_idx is not None:
+        o = float(df["Open"].iloc[break_idx])
+        h = float(df["High"].iloc[break_idx])
+        l = float(df["Low"].iloc[break_idx])
+        c = float(closes[break_idx])
+        bar = (o, h, l, c)
+        beyond = (c - neck) / atr if bias == "BUY" else (neck - c) / atr
+        clear_beyond = beyond >= 0.15
+
+        candle_name = None
+        if bias == "BUY":
+            ok, candle_name = is_bullish_continuation_candle(bar, atr)
+            if not ok and break_idx >= 1:
+                prior = (
+                    float(df["Open"].iloc[break_idx - 1]),
+                    float(df["High"].iloc[break_idx - 1]),
+                    float(df["Low"].iloc[break_idx - 1]),
+                    float(closes[break_idx - 1]),
+                )
+                if is_bullish_engulfing(prior, bar) and clear_beyond:
+                    ok, candle_name = True, "Bullish Engulfing"
+            if not ok and break_idx >= 2:
+                b1 = (
+                    float(df["Open"].iloc[break_idx - 2]),
+                    float(df["High"].iloc[break_idx - 2]),
+                    float(df["Low"].iloc[break_idx - 2]),
+                    float(closes[break_idx - 2]),
+                )
+                b2 = (
+                    float(df["Open"].iloc[break_idx - 1]),
+                    float(df["High"].iloc[break_idx - 1]),
+                    float(df["Low"].iloc[break_idx - 1]),
+                    float(closes[break_idx - 1]),
+                )
+                if is_three_white_soldiers(b1, b2, bar) and clear_beyond:
+                    ok, candle_name = True, "Three White Soldiers"
+        else:
+            ok, candle_name = is_bearish_continuation_candle(bar, atr)
+            if not ok and break_idx >= 1:
+                prior = (
+                    float(df["Open"].iloc[break_idx - 1]),
+                    float(df["High"].iloc[break_idx - 1]),
+                    float(df["Low"].iloc[break_idx - 1]),
+                    float(closes[break_idx - 1]),
+                )
+                if is_bearish_engulfing(prior, bar) and clear_beyond:
+                    ok, candle_name = True, "Bearish Engulfing"
+            if not ok and break_idx >= 2:
+                b1 = (
+                    float(df["Open"].iloc[break_idx - 2]),
+                    float(df["High"].iloc[break_idx - 2]),
+                    float(df["Low"].iloc[break_idx - 2]),
+                    float(closes[break_idx - 2]),
+                )
+                b2 = (
+                    float(df["Open"].iloc[break_idx - 1]),
+                    float(df["High"].iloc[break_idx - 1]),
+                    float(df["Low"].iloc[break_idx - 1]),
+                    float(closes[break_idx - 1]),
+                )
+                if is_three_black_crows(b1, b2, bar) and clear_beyond:
+                    ok, candle_name = True, "Three Black Crows"
+
+        if ok and clear_beyond:
+            entry_style = "BREAK_CANDLE"
+            entry_reason = (
+                f"{candle_name} closed beyond neckline ({beyond:.2f}×ATR past) — "
+                f"candle confirmation. Enter on close/next open so the move is not missed."
+            )
+        elif ok and not clear_beyond:
+            entry_style = "RETEST"
+            entry_reason = (
+                f"{candle_name} present but close only barely beyond neckline "
+                f"({beyond:.2f}×ATR) — wait for retest of {neck:.5f}."
+            )
+        else:
+            entry_style = "RETEST"
+            entry_reason = (
+                f"Close beyond neckline but no Marubozu / continuation / engulfing "
+                f"confirmation — wait for retest of {neck:.5f}."
+            )
 
     return {
         "stage": "TRIGGERED",
         "stage_note": (
             f"Neckline broken by close — real break. "
-            f"Do not chase; prefer limit entry on retest of {neck:.5f}."
+            f"Entry style: {entry_style}. {entry_reason}"
         ),
         "retest_level": neck,
+        "entry_style": entry_style,
+        "entry_reason": entry_reason,
     }
 
 
@@ -1950,6 +2124,8 @@ def scan_all_patterns(df, left=3, right=3, volume_profile=None):
             p.stage = st["stage"]
             p.stage_note = st["stage_note"]
             p.retest_level = st.get("retest_level")
+            p.entry_style = st.get("entry_style")
+            p.entry_reason = st.get("entry_reason")
             # Soft confidence adjustment by stage
             if p.stage == "FORMING":
                 p.confidence = float(np.clip(p.confidence - 8, 0, 100))
@@ -1963,6 +2139,8 @@ def scan_all_patterns(df, left=3, right=3, volume_profile=None):
             p.stage = "FORMING"
             p.stage_note = f"Stage classify failed: {e!r}"
             p.retest_level = p.trigger_price
+            p.entry_style = None
+            p.entry_reason = None
 
     detected.sort(key=lambda p: (_PRIORITY.get(p.name, 40) + p.confidence), reverse=True)
     return detected[0], detected
