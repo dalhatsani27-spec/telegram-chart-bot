@@ -203,22 +203,23 @@ def _draw_position_panel(fig, panel_ax, pos: Optional[Dict], reasons: Optional[L
     side = str(pos.get("side") or pos.get("direction") or "").upper()
     is_long = ("LONG" in side) or (side == "BUY") or ("BULL" in side)
     confirmed = bool(pos.get("confirmed"))
-    label = ("LONG" if is_long else "SHORT") if confirmed else "WAIT"
-    # Core Rule: "never force a trade" -- an unconfirmed geometric bias
-    # gets an amber WAIT header instead of a green/red LONG/SHORT one, so
-    # it visually reads as "not yet", not as a live signal.
-    box_color = ("#00e676" if is_long else "#ff1744") if confirmed else "#ffab00"
+    too_extended = bool(pos.get("too_extended"))
 
-    risk = abs(entry - sl) if sl is not None else None
-    # Prefer the pre-computed R:R from build_position_container -- it's
-    # quoted against TP2 (a real "next resistance/support" target), not
-    # TP1 (a deliberately-close first partial), so it doesn't make every
-    # setup look worse than the actual plan by dividing by the smallest target.
-    if pos.get("rr") is not None:
-        rr_txt = f"R:R 1:{pos['rr']:.1f}"
+    if too_extended or entry is None:
+        label = "NO ENTRY"
+        box_color = "#546e7a"
+        rr_txt = "extended"
     else:
-        reward = abs((tp1 if tp1 is not None else tp2) - entry) if (tp1 is not None or tp2 is not None) else None
-        rr_txt = f"R:R 1:{(reward / risk):.1f}" if risk and reward else ""
+        label = ("LONG" if is_long else "SHORT") if confirmed else "WAIT"
+        # Core Rule: "never force a trade" -- unconfirmed geometric bias
+        # gets amber WAIT instead of a live green/red signal.
+        box_color = ("#00e676" if is_long else "#ff1744") if confirmed else "#ffab00"
+        risk = abs(entry - sl) if (sl is not None and entry is not None) else None
+        if pos.get("rr") is not None:
+            rr_txt = f"R:R 1:{pos['rr']:.1f}"
+        else:
+            reward = abs((tp1 if tp1 is not None else tp2) - entry) if (entry is not None and (tp1 is not None or tp2 is not None)) else None
+            rr_txt = f"R:R 1:{(reward / risk):.1f}" if risk and reward else ""
 
     def fmt(p):
         return f"{p:.5f}" if p < 100 else f"{p:.2f}"
