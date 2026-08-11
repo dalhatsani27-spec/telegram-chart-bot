@@ -414,6 +414,125 @@ def analyse_structure(df, left=3, right=3, lookback=80):
     }
 
 
+def detect_market_sequence(df, lookback=80, min_leg_atr=0.9, max_base_atr=2.8):
+    """
+    Detect the four core market sequences from recent swing structure:
+
+      RBR  Rally → Base → Rally   (bullish continuation)
+      DBD  Drop  → Base → Drop    (bearish continuation)
+      RBD  Rally → Base → Drop    (possible distribution / reversal)
+      DBR  Drop  → Base → Rally   (possible accumulation / reversal)
+
+    Method:
+      1. Take recent significant swings (zigzag)
+      2. Identify the last three major legs: impulse1 → base → impulse2
+      3. Classify by direction of the two impulses and size of the base
+
+    Returns dict or None:
+      sequence, bias, confidence, legs, note
+    """
+    if df is None or len(df) < 30:
+        return None
+
+    pivots = zigzag_swings(df, depth=4, deviation_atr=0.30)
+    n = len(df)
+    start = max(0, n - lookback)
+    pivots = [p for p in pivots if p["index"] >= start]
+    if len(pivots) < 4:
+        return None
+
+    atr = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).rolling(14).mean().values
+    atr = np.asarray(atr, dtype=float)
+
+    def _atr_at(idx):
+        i = min(max(int(idx), 0), len(atr) - 1)
+        a = float(atr[i]) if not np.isnan(atr[i]) else 0.0
+        return max(a, 1e-9)
+
+    # Build alternating legs between consecutive pivots
+    legs = []
+    for i in range(1, len(pivots)):
+        a, b = pivots[i - 1], pivots[i]
+        move = b["price"] - a["price"]
+        a_atr = _atr_at(a["index"])
+        leg_atr = abs(move) / a_atr
+        direction = "RALLY" if move > 0 else "DROP"
+        legs.append({
+            "from": a, "to": b,
+            "direction": direction,
+            "move": move,
+            "leg_atr": leg_atr,
+            "bars": b["index"] - a["index"],
+        })
+
+    if len(legs) < 3:
+        return None
+
+    # Walk from the end: find impulse → base → impulse pattern
+    # Base = relatively small leg (or cluster) between two larger legs
+    best = None
+    for i in range(len(legs) - 2, 0, -1):
+        leg1 = legs[i - 1] if i >= 1 else None
+        mid = legs[i]
+        leg2 = legs[i + 1] if i + 1 < len(legs) else None
+        # Prefer using last three meaningful legs
+        if leg1 is None or leg2 is None:
+            continue
+
+        # leg1 and leg2 should be the impulses (larger), mid the base
+        # Allow mid to be a single leg that is smaller than both impulses
+        if leg1["leg_atr"] < min_leg_atr or leg2["leg_atr"] < min_leg_atr:
+            continue
+        # Base should be corrective / smaller
+        if mid["leg_atr"] > max_base_atr and mid["leg_atr"] >= min(leg1["leg_atr"], leg2["leg_atr"]) * 0.85:
+            # too large to be a base — skip
+            continue
+
+        d1, d2 = leg1["direction"], leg2["direction"]
+        if d1 == "RALLY" and d2 == "RALLY":
+            seq, bias = "RBR", "BUY"
+        elif d1 == "DROP" and d2 == "DROP":
+            seq, bias = "DBD", "SELL"
+        elif d1 == "RALLY" and d2 == "DROP":
+            seq, bias = "RBD", "SELL"  # distribution lean
+        elif d1 == "DROP" and d2 == "RALLY":
+            seq, bias = "DBR", "BUY"   # accumulation lean
+        else:
+            continue
+
+        # Confidence: stronger when impulses are clear and base is tight
+        conf = 55.0
+        conf += min(15.0, (leg1["leg_atr"] - min_leg_atr) * 4)
+        conf += min(15.0, (leg2["leg_atr"] - min_leg_atr) * 4)
+        conf += min(10.0, max(0, max_base_atr - mid["leg_atr"]) * 3)
+        # Continuation sequences slightly higher base confidence
+        if seq in ("RBR", "DBD"):
+            conf += 5
+        # Recency of leg2
+        bars_since = n - 1 - leg2["to"]["index"]
+        if bars_since > 30:
+            conf -= 8
+        conf = float(np.clip(conf, 50, 92))
+
+        # Prefer the most recent valid sequence
+        best = {
+            "sequence": seq,
+            "bias": bias,
+            "confidence": conf,
+            "leg1": leg1,
+            "base": mid,
+            "leg2": leg2,
+            "note": (
+                f"{seq}: {d1.title()} → Base ({mid['leg_atr']:.1f}×ATR) → {d2.title()} "
+                f"({leg1['leg_atr']:.1f}×ATR / {leg2['leg_atr']:.1f}×ATR). "
+                f"{'Continuation' if seq in ('RBR', 'DBD') else 'Reversal lean'} bias {bias}."
+            ),
+        }
+        break  # most recent match wins
+
+    return best
+
+
 def detect_order_blocks(df, left=3, right=3, lookback=150, max_per_side=2,
                         min_confidence=45):
     """
