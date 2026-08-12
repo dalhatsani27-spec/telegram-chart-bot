@@ -2069,10 +2069,19 @@ def _build_ote_zone(impulse):
     return {**vals,"low":min(vals.values()),"high":max(vals.values()),"direction":d,"origin":start,"extreme":end,"leg_size":abs(end-start)}
 
 def _zone_state(close,zone,atr):
+    """Direction-aware OTE lifecycle.
+
+    BUY: below the 79% boundary is invalid; above the zone is waiting.
+    SELL: above the 79% boundary is invalid; below the zone is waiting.
+    """
     tol=max(atr*.10,1e-9)
-    if zone["low"]-tol<=close<=zone["high"]+tol:return "ACTIVE"
-    if close<zone["low"]-tol:return "TOO_DEEP / INVALID"
-    return "WAITING"
+    low=float(zone["low"]); high=float(zone["high"])
+    direction=str(zone.get("direction","BUY")).upper()
+    if low-tol <= close <= high+tol:
+        return "ACTIVE"
+    if direction=="BUY":
+        return "TOO_DEEP / INVALID" if close < low-tol else "WAITING"
+    return "TOO_DEEP / INVALID" if close > high+tol else "WAITING"
 
 def _find_ote_poi(df,zone,direction):
     try:obs=detect_order_blocks(df,max_per_side=3,min_confidence=45)

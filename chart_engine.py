@@ -1056,6 +1056,40 @@ def generate_trendline_educational_map(
                         xytext=(8, -18), textcoords="offset points", color=rcolor,
                         fontsize=8, fontweight="bold", zorder=15)
 
+    # Pattern geometry: draw only the selected pattern's compact structure.
+    # Long rails describe trend direction; these short lines/points describe
+    # the local pattern without covering the candle field.
+    sp = family.get("scanned_pattern") or {}
+    trigger_line = sp.get("trigger_line") or []
+    if len(trigger_line) >= 2:
+        pts = [(float(p[0]) - offset, float(p[1])) for p in trigger_line]
+        pts = [(x, y) for x, y in pts if 0 <= x < chart_len]
+        if len(pts) >= 2:
+            xs, ys = zip(*pts)
+            ax.plot(xs, ys, linestyle="--", linewidth=1.8,
+                    color="#f59e0b", alpha=0.9, zorder=7)
+    for kp in (sp.get("key_points") or []):
+        try:
+            px, py, label = kp[0], kp[1], kp[2]
+            px = int(px) - offset
+            if 0 <= px < chart_len:
+                ax.scatter([px], [float(py)], s=34, color="#f59e0b",
+                           edgecolors="#ffffff", linewidths=0.8, zorder=10)
+                ax.annotate(str(label), (px, float(py)), xytext=(0, 9),
+                            textcoords="offset points", ha="center",
+                            fontsize=7.5, color="#fbbf24", fontweight="bold", zorder=11)
+        except (TypeError, ValueError, IndexError):
+            continue
+    if sp.get("trigger_price") is not None:
+        try:
+            trigger = float(sp["trigger_price"])
+            ax.axhline(trigger, linestyle=":", linewidth=1.2,
+                       color="#f59e0b", alpha=0.65, zorder=5)
+            ax.text(chart_len - 2, trigger, f" {sp.get('name', 'Pattern')} trigger",
+                    fontsize=6.8, color="#fbbf24", va="bottom", ha="right", zorder=9)
+        except (TypeError, ValueError):
+            pass
+
     # Keep the candle field clean: no position box, no side panel, no
     # session labels, no decorative legend. The decision state belongs in
     # the Telegram text report; the chart is the structural visual.
@@ -1068,6 +1102,13 @@ def generate_trendline_educational_map(
         pattern_name = sp.get("name")
     elif family.get("active_pattern") and family.get("active_pattern") != "none":
         pattern_name = str(family.get("active_pattern")).replace("_", " ").title()
+    direction = str(
+        setup.get("direction")
+        or family.get("direction")
+        or family.get("bias")
+        or family.get("short_term_direction")
+        or "NEUTRAL"
+    ).upper()
     title = f"{symbol}  |  M30  |  {direction} BIAS  |  {status.replace('_', ' ')}"
     if pattern_name:
         title += f"  |  {pattern_name}"

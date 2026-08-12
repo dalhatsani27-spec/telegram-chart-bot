@@ -6,3 +6,4 @@ pandas
 mplfinance
 matplotlib
 yfinance
+websocket-client>=1.8.0

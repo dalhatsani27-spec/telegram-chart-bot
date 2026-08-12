@@ -110,6 +110,10 @@ primary_chat_id = None  # this is a personal single-user bot; captured on first 
 TELEGRAM_LOOP = None
 TELEGRAM_APP = None
 
+# Per-chat input state for the personal Watch Level flow.
+# A callback selects the market first; the next plain-text message is the price.
+_pending_price_watch = {}
+
 ASSET_CONTAINER = {
     "Forex Majors": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD"],
     "Forex Crosses": ["EURGBP", "EURJPY", "GBPJPY", "GBPAUD", "AUDJPY", "EURAUD"],
@@ -164,7 +168,7 @@ def get_strategy_menu():
             f"{'✅' if selected == engine.STRATEGY_TRENDLINE else '⚪'} Trendline",
             callback_data="set_strategy|TRENDLINE")],
         [InlineKeyboardButton(
-            f"{'✅' if selected == engine.STRATEGY_OTE else '⚪'} OTE (Fib Fan+Exp)",
+            f"{'✅' if selected == engine.STRATEGY_OTE else '⚪'} OTE (62–79%)",
             callback_data="set_strategy|OTE")],
         [InlineKeyboardButton("« Back", callback_data="menu_home")],
     ]
@@ -240,7 +244,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "══════════════════════════════════\n"
         "  TOP-DOWN PRICE-ACTION ENGINE\n"
         "══════════════════════════════════\n\n"
-        "Trendline Families  •  OTE Fib Fan+Expansion\n"
+        "Trendline Structure  •  OTE 62–79% Retracement\n"
         "4H → 1H → 30M Top-Down Bias  •  200 EMA Regime\n"
         "Structure Permission  •  MT5 Execution\n\n"
         "──────────────────────────────\n"
@@ -331,6 +335,11 @@ async def send_trendline_analysis(context, chat_id, symbol):
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         family = strategies.run_trendline_analysis(symbol)
+        if family.get("error"):
+            report = strategies.format_trendline_report(family, symbol)
+            await context.bot.send_message(chat_id=chat_id, text=report)
+            await context.bot.send_message(chat_id=chat_id, text="Choose next action:", reply_markup=get_home_menu())
+            return
         report = strategies.format_trendline_report(family, symbol)
 
         try:
@@ -382,6 +391,11 @@ async def send_ote_analysis(context, chat_id, symbol):
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         analysis = strategies.run_ote_analysis(symbol)
+        if analysis.get("error"):
+            report = strategies.format_ote_report(analysis)
+            await context.bot.send_message(chat_id=chat_id, text=report)
+            await context.bot.send_message(chat_id=chat_id, text="Choose next action:", reply_markup=get_home_menu())
+            return
         report = strategies.format_ote_report(analysis)
 
         try:
