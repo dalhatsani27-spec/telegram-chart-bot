@@ -715,41 +715,29 @@ def generate_trendline_map(
                 ax.plot([x0, chart_len - 1], [y0, y1], color=ch_color, linewidth=2.1,
                         alpha=0.88, zorder=4, solid_capstyle="round")
 
-    # --- Primary directional trendline (educational style) -------------
-    # Clean solid uptrend (green) or downtrend (red) line connecting key swings.
-    # Matches the classic "Uptrend Line" / "Downtrend Line" from the reference charts.
-    primary = (family.get("uptrends") or family.get("downtrends") or [None])[0]
-    if primary:
-        is_up = family_kind == "ascending" or (family.get("uptrends") and primary in (family.get("uptrends") or []))
-        tl_color = "#00c853" if is_up else "#ff1744"
-        x0 = max(0, int(primary["x0"]) - offset)
-        y0 = _line_at(primary, max(int(primary["x0"]), 0))
-        y1 = float(primary.get("y_end", primary.get("y1", 0)))
+    # --- Dual trendlines (MT5 hand-drawn style) -----------------------
+    # Draw BOTH the ascending support and the descending resistance when
+    # they exist — exactly like the two green lines on a typical MT5 chart.
+    def _draw_one_tl(tl, color="#00c853"):
+        if not tl:
+            return
+        x0 = max(0, int(tl["x0"]) - offset)
+        y0 = _line_at(tl, max(int(tl["x0"]), 0))
+        y1 = float(tl.get("y_end", tl.get("y1", 0)))
         if x0 < chart_len:
-            # Solid thick line like the educational examples
-            ax.plot([x0, chart_len - 1], [y0, y1], color=tl_color, linestyle="-",
-                    linewidth=2.6, alpha=0.95, zorder=8, solid_capstyle="round")
-        end_pts_x = set()
+            ax.plot([x0, chart_len - 1], [y0, y1], color=color, linestyle="-",
+                    linewidth=2.4, alpha=0.95, zorder=8, solid_capstyle="round")
         for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
-            px = int(primary[ax_key]) - offset
-            end_pts_x.add(px)
+            px = int(tl[ax_key]) - offset
             if 0 <= px < chart_len:
-                ax.scatter([px], [float(primary[ay_key])], s=85, c=tl_color,
-                           edgecolors="#ffffff", linewidths=1.6, zorder=11, marker="o")
+                ax.scatter([px], [float(tl[ay_key])], s=70, c=color,
+                           edgecolors="#ffffff", linewidths=1.4, zorder=11, marker="o")
 
-        # Subtle touch markers (hollow)
-        touches = [tp for tp in (family.get("bias_touch_points") or [])
-                   if (int(tp["index"]) - offset) not in end_pts_x]
-        MAX_TOUCH_MARKERS = 5
-        if len(touches) > MAX_TOUCH_MARKERS:
-            step = len(touches) / MAX_TOUCH_MARKERS
-            touches = [touches[int(i * step)] for i in range(MAX_TOUCH_MARKERS)]
-        for tp in touches:
-            px = int(tp["index"]) - offset
-            if not (0 <= px < chart_len):
-                continue
-            ax.scatter([px], [float(tp["price"])], s=42, facecolors="none",
-                       edgecolors=tl_color, linewidths=1.5, zorder=10)
+    # Green for both (matches the user's MT5 screenshot)
+    for tl in (family.get("uptrends") or []):
+        _draw_one_tl(tl, color="#00c853")
+    for tl in (family.get("downtrends") or []):
+        _draw_one_tl(tl, color="#00c853")
 
     # Discrete pattern-scanner output (Double Top/Bottom, H&S, Triangle,
     # Wedge, Flag, Rectangle -- from patterns.py). This payload shape is
