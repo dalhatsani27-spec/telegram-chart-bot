@@ -1068,10 +1068,15 @@ def generate_trendline_educational_map(
             xs, ys = zip(*pts)
             ax.plot(xs, ys, linestyle="--", linewidth=1.8,
                     color="#f59e0b", alpha=0.9, zorder=7)
+    seen_pattern_points = set()
     for kp in (sp.get("key_points") or []):
         try:
-            px, py, label = kp[0], kp[1], kp[2]
-            px = int(px) - offset
+            raw_x, py, label = kp[0], kp[1], kp[2]
+            key = (int(raw_x), str(label).strip().upper())
+            if key in seen_pattern_points:
+                continue
+            seen_pattern_points.add(key)
+            px = int(raw_x) - offset
             if 0 <= px < chart_len:
                 ax.scatter([px], [float(py)], s=34, color="#f59e0b",
                            edgecolors="#ffffff", linewidths=0.8, zorder=10)

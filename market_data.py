@@ -49,7 +49,7 @@ TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 # -----------------------------------------------------------------------------
 # Deriv Synthetic Indices (public market-data API; no account token required)
 # -----------------------------------------------------------------------------
-DERIV_WS_URL = os.environ.get("DERIV_WS_URL", "wss://api.derivws.com/trading/v1/options/ws/public")
+DERIV_WS_URL = os.environ.get("DERIV_WS_URL", "wss://ws.binaryws.com/websockets/v3")
 DERIV_SYMBOL_ALIASES = {
     "V10_1S": "1HZ10V", "V25_1S": "1HZ25V", "V50_1S": "1HZ50V",
     "V75_1S": "1HZ75V", "V100_1S": "1HZ100V",
@@ -99,7 +99,7 @@ def deriv_active_symbols():
 
 def deriv_fetch_tick(symbol):
     """Return latest public Deriv quote for a symbol, or None."""
-    data = _deriv_request({"ticks": deriv_symbol(symbol), "subscribe": 0})
+    data = _deriv_request({"ticks": deriv_symbol(symbol)})
     tick = data.get("tick") or {}
     return float(tick["quote"]) if "quote" in tick else None
 
@@ -111,7 +111,7 @@ def deriv_fetch_candles(symbol, tf_code="30min", count=250):
         raise ValueError(f"Unsupported Deriv timeframe: {tf_code}")
     data = _deriv_request({
         "ticks_history": deriv_symbol(symbol), "end": "latest",
-        "style": "candles", "granularity": granularity, "count": int(count), "subscribe": 0
+        "style": "candles", "granularity": granularity, "count": int(count)
     })
     candles = data.get("candles", [])
     if not candles:

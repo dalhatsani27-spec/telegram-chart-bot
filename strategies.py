@@ -206,6 +206,115 @@ def find_fractal_pivots(df: pd.DataFrame, left: int = 3, right: int = 3) -> List
     return pivots
 
 
+
+def find_structural_pivots(
+    df: pd.DataFrame,
+    left: int = 4,
+    right: int = 4,
+    min_gap: int = 5,
+    min_leg_atr: float = 0.80,
+) -> List[Dict]:
+    """Find structural pivots from a *line-chart* (Close) first, then
+    map each accepted pivot to the candle's true High/Low.
+
+    The close series is deliberately used for detection because it removes
+    much of the wick noise that makes raw candle fractals overproduce pivots.
+    ATR and minimum-bar filters then require a meaningful swing before a
+    pivot is allowed into the structural sequence.
+
+    Output alternates HIGH/LOW whenever possible and contains only pivots
+    suitable for the primary trendline/OTE engines.
+    """
+    if df is None or len(df) < left + right + 5:
+        return []
+
+    close = pd.to_numeric(df["Close"], errors="coerce").to_numpy(float)
+    highs = pd.to_numeric(df["High"], errors="coerce").to_numpy(float)
+    lows = pd.to_numeric(df["Low"], errors="coerce").to_numpy(float)
+    if "ATR" in df.columns:
+        atr = pd.to_numeric(df["ATR"], errors="coerce").to_numpy(float)
+    else:
+        tr = np.maximum(highs - lows,
+                        np.maximum(np.abs(highs - np.roll(close, 1)),
+                                   np.abs(lows - np.roll(close, 1))))
+        tr[0] = highs[0] - lows[0]
+        atr = pd.Series(tr).rolling(14, min_periods=1).mean().to_numpy(float)
+
+    candidates = []
+    for i in range(left, len(close) - right):
+        window = close[i-left:i+right+1]
+        if not np.isfinite(close[i]):
+            continue
+        is_high = close[i] >= np.max(window)
+        is_low = close[i] <= np.min(window)
+        # A close cannot normally be both, but a flat series can produce both.
+        # Skip flat dual-pivots rather than inventing structure.
+        if is_high and is_low:
+            continue
+        if is_high:
+            candidates.append({
+                "index": i, "price": float(highs[i]), "close_price": float(close[i]),
+                "type": "high", "source": "line_close",
+                "atr": max(float(atr[i]), 1e-9),
+            })
+        elif is_low:
+            candidates.append({
+                "index": i, "price": float(lows[i]), "close_price": float(close[i]),
+                "type": "low", "source": "line_close",
+                "atr": max(float(atr[i]), 1e-9),
+            })
+
+    if not candidates:
+        return []
+
+    # Collapse nearby/same-type candidates first.
+    compact = []
+    for p in candidates:
+        if not compact:
+            compact.append(p)
+            continue
+        q = compact[-1]
+        gap = p["index"] - q["index"]
+        if p["type"] == q["type"] and gap < min_gap:
+            more_extreme = (
+                p["close_price"] > q["close_price"]
+                if p["type"] == "high"
+                else p["close_price"] < q["close_price"]
+            )
+            if more_extreme:
+                compact[-1] = p
+            continue
+        compact.append(p)
+
+    # Enforce alternating structure and meaningful leg size.
+    out = []
+    for p in compact:
+        if not out:
+            out.append(p)
+            continue
+        q = out[-1]
+        gap = p["index"] - q["index"]
+        if gap < min_gap:
+            continue
+
+        if p["type"] == q["type"]:
+            more_extreme = (
+                p["close_price"] > q["close_price"]
+                if p["type"] == "high"
+                else p["close_price"] < q["close_price"]
+            )
+            if more_extreme:
+                out[-1] = p
+            continue
+
+        leg = abs(p["close_price"] - q["close_price"])
+        leg_atr = max(float(p["atr"]), float(q["atr"]), 1e-9)
+        if leg >= min_leg_atr * leg_atr:
+            p["leg_atr"] = float(leg / leg_atr)
+            out.append(p)
+
+    return out
+
 def _get_sequential_pivots(pivots: List[Dict], kind: str, min_bars: int = 5) -> List[Dict]:
     """
     Keep only sequential higher lows (support) or lower highs (resistance).
@@ -260,9 +369,22 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Opt
             return None
         pts = pts[-2:]
 
-    # Prefer longer span when 3+ sequential points exist
-    if len(pts) >= 3 and (pts[-1]["index"] - pts[-3]["index"]) <= 90:
-        a, b = pts[-3], pts[-1]
+    # Prefer the longest clean span in the current structural sequence.
+    # This is deliberately different from the local pattern engine: the
+    # primary trendline should describe the broader move, not just the last
+    # two pivots. Keep it bounded to the recent structural chain so an old
+    # regime does not dominate a newly changed market.
+    max_chain = pts[-6:]
+    span_candidates = []
+    for i in range(len(max_chain) - 1):
+        for j in range(i + 1, len(max_chain)):
+            a0, b0 = max_chain[i], max_chain[j]
+            span = b0["index"] - a0["index"]
+            if span < 12:
+                continue
+            span_candidates.append((span, a0, b0))
+    if span_candidates:
+        _, a, b = max(span_candidates, key=lambda z: (z[0], z[2]["index"]))
     else:
         a, b = pts[-2], pts[-1]
 
@@ -829,10 +951,10 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     Build one clean parallel family (ascending OR descending), not both mixed.
     Market reveals direction: price relative to the family rails.
 
-    Uses simple fractal pivots (NO ZigZag). The primary trendline is always
-    the two most recent sequential higher-lows (support) or lower-highs
-    (resistance). This produces responsive lines that hug current structure
-    the way a trader draws them by hand.
+    Uses a filtered line-chart pivot engine. Close-based pivots are detected first,
+    then mapped to candle extremes. Major structural pivots feed the long trendline;
+    local pattern detectors remain separate. This reduces wick noise while preserving
+    the actual swing prices used for drawing.
     """
     if df is None or len(df) < 30:
         return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}
@@ -840,9 +962,9 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     n = len(df)
 
     # --- Simple fractal pivots (NO ZigZag) ---
-    pivots = find_fractal_pivots(df, left=3, right=3)
-    if len(pivots) < 6:
-        pivots = find_fractal_pivots(df, left=2, right=2)
+    pivots = find_structural_pivots(df, left=4, right=4, min_gap=5, min_leg_atr=0.80)
+    if len(pivots) < 5:
+        pivots = find_structural_pivots(df, left=3, right=3, min_gap=4, min_leg_atr=0.65)
 
     # Recent window for diagonal fit (tighter for better hugging)
     cutoff = max(0, n - lookback_bars)
@@ -2005,7 +2127,7 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
 # OTE STRATEGY -- structural Fibonacci OTE
 # ============================================================
 OTE_RATIOS = [0.62, 0.705, 0.79]
-OTE_MIN_IMPULSE_ATR = 1.5
+OTE_MIN_IMPULSE_ATR = 1.75
 OTE_MIN_PIVOT_GAP = 3
 OTE_CONFIRM_BODY_RATIO = 0.45
 
@@ -2016,7 +2138,7 @@ def _ensure_atr(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _refined_ote_pivots(df,left=3,right=3,min_leg_atr=0.85):
-    raw=find_fractal_pivots(df,left,right)
+    raw=find_structural_pivots(df,left=max(3,left),right=max(3,right),min_gap=OTE_MIN_PIVOT_GAP,min_leg_atr=min_leg_atr)
     out=[]; atr=df["ATR"].values
     for p in raw:
         if not out: out.append(p); continue
@@ -2068,17 +2190,35 @@ def _build_ote_zone(impulse):
     vals={"62":_fib_retrace_price(start,end,.62,d),"70.5":_fib_retrace_price(start,end,.705,d),"79":_fib_retrace_price(start,end,.79,d)}
     return {**vals,"low":min(vals.values()),"high":max(vals.values()),"direction":d,"origin":start,"extreme":end,"leg_size":abs(end-start)}
 
-def _zone_state(close,zone,atr):
+def _zone_state(close,zone,atr,impulse=None,df=None):
     """Direction-aware OTE lifecycle.
 
-    BUY: below the 79% boundary is invalid; above the zone is waiting.
-    SELL: above the 79% boundary is invalid; below the zone is waiting.
+    ACTIVE means price is currently inside the 62-79% zone. If price already
+    entered the zone and then left it in the expected direction, the setup is
+    MITIGATED/PASSED rather than being reported as a fresh WAITING setup.
     """
     tol=max(atr*.10,1e-9)
     low=float(zone["low"]); high=float(zone["high"])
     direction=str(zone.get("direction","BUY")).upper()
+
     if low-tol <= close <= high+tol:
         return "ACTIVE"
+
+    # Detect whether this impulse's OTE zone was already touched by a later
+    # candle. This prevents the bot from presenting an old, already-reacted
+    # zone as if price were still waiting for its first entry.
+    if impulse is not None and df is not None:
+        end_i=int(impulse.get("end",{}).get("index",-1))
+        if end_i >= 0 and end_i < len(df)-1:
+            highs=df["High"].to_numpy(float)
+            lows=df["Low"].to_numpy(float)
+            later_hi=highs[end_i+1:]
+            later_lo=lows[end_i+1:]
+            if len(later_hi):
+                touched = bool(np.any((later_lo <= high+tol) & (later_hi >= low-tol)))
+                if touched:
+                    return "MITIGATED / PASSED"
+
     if direction=="BUY":
         return "TOO_DEEP / INVALID" if close < low-tol else "WAITING"
     return "TOO_DEEP / INVALID" if close > high+tol else "WAITING"
@@ -2106,7 +2246,7 @@ def _ote_confirmation(df,direction,zone):
     return {"confirmed":bool(confirmed),"label":"Displacement candle" if confirmed else None,"displacement":bool(displacement)}
 
 def _evaluate_ote(df,impulse,topdown=None):
-    close=float(df["Close"].iloc[-1]);atr=max(float(df["ATR"].iloc[-1]),1e-9);d=impulse["direction"];zone=_build_ote_zone(impulse);state=_zone_state(close,zone,atr);poi=_find_ote_poi(df,zone,d);confirm=_ote_confirmation(df,d,zone);reasons=[];score=40
+    close=float(df["Close"].iloc[-1]);atr=max(float(df["ATR"].iloc[-1]),1e-9);d=impulse["direction"];zone=_build_ote_zone(impulse);state=_zone_state(close,zone,atr,impulse,df);poi=_find_ote_poi(df,zone,d);confirm=_ote_confirmation(df,d,zone);reasons=[];score=40
     if impulse["atr_multiple"]>=2:score+=15;reasons.append(f"Valid displacement leg ({impulse['atr_multiple']:.1f} ATR)")
     else:score+=8;reasons.append(f"Moderate impulse ({impulse['atr_multiple']:.1f} ATR)")
     td=(topdown or {}).get("direction","NEUTRAL")
@@ -2117,6 +2257,9 @@ def _evaluate_ote(df,impulse,topdown=None):
     else:reasons.append("Structural confirmation pending")
     if state=="ACTIVE":score+=18;reasons.append("Price is inside the 62%-79% OTE zone")
     elif state=="WAITING":reasons.append("Price has not reached the OTE zone")
+    elif state=="MITIGATED / PASSED":
+        score-=5
+        reasons.append("OTE zone was already touched after the impulse; waiting for a new setup")
     else:score-=15;reasons.append("Retracement has exceeded the 79% boundary")
     if poi and poi.get("overlap",0)>0:score+=10;reasons.append("Directional OB overlaps OTE")
     elif poi:reasons.append("Directional OB is nearby, outside OTE")
@@ -2146,7 +2289,12 @@ def format_ote_report(analysis: Dict[str, Any]) -> str:
     td_dir=td.get("direction","NEUTRAL")
     lines=[f"🎯 OTE ANALYSIS — {symbol} M30","","BIAS",f"4H: {td_dir}",f"1H: {td_dir}",f"30M: {d}","","IMPULSE",f"{imp.get('start',{}).get('type','?').upper()} → {imp.get('end',{}).get('type','?').upper()}",f"Leg: {imp.get('leg_size',0):.5f} ({imp.get('atr_multiple',0):.1f} ATR)",f"Structure: {imp.get('structure_bias','NEUTRAL')}",f"Event: {imp.get('structure_event') or 'PENDING'}","","OTE ZONE",f"62%: {z.get('62',0):.5f}",f"70.5%: {z.get('70.5',0):.5f}",f"79%: {z.get('79',0):.5f}",f"Status: {analysis.get('zone_state','WAITING')}","","CONFLUENCE",f"Directional OB: {'✅' if poi else '❌'}",f"OB overlaps OTE: {'✅' if poi and poi.get('overlap',0)>0 else '❌'}",f"Displacement: {'✅' if conf.get('confirmed') else '❌'}","","━━━━━━━━━━━━━━━━","","🎯 DECISION",f"BIAS: {d}",f"STATUS: {'CONFIRMED' if valid else ('ACTIVE — WAIT' if state=='ACTIVE' else 'WAIT')}",f"ENTRY: {'CONFIRMED' if valid else 'NOT CONFIRMED'}"]
     if not valid:
-        lines += ["","WAIT FOR:","1. Price to enter the 62–79% OTE zone" if analysis.get("zone_state")!="ACTIVE" else "1. OTE reaction","2. Directional POI reaction/alignment","3. Displacement confirmation","4. Structure to remain valid","","No trade yet."]
+        wait1 = {
+            "ACTIVE": "1. OTE reaction",
+            "MITIGATED / PASSED": "1. A new valid impulse and fresh OTE zone",
+            "TOO_DEEP / INVALID": "1. A new valid impulse (current OTE invalidated)",
+        }.get(analysis.get("zone_state"), "1. Price to enter the 62–79% OTE zone")
+        lines += ["","WAIT FOR:",wait1,"2. Directional POI reaction/alignment","3. Displacement confirmation","4. Structure to remain valid","","No trade yet."]
     else:
         t=analysis.get("ticket") or {};lines += ["","🔥 OTE CONFIRMED","",f"Direction: {d}","Structure: CONFIRMED","Displacement: CONFIRMED",f"Entry: {t.get('entry',0):.5f}",f"SL: {t.get('sl',0):.5f}",f"TP1: {t.get('tp1',0):.5f}",f"TP2: {t.get('tp2',0):.5f}",f"R:R: 1:{t.get('rr',0):.2f}"]
     return "\n".join(lines)
@@ -2170,7 +2318,7 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
             "direction": "NEUTRAL", "symbol": symbol, "topdown": topdown,
         }
 
-    family = build_trendline_family(df_30m, max_lines=4, lookback_bars=90)
+    family = build_trendline_family(df_30m, max_lines=4, lookback_bars=120)
     family["symbol"] = symbol
     family["timeframe"] = "30min"
     family["topdown"] = topdown
