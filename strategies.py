@@ -181,96 +181,126 @@ def _theil_sen_line(points: List[Dict], n: int) -> Optional[Dict]:
     }
 
 
+def find_fractal_pivots(df: pd.DataFrame, left: int = 3, right: int = 3) -> List[Dict]:
+    """
+    Simple fractal swing highs and lows.
+    No ZigZag, no forced alternation — just clean local extremes.
+    This is the sole pivot source for the trendline family.
+    """
+    if df is None or len(df) < left + right + 2:
+        return []
+
+    highs = df["High"].values
+    lows = df["Low"].values
+    pivots = []
+
+    for i in range(left, len(df) - right):
+        # Swing High
+        if highs[i] == max(highs[i - left: i + right + 1]):
+            pivots.append({"index": i, "price": float(highs[i]), "type": "high"})
+        # Swing Low
+        if lows[i] == min(lows[i - left: i + right + 1]):
+            pivots.append({"index": i, "price": float(lows[i]), "type": "low"})
+
+    pivots.sort(key=lambda p: p["index"])
+    return pivots
+
+
+def _get_sequential_pivots(pivots: List[Dict], kind: str, min_bars: int = 5) -> List[Dict]:
+    """
+    Keep only sequential higher lows (support) or lower highs (resistance).
+    Restarts the chain when structure is broken so the most recent
+    valid sequence is always used — this is what makes the line hug
+    current price action.
+    """
+    want = "low" if kind == "support" else "high"
+    pts = [p for p in pivots if p["type"] == want]
+    if len(pts) < 2:
+        return pts
+
+    cleaned = [pts[0]]
+    for p in pts[1:]:
+        gap = p["index"] - cleaned[-1]["index"]
+        if gap < min_bars:
+            # Too close — keep the more extreme one
+            if kind == "support":
+                if p["price"] < cleaned[-1]["price"]:
+                    cleaned[-1] = p
+            else:
+                if p["price"] > cleaned[-1]["price"]:
+                    cleaned[-1] = p
+            continue
+
+        if kind == "support":
+            if p["price"] > cleaned[-1]["price"] * 0.998:
+                cleaned.append(p)
+            else:
+                cleaned = [p]  # restart on lower low
+        else:
+            if p["price"] < cleaned[-1]["price"] * 1.002:
+                cleaned.append(p)
+            else:
+                cleaned = [p]  # restart on higher high
+
+    return cleaned
+
+
 def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
     """
-    Primary trendline via significant swings + Theil-Sen robust fit.
-
-    Steps:
-      1. Keep only meaningful swings (large legs in ATR)
-      2. Require correct structure direction (HL for support, LH for resistance)
-      3. Fit Theil-Sen line (median pairwise slope) — resists noisy pivots
-      4. Validate with touches / violations
-      5. Prefer the cleanest recent structure
+    Clean dynamic trendline using the two most recent sequential pivots.
+    No ZigZag. Produces the classic hugging style (last two higher lows /
+    lower highs) that updates as soon as new structure forms.
     """
-    pts = _significant_swings(pivots, df, kind, min_leg_atr=0.75, max_points=7)
+    pts = _get_sequential_pivots(pivots, kind, min_bars=5)
     if len(pts) < 2:
         return None
 
-    # Enforce directional structure on the selected points
-    if kind == "support":
-        # Keep a rising sequence of lows (drop any that break the HL chain from the end)
-        cleaned = [pts[0]]
-        for p in pts[1:]:
-            if p["price"] > cleaned[-1]["price"] * 0.999:
-                cleaned.append(p)
-            else:
-                # allow one lower low if later points resume higher — keep most recent chain
-                cleaned = [p]
-        pts = cleaned
-    else:
-        cleaned = [pts[0]]
-        for p in pts[1:]:
-            if p["price"] < cleaned[-1]["price"] * 1.001:
-                cleaned.append(p)
-            else:
-                cleaned = [p]
-        pts = cleaned
+    # Always take the two most recent valid sequential pivots
+    a, b = pts[-2], pts[-1]
 
-    if len(pts) < 2:
+    # Quality filters
+    if b["index"] - a["index"] < 6:
+        return None
+    if b["index"] < n - 55:  # last pivot must be reasonably recent
         return None
 
-    # Prefer the most recent 3–5 points for the live structure
-    if len(pts) > 5:
-        pts = pts[-5:]
+    slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
+    y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
 
-    # Recency: last pivot should not be ancient
-    if pts[-1]["index"] < n - max(30, int(n * 0.5)):
+    # Slope must match the requested kind
+    if kind == "support" and slope <= 0:
+        return None
+    if kind == "resistance" and slope >= 0:
         return None
 
-    line = _theil_sen_line(pts, n)
-    if not line:
-        return None
-
-    # Must have meaningful slope
+    # Minimum meaningful move (prevents almost-flat lines)
     atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
     if atr_now and atr_now > 0:
-        total_move = abs(line["y1"] - line["y0"])
-        if total_move < 1.0 * atr_now:
+        if abs(b["price"] - a["price"]) < 0.65 * atr_now:
             return None
 
-    # Direction check on the fitted slope
-    if kind == "support" and line["slope"] <= 0:
-        return None
-    if kind == "resistance" and line["slope"] >= 0:
-        return None
-
-    touches = _count_touches(df, line["x0"], line["y0"], line["x1"], line["y1"], kind, tol_atr=0.40)
-    violations = _count_violations(df, line["x0"], line["y0"], line["x1"], line["y1"], kind, tol_atr=0.30)
+    touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.40)
+    violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.28)
 
     if touches < 2:
         return None
-    if violations > touches + 2:
+    if violations > touches + 1:
         return None
 
-    if touches < 3 or violations > 3:
-        quality = "unconfirmed"
-    elif touches <= 6 and violations <= 2:
-        quality = "confirmed"
-    else:
-        quality = "crowded"
+    quality = "unconfirmed" if touches < 3 else "confirmed"
 
     return {
-        "x0": line["x0"], "y0": line["y0"],
-        "x1": line["x1"], "y1": line["y1"],
-        "y_end": line["y_end"],
-        "slope": line["slope"],
+        "x0": a["index"], "y0": a["price"],
+        "x1": b["index"], "y1": b["price"],
+        "y_end": y_end,
+        "slope": slope,
         "touches": touches,
         "violations": violations,
         "confirmed": quality == "confirmed",
         "quality": quality,
         "kind": kind,
-        "bars_since_last_touch": n - 1 - line["x1"],
-        "method": "theil_sen",
+        "bars_since_last_touch": n - 1 - b["index"],
+        "method": "recent_2pt_fractal",
     }
 
 
@@ -670,43 +700,32 @@ def _entry_confirmation(df: pd.DataFrame, direction: str) -> Dict[str, Any]:
     return {"checks": checks, "passed": passed, "required": required, "confirmed": passed >= required}
 
 
-def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: int = 90) -> Dict[str, Any]:
+def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: int = 60) -> Dict[str, Any]:
     """
     Build one clean parallel family (ascending OR descending), not both mixed.
     Market reveals direction: price relative to the family rails.
 
-    lookback_bars: diagonal trendlines (and the wedge detector) only
-    consider pivots from the most recent `lookback_bars` candles. Without
-    this, a long flat chop zone from days ago can out-score the swing that
-    actually shapes the current move -- a flat zone sits near dozens of
-    candles' lows just by being flat and old, racking up touch count, while
-    a real recent diagonal (the thing a trader actually draws) only grazes
-    a handful of candles because it's moving fast. Scoring by raw touch
-    count alone then picks the stale flat line and the rails end up
-    running almost horizontal across the whole chart -- indistinguishable
-    from a moving average -- instead of hugging the live structure.
-    Horizontal S/R intentionally stays full-history (older well-tested
-    flip zones ARE still relevant); only the diagonal fit is windowed.
+    Uses simple fractal pivots (NO ZigZag). The primary trendline is always
+    the two most recent sequential higher-lows (support) or lower-highs
+    (resistance). This produces responsive lines that hug current structure
+    the way a trader draws them by hand.
     """
     if df is None or len(df) < 30:
         return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}
 
     n = len(df)
-    # Balanced pivot detection — enough structure without micro-noise
-    pivots = zigzag_swings(df, depth=4, deviation_atr=0.32)
-    if len(pivots) < 5:
-        pivots = zigzag_swings(df, depth=3, deviation_atr=0.25)
-    if len(pivots) < 3:
-        pivots = zigzag_swings(df, depth=3, deviation_atr=0.18)
 
-    # Recent window for diagonal fit
+    # --- Simple fractal pivots (NO ZigZag) ---
+    pivots = find_fractal_pivots(df, left=3, right=3)
+    if len(pivots) < 6:
+        pivots = find_fractal_pivots(df, left=2, right=2)
+
+    # Recent window for diagonal fit (tighter for better hugging)
     cutoff = max(0, n - lookback_bars)
     recent_pivots = [p for p in pivots if p["index"] >= cutoff]
     if len(recent_pivots) < 4:
-        recent_pivots = [p for p in pivots if p["index"] >= max(0, n - int(lookback_bars * 1.6))]
+        recent_pivots = [p for p in pivots if p["index"] >= max(0, n - int(lookback_bars * 1.5))]
     if len(recent_pivots) < 3:
-        recent_pivots = [p for p in pivots if p["index"] >= max(0, n - lookback_bars * 2)]
-    if len(recent_pivots) < 2:
         recent_pivots = pivots
 
     support = _fit_primary(recent_pivots, "support", n, df)
