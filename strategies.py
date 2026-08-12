@@ -739,15 +739,28 @@ def _entry_confirmation(df: pd.DataFrame, direction: str) -> Dict[str, Any]:
     return {"checks": checks, "passed": passed, "required": required, "confirmed": passed >= required}
 
 
-def _label_hh_structure(pivots: List[Dict], df: pd.DataFrame, n: int, max_labels: int = 4) -> List[Dict]:
+def _label_hh_structure(pivots: List[Dict], df: pd.DataFrame, n: int, max_labels: int = 4,
+                         exclude_near: Optional[List[int]] = None) -> List[Dict]:
     """
     Label the swing-high sequence as HH (Higher High) / 'HH Failed' the
     way the reference chart does: consecutive higher highs get 'HH', and
     when a high comes in roughly equal to (fails to clear) the prior HH,
     it's tagged 'HH Failed' -- the classic early warning that a trend is
     losing momentum right before a trendline break.
+
+    exclude_near: indices already claimed by a more specific label (e.g.
+    the M/W pattern's Top/Bottom markers) -- skip those pivots so we don't
+    stamp a duplicate/colliding label on the exact same point.
     """
     highs = sorted([p for p in pivots if p["type"] == "high"], key=lambda p: p["index"])
+    if len(highs) < 2:
+        return []
+    exclude_near = exclude_near or []
+
+    def _too_close(idx):
+        return any(abs(idx - e) <= 3 for e in exclude_near)
+
+    highs = [p for p in highs if not _too_close(p["index"])]
     if len(highs) < 2:
         return []
     recent = highs[-max_labels:]
@@ -1216,7 +1229,15 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
 
     # HH / HH Failed structure labels (educational-image style) and the
     # breakout + retest callouts for whichever primary line is active.
-    hh_labels = _label_hh_structure(recent_pivots, df, n)
+    # Exclude pivots already claimed by the M/W pattern's Top/Bottom
+    # markers so we don't stamp a colliding duplicate label on them.
+    exclude_near = []
+    if mw:
+        for key in ("left", "right"):
+            pt = mw.get(key)
+            if pt:
+                exclude_near.append(int(pt["index"]))
+    hh_labels = _label_hh_structure(recent_pivots, df, n, exclude_near=exclude_near)
     breakout_retest = None
     if primary:
         primary_kind_for_break = "support" if family_kind == "ascending" else "resistance"
