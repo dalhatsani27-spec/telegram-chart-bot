@@ -716,28 +716,41 @@ def generate_trendline_map(
                         alpha=0.88, zorder=4, solid_capstyle="round")
 
     # --- Dual trendlines (MT5 hand-drawn style) -----------------------
-    # Draw BOTH the ascending support and the descending resistance when
-    # they exist — exactly like the two green lines on a typical MT5 chart.
-    def _draw_one_tl(tl, color="#00c853"):
+    # ALWAYS draw ascending support + descending resistance when present.
+    # Thick bright green so the lines are impossible to miss.
+    def _draw_one_tl(tl, color="#00e676", width=2.8):
         if not tl:
             return
-        x0 = max(0, int(tl["x0"]) - offset)
-        y0 = _line_at(tl, max(int(tl["x0"]), 0))
-        y1 = float(tl.get("y_end", tl.get("y1", 0)))
-        if x0 < chart_len:
+        try:
+            x0 = max(0, int(tl["x0"]) - offset)
+            # Use actual anchor y, then extend to current bar
+            y0 = float(tl["y0"])
+            y1 = float(tl.get("y_end", tl.get("y1", y0)))
+            if x0 >= chart_len:
+                return
             ax.plot([x0, chart_len - 1], [y0, y1], color=color, linestyle="-",
-                    linewidth=2.4, alpha=0.95, zorder=8, solid_capstyle="round")
-        for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
-            px = int(tl[ax_key]) - offset
-            if 0 <= px < chart_len:
-                ax.scatter([px], [float(tl[ay_key])], s=70, c=color,
-                           edgecolors="#ffffff", linewidths=1.4, zorder=11, marker="o")
+                    linewidth=width, alpha=1.0, zorder=10, solid_capstyle="round")
+            # Anchor dots
+            for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
+                px = int(tl[ax_key]) - offset
+                if 0 <= px < chart_len:
+                    ax.scatter([px], [float(tl[ay_key])], s=90, c=color,
+                               edgecolors="#ffffff", linewidths=1.8, zorder=12, marker="o")
+        except Exception:
+            pass
 
-    # Green for both (matches the user's MT5 screenshot)
+    drawn = 0
     for tl in (family.get("uptrends") or []):
-        _draw_one_tl(tl, color="#00c853")
+        _draw_one_tl(tl, color="#00e676", width=2.8)
+        drawn += 1
     for tl in (family.get("downtrends") or []):
-        _draw_one_tl(tl, color="#00c853")
+        _draw_one_tl(tl, color="#00e676", width=2.8)
+        drawn += 1
+
+    # Fallback: if uptrends/downtrends empty, try family_lines
+    if drawn == 0:
+        for tl in (family.get("family_lines") or []):
+            _draw_one_tl(tl, color="#00e676", width=2.8)
 
     # Discrete pattern-scanner output (Double Top/Bottom, H&S, Triangle,
     # Wedge, Flag, Rectangle -- from patterns.py). This payload shape is
