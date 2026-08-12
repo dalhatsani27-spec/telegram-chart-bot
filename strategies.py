@@ -247,64 +247,50 @@ def _get_sequential_pivots(pivots: List[Dict], kind: str, min_bars: int = 5) -> 
 
 def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
     """
-    Classic dynamic trendline (matches the educational image style).
-    Uses sequential higher lows (support) or lower highs (resistance).
-    Prefers a line that spans enough of the chart to look like a real
-    trendline while still anchoring on the most recent valid pivots.
+    Classic trendline: connect sequential Higher Lows (support) or
+    Lower Highs (resistance). Filters are kept light so the line is
+    almost always drawn when structure exists — matching MT5 hand-drawn style.
     """
-    pts = _get_sequential_pivots(pivots, kind, min_bars=5)
+    pts = _get_sequential_pivots(pivots, kind, min_bars=3)
     if len(pts) < 2:
-        return None
+        # Fallback: any two pivots of the correct type
+        want = "low" if kind == "support" else "high"
+        pts = [p for p in pivots if p["type"] == want]
+        if len(pts) < 2:
+            return None
+        pts = pts[-2:]
 
-    # Prefer the last 2 points. If we have 3+ clean sequential pivots and
-    # the earlier one is not too old, start from pts[-3] so the line has
-    # better visual length (closer to the reference image).
-    if len(pts) >= 3 and (pts[-1]["index"] - pts[-3]["index"]) <= 70:
-        a, b = pts[-3], pts[-1]   # longer span
-        # Only accept if the middle point also respects the line roughly
-        mid = pts[-2]
-        mid_on_line = _line_value(a["index"], a["price"], b["index"], b["price"], mid["index"])
-        atr = float(df["ATR"].iloc[min(mid["index"], len(df)-1)]) if "ATR" in df.columns else abs(b["price"]-a["price"])*0.1
-        if abs(mid["price"] - mid_on_line) > max(atr * 0.55, 1e-9):
-            a, b = pts[-2], pts[-1]  # fall back to last two
+    # Prefer longer span when 3+ sequential points exist
+    if len(pts) >= 3 and (pts[-1]["index"] - pts[-3]["index"]) <= 90:
+        a, b = pts[-3], pts[-1]
     else:
         a, b = pts[-2], pts[-1]
 
-    # Quality filters
-    if b["index"] - a["index"] < 8:
+    if b["index"] <= a["index"]:
         return None
-    if b["index"] < n - 60:
+    if b["index"] - a["index"] < 4:
         return None
 
     slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
     y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
 
-    if kind == "support" and slope <= 0:
+    # Direction must match kind (light check only)
+    if kind == "support" and slope < -1e-12:
         return None
-    if kind == "resistance" and slope >= 0:
-        return None
-
-    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
-    if atr_now and atr_now > 0:
-        if abs(b["price"] - a["price"]) < 0.6 * atr_now:
-            return None
-
-    touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.42)
-    violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.30)
-
-    if touches < 2:
-        return None
-    if violations > touches + 1:
+    if kind == "resistance" and slope > 1e-12:
         return None
 
-    quality = "unconfirmed" if touches < 3 else "confirmed"
+    touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.50)
+    violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.35)
+
+    quality = "unconfirmed" if touches < 2 else ("confirmed" if touches <= 4 else "crowded")
 
     return {
-        "x0": a["index"], "y0": a["price"],
-        "x1": b["index"], "y1": b["price"],
-        "y_end": y_end,
-        "slope": slope,
-        "touches": touches,
+        "x0": a["index"], "y0": float(a["price"]),
+        "x1": b["index"], "y1": float(b["price"]),
+        "y_end": float(y_end),
+        "slope": float(slope),
+        "touches": max(touches, 2),
         "violations": violations,
         "confirmed": quality == "confirmed",
         "quality": quality,
@@ -748,7 +734,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # "ascending" rail is misleading -- it should be left for the
     # horizontal S/R clustering below (_detect_horizontal_levels) to pick
     # up instead, which is exactly what that layer is for.
-    MIN_TREND_MOVE_ATR = 1.0
+    MIN_TREND_MOVE_ATR = 0.35
     atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
 
     def _has_meaningful_slope(line):
