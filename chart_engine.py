@@ -924,115 +924,203 @@ def generate_trendline_map(
     return img_buf
 
 
-# ============================================================
-# OTE CHART -- 30M Fibonacci Fan + Expansion chart
-# ============================================================
-def generate_ote_map(
+def generate_trendline_educational_map(
     df: pd.DataFrame,
     symbol: str,
-    analysis: Dict[str, Any],
+    setup: Dict[str, Any],
     title_suffix: str = "",
 ) -> io.BytesIO:
+    """Clean educational Trendline chart.
+
+    This intentionally draws only the information needed to understand the
+    market story: candles, meaningful HH/HL/LH/LL points, one or two real
+    trendlines, the breakout/retest lifecycle, and one relevant POI. It does
+    not paint every detector output onto the candles.
     """
-    OTE visual map:
-      - Candlesticks
-      - Fibonacci Fan rays (38.2 / 50 / 61.8) in green
-      - Fibonacci Expansion levels (127.2 / 161.8 / 200 / 261.8)
-      - Impulse start / end markers
-      - Position container (Entry / SL / TP) when available
-    """
-    chart_df, chart_len = _prepare_ohlc(df, max_bars=160)
+    family = setup.get("family") or setup.get("analysis") or setup
+    chart_df, chart_len = _prepare_ohlc(df, max_bars=150)
     offset = len(df) - chart_len
 
-    mc = mpf.make_marketcolors(up=COLORS["bull"], down=COLORS["bear"], edge="inherit", wick="inherit")
+    mc = mpf.make_marketcolors(
+        up=COLORS["bull"], down=COLORS["bear"],
+        edge="inherit", wick="inherit",
+    )
     style = mpf.make_mpf_style(
         marketcolors=mc,
         gridstyle=":",
-        gridcolor=COLORS["grid"],
+        gridcolor="#25303b",
         y_on_right=True,
-        facecolor=COLORS["bg"],
-        figcolor=COLORS["bg"],
-        rc={"axes.labelcolor": COLORS["text"], "xtick.color": COLORS["text"], "ytick.color": COLORS["text"]},
+        facecolor="#0b0f14",
+        figcolor="#0b0f14",
+        rc={"font.size": 9},
     )
-
-    fig, axlist = mpf.plot(
+    fig, axes = mpf.plot(
         chart_df,
         type="candle",
         style=style,
         volume=False,
+        figsize=(15, 8.5),
         returnfig=True,
-        figsize=(12, 6.8),
-        warn_too_much_data=10000,
+        tight_layout=True,
+        datetime_format="%d %b %H:%M",
+        xrotation=0,
+        warn_too_much_data=1000,
     )
-    ax = axlist[0]
+    ax = axes[0]
 
-    # --- Impulse anchors ---
-    impulse = analysis.get("impulse") or {}
-    start = impulse.get("start")
-    end = impulse.get("end")
-    if start:
-        x = start["index"] - offset
-        if 0 <= x < chart_len:
-            ax.scatter([x], [start["price"]], color="#00e676", s=55, zorder=8, marker="o")
-            ax.text(x, start["price"], "  Start", fontsize=7, color="#00e676", va="bottom")
-    if end:
-        x = end["index"] - offset
-        if 0 <= x < chart_len:
-            ax.scatter([x], [end["price"]], color="#ffab00", s=55, zorder=8, marker="o")
-            ax.text(x, end["price"], "  End", fontsize=7, color="#ffab00", va="bottom")
+    # Educational trendlines: maximum two meaningful rails.
+    lines = []
+    for tl in (family.get("uptrends") or []):
+        if tl:
+            lines.append((tl, "#22c55e", "RISING SUPPORT"))
+    for tl in (family.get("downtrends") or []):
+        if tl:
+            lines.append((tl, "#ef4444", "FALLING RESISTANCE"))
 
-    # --- Fibonacci Fan rays ---
-    fans = analysis.get("fans") or []
-    fan_colors = ["#69f0ae", "#00e676", "#00c853"]
-    for i, fan in enumerate(fans):
-        x0 = fan["x0"] - offset
-        x1 = chart_len - 1
-        if x0 >= chart_len:
+    # Deduplicate by kind and keep only the cleanest line of each type.
+    seen = set()
+    clean_lines = []
+    for tl, color, label in lines:
+        kind = tl.get("kind")
+        if kind in seen:
             continue
-        y0 = fan["y0"]
-        y1 = fan["y0"] + fan["slope"] * ((offset + chart_len - 1) - fan["x0"])
-        color = fan_colors[i % len(fan_colors)]
-        y_left = y0 if x0 >= 0 else (fan["y0"] + fan["slope"] * (offset - fan["x0"]))
-        ax.plot([max(0, x0), x1], [y_left, y1],
-                color=color, linewidth=1.6, alpha=0.90, zorder=5)
-        ax.text(chart_len - 2, y1, f" {fan['label']}", fontsize=7,
-                color=color, va="center", fontweight="bold")
+        seen.add(kind)
+        clean_lines.append((tl, color, label))
 
-    # --- Expansion levels ---
-    expansions = analysis.get("expansions") or []
-    exp_colors = ["#26c6da", "#00bcd4", "#0097a7", "#00838f"]
-    for i, exp in enumerate(expansions):
-        price = exp["price"]
-        color = exp_colors[i % len(exp_colors)]
-        ax.axhline(price, color=color, linestyle="--", linewidth=1.25, alpha=0.85, zorder=4)
-        ax.text(chart_len * 0.72, price, f" Exp {exp['label']}", fontsize=7,
-                color=color, va="bottom")
+    for tl, color, label in clean_lines[:2]:
+        x0 = int(tl["x0"]) - offset
+        x1 = int(tl["x1"]) - offset
+        if x1 <= 0 or x0 >= chart_len:
+            continue
+        slope = (float(tl["y1"]) - float(tl["y0"])) / max(float(tl["x1"]) - float(tl["x0"]), 1.0)
+        xa = max(0, x0)
+        xb = chart_len - 1
+        ya = float(tl["y0"]) + slope * ((xa + offset) - float(tl["x0"]))
+        yb = float(tl["y0"]) + slope * ((xb + offset) - float(tl["x0"]))
+        ax.plot([xa, xb], [ya, yb], color=color, linewidth=2.8, alpha=0.95,
+                solid_capstyle="round", zorder=6)
 
-    # --- Position container ---
-    pos = analysis.get("position") or analysis.get("ticket")
-    if pos:
-        _draw_position_container(ax, pos, chart_len)
+        # Only the defining anchors get circles — no marker explosion.
+        for px_raw, py in ((tl["x0"], tl["y0"]), (tl["x1"], tl["y1"])):
+            px = int(px_raw) - offset
+            if 0 <= px < chart_len:
+                ax.scatter([px], [float(py)], s=48, color=color, edgecolors="#ffffff",
+                           linewidths=1.1, zorder=9)
 
-    direction = analysis.get("direction", "")
-    score = analysis.get("score", 0)
-    title = f"{symbol}  OTE (Fib Fan + Expansion)  |  {direction}  |  Score {score}"
-    if title_suffix:
-        title += f"  |  {title_suffix}"
-    ax.set_title(title, color=COLORS["text"], fontsize=10, fontweight="bold", pad=10)
+        lx = max(2, min(chart_len - 18, int(x0 + (xb - x0) * 0.72)))
+        ly = float(tl["y0"]) + slope * ((lx + offset) - float(tl["x0"]))
+        ax.text(lx, ly, label, fontsize=7.5, color=color, fontweight="bold",
+                va="bottom" if "SUPPORT" in label else "top", zorder=10)
 
-    # Price padding
-    prices = list(chart_df["High"]) + list(chart_df["Low"])
-    for f in fans:
-        prices.append(f.get("y_at_end", f["y0"]))
-    for e in expansions:
-        prices.append(e["price"])
-    if prices:
-        pmin, pmax = min(prices), max(prices)
-        pad = (pmax - pmin) * 0.08
-        ax.set_ylim(pmin - pad, pmax + pad)
+    # Structure labels: only the most recent meaningful labels.
+    anns = [a for a in (family.get("trendline_annotations") or [])
+            if a.get("label") in ("HH", "HL", "LH", "LL")]
+    anns = anns[-7:]
+    for ann in anns:
+        px = int(ann["index"]) - offset
+        py = float(ann["price"])
+        if not (0 <= px < chart_len):
+            continue
+        label = str(ann["label"])
+        is_high = ann.get("type") == "high"
+        ax.scatter([px], [py], s=28, color="#f8fafc", edgecolors="#94a3b8",
+                   linewidths=0.8, zorder=10)
+        ax.annotate(
+            label, (px, py), fontsize=8, color="#f8fafc", fontweight="bold",
+            xytext=(0, 10 if is_high else -14), textcoords="offset points",
+            ha="center", zorder=11,
+        )
+
+    # Break/retest lifecycle — this is the educational core.
+    tr = family.get("trendline_retest") or {}
+    status = str(tr.get("status") or "INTACT")
+    bi = tr.get("break_index")
+    ri = tr.get("retest_index")
+    level = tr.get("retest_level")
+    if bi is not None:
+        bx = int(bi) - offset
+        if 0 <= bx < chart_len:
+            by = float(chart_df["Close"].iloc[bx])
+            ax.scatter([bx], [by], s=95, color="#f59e0b", edgecolors="#ffffff",
+                       linewidths=1.3, marker="D", zorder=14)
+            ax.annotate("BREAK", (bx, by), xytext=(8, 12), textcoords="offset points",
+                        color="#f59e0b", fontsize=8, fontweight="bold", zorder=15)
+    if ri is not None and level is not None:
+        rx = int(ri) - offset
+        if 0 <= rx < chart_len:
+            retest_ok = status == "BREAK_RETEST_CONFIRMED"
+            rcolor = "#22c55e" if retest_ok else "#ef4444"
+            ax.scatter([rx], [float(level)], s=90, color=rcolor, edgecolors="#ffffff",
+                       linewidths=1.3, zorder=14)
+            ax.annotate("RETEST" if retest_ok else "RECLAIM", (rx, float(level)),
+                        xytext=(8, -18), textcoords="offset points", color=rcolor,
+                        fontsize=8, fontweight="bold", zorder=15)
+
+    # Keep the candle field clean: no position box, no side panel, no
+    # session labels, no decorative legend. The decision state belongs in
+    # the Telegram text report; the chart is the structural visual.
+
+    # Minimal title: bias + structural state. Everything else is deliberately
+    # left off the candle field so the eye can read the price action.
+    pattern_name = None
+    sp = family.get("scanned_pattern") or {}
+    if sp.get("name"):
+        pattern_name = sp.get("name")
+    elif family.get("active_pattern") and family.get("active_pattern") != "none":
+        pattern_name = str(family.get("active_pattern")).replace("_", " ").title()
+    title = f"{symbol}  |  M30  |  {direction} BIAS  |  {status.replace('_', ' ')}"
+    if pattern_name:
+        title += f"  |  {pattern_name}"
+    ax.set_title(title, color="#f8fafc", fontsize=12.5, fontweight="bold", pad=10)
 
     img_buf = io.BytesIO()
-    fig.savefig(img_buf, dpi=180, bbox_inches="tight", facecolor=fig.get_facecolor())
+    fig.savefig(img_buf, dpi=190, bbox_inches="tight", facecolor=fig.get_facecolor())
     img_buf.seek(0)
     plt.close(fig)
     return img_buf
+
+
+# ============================================================
+# OTE CHART -- 30M Fibonacci Fan + Expansion chart
+# ============================================================
+# OTE CHART -- clean structural OTE map
+def generate_ote_map(df: pd.DataFrame, symbol: str, analysis: Dict[str, Any], title_suffix: str = "") -> io.BytesIO:
+    """Educational OTE chart: candles + impulse anchors + 62-79% zone.
+    No fan rays, expansion clutter, or unconfirmed trade box.
+    """
+    chart_df, chart_len = _prepare_ohlc(df, max_bars=160)
+    offset = len(df) - chart_len
+    mc = mpf.make_marketcolors(up=COLORS["bull"], down=COLORS["bear"], edge="inherit", wick="inherit")
+    style = mpf.make_mpf_style(marketcolors=mc, gridstyle=":", gridcolor=COLORS["grid"], y_on_right=True,
+        facecolor=COLORS["bg"], figcolor=COLORS["bg"],
+        rc={"axes.labelcolor":COLORS["text"],"xtick.color":COLORS["text"],"ytick.color":COLORS["text"]})
+    fig, axlist = mpf.plot(chart_df, type="candle", style=style, volume=False, returnfig=True,
+        figsize=(12,6.8), warn_too_much_data=10000)
+    ax=axlist[0]
+    imp=analysis.get("impulse") or {}; zone=analysis.get("zone") or {}
+    start=imp.get("start"); end=imp.get("end")
+    if start:
+        x=start["index"]-offset
+        if 0<=x<chart_len:
+            ax.scatter([x],[start["price"]],s=45,zorder=8,marker="o"); ax.text(x,start["price"],"  Swing origin",fontsize=7,va="bottom")
+    if end:
+        x=end["index"]-offset
+        if 0<=x<chart_len:
+            ax.scatter([x],[end["price"]],s=45,zorder=8,marker="o"); ax.text(x,end["price"],"  Impulse extreme",fontsize=7,va="bottom")
+    if zone:
+        lo,hi=zone.get("low"),zone.get("high")
+        if lo is not None and hi is not None:
+            ax.axhspan(lo,hi,alpha=0.16,zorder=1)
+            ax.axhline(zone.get("62",lo),linestyle="--",linewidth=1,alpha=.65)
+            ax.axhline(zone.get("70.5",(lo+hi)/2),linestyle="-",linewidth=1.2,alpha=.8)
+            ax.axhline(zone.get("79",hi),linestyle="--",linewidth=1,alpha=.65)
+            ax.text(chart_len-2,zone.get("70.5")," OTE 70.5%",fontsize=7,va="center",fontweight="bold")
+    direction=analysis.get("direction",""); state=analysis.get("zone_state",analysis.get("status","WAIT"))
+    ax.set_title(f"{symbol}  OTE 62–79% | {direction} | {state}" + (f" | {title_suffix}" if title_suffix else ""), color=COLORS["text"],fontsize=10,fontweight="bold",pad=10)
+    prices=list(chart_df["High"])+list(chart_df["Low"])
+    if zone:
+        prices += [zone.get("low",0),zone.get("high",0),zone.get("70.5",0)]
+    if prices:
+        pmin,pmax=min(prices),max(prices); pad=(pmax-pmin)*.05 if pmax>pmin else 1
+        ax.set_ylim(pmin-pad,pmax+pad)
+    img_buf=io.BytesIO(); fig.savefig(img_buf,dpi=180,bbox_inches="tight",facecolor=fig.get_facecolor()); img_buf.seek(0); plt.close(fig); return img_buf

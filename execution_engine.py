@@ -68,6 +68,8 @@ class TradeStateManager:
         self.lot_mode = "MIN"
         self.watched_symbol = None
         self.watch_timeframe = DEFAULT_WATCH_TIMEFRAME
+        # Personal price-watch levels are analysis alerts, not trade orders.
+        self.watch_levels = {}
 
         # Strategy selection -- only Trendline and OTE remain, so this is
         # a straight either/or choice (no Hybrid/confluence mode).
@@ -86,6 +88,48 @@ class TradeStateManager:
 
     def clear_watched_symbol(self):
         self.watched_symbol = None
+
+    # ---------------- personal watch levels ----------------
+    def add_watch_level(self, symbol, level):
+        symbol = str(symbol).strip().upper()
+        level = float(level)
+        key = f"{symbol}|{level:.10f}"
+        self.watch_levels[key] = {
+            "symbol": symbol, "level": level, "last_price": None,
+            "state": "WAITING", "triggered": False, "created_at": time.time(),
+        }
+        return self.watch_levels[key]
+
+    def get_watch_levels(self):
+        return list(self.watch_levels.values())
+
+    def remove_watch_level(self, symbol, level):
+        key = f"{str(symbol).strip().upper()}|{float(level):.10f}"
+        return self.watch_levels.pop(key, None) is not None
+
+    def clear_watch_levels(self):
+        self.watch_levels.clear()
+
+    def update_watch_level(self, item, price):
+        """Return a one-time event when price crosses/touches a watched level."""
+        level = float(item["level"]); prev = item.get("last_price")
+        item["last_price"] = float(price)
+        if prev is None:
+            return None
+        tol = max(abs(level) * 0.00005, 1e-8)
+        crossed_up = prev < level and price >= level
+        crossed_down = prev > level and price <= level
+        touched = abs(price - level) <= tol
+        if crossed_up:
+            item["state"] = "CROSSED_UP"; item["triggered"] = True
+            return "CROSSED_UP"
+        if crossed_down:
+            item["state"] = "CROSSED_DOWN"; item["triggered"] = True
+            return "CROSSED_DOWN"
+        if touched and item.get("state") == "WAITING":
+            item["state"] = "TOUCHED"
+            return "TOUCHED"
+        return None
 
     # ---------------- watch timeframe ----------------
     def set_watch_timeframe(self, tf_code):

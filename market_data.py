@@ -17,6 +17,15 @@ import numpy as np
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
+import json
+import time
+
+try:
+    import websocket
+    WEBSOCKET_AVAILABLE = True
+except ImportError:
+    websocket = None
+    WEBSOCKET_AVAILABLE = False
 
 try:
     import MetaTrader5 as mt5
@@ -36,6 +45,90 @@ _TF_MAP = {
 }
 
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
+
+# -----------------------------------------------------------------------------
+# Deriv Synthetic Indices (public market-data API; no account token required)
+# -----------------------------------------------------------------------------
+DERIV_WS_URL = os.environ.get("DERIV_WS_URL", "wss://api.derivws.com/trading/v1/options/ws/public")
+DERIV_SYMBOL_ALIASES = {
+    "V10_1S": "1HZ10V", "V25_1S": "1HZ25V", "V50_1S": "1HZ50V",
+    "V75_1S": "1HZ75V", "V100_1S": "1HZ100V",
+    "V10": "R_10", "V25": "R_25", "V50": "R_50", "V75": "R_75", "V100": "R_100",
+    "VOLATILITY 10": "R_10", "VOLATILITY 25": "R_25", "VOLATILITY 50": "R_50",
+    "VOLATILITY 75": "R_75", "VOLATILITY 100": "R_100",
+    "VOLATILITY 10 (1S)": "1HZ10V", "VOLATILITY 25 (1S)": "1HZ25V",
+    "VOLATILITY 50 (1S)": "1HZ50V", "VOLATILITY 75 (1S)": "1HZ75V",
+    "VOLATILITY 100 (1S)": "1HZ100V",
+}
+DERIV_TF_SECONDS = {"1sec": 1, "5sec": 5, "10sec": 10, "1min": 60, "3min": 180,
+                   "5min": 300, "15min": 900, "30min": 1800, "1h": 3600, "4h": 14400}
+
+
+def is_deriv_symbol(symbol):
+    s = str(symbol or "").strip().upper()
+    return s.startswith("1HZ") or s.startswith("R_") or s in DERIV_SYMBOL_ALIASES
+
+
+def deriv_symbol(symbol):
+    s = str(symbol or "").strip().upper()
+    return DERIV_SYMBOL_ALIASES.get(s, s)
+
+
+def _deriv_request(payload, timeout=8):
+    if not WEBSOCKET_AVAILABLE:
+        raise RuntimeError("Deriv support requires the websocket-client package.")
+    ws = websocket.create_connection(DERIV_WS_URL, timeout=timeout)
+    try:
+        ws.send(json.dumps(payload))
+        while True:
+            raw = ws.recv()
+            data = json.loads(raw)
+            if data.get("error"):
+                raise RuntimeError(data["error"].get("message", "Deriv API error"))
+            return data
+    finally:
+        try: ws.close()
+        except Exception: pass
+
+
+def deriv_active_symbols():
+    """Return currently active Deriv underlying symbols (public, no auth)."""
+    data = _deriv_request({"active_symbols": "brief"})
+    return data.get("active_symbols", [])
+
+
+def deriv_fetch_tick(symbol):
+    """Return latest public Deriv quote for a symbol, or None."""
+    data = _deriv_request({"ticks": deriv_symbol(symbol), "subscribe": 0})
+    tick = data.get("tick") or {}
+    return float(tick["quote"]) if "quote" in tick else None
+
+
+def deriv_fetch_candles(symbol, tf_code="30min", count=250):
+    """Fetch OHLC candles from Deriv ticks_history and normalize to our dataframe."""
+    granularity = DERIV_TF_SECONDS.get(tf_code)
+    if granularity is None:
+        raise ValueError(f"Unsupported Deriv timeframe: {tf_code}")
+    data = _deriv_request({
+        "ticks_history": deriv_symbol(symbol), "end": "latest",
+        "style": "candles", "granularity": granularity, "count": int(count), "subscribe": 0
+    })
+    candles = data.get("candles", [])
+    if not candles:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
+    df = pd.DataFrame(candles)
+    df["datetime"] = pd.to_datetime(df["epoch"], unit="s", utc=True).dt.tz_convert(None)
+    df = df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close"}).set_index("datetime")
+    return df[["Open","High","Low","Close"]].astype(float).sort_index()
+
+
+def fetch_watch_price(symbol):
+    """Unified latest price for personal watch-level alerts."""
+    if is_deriv_symbol(symbol):
+        return deriv_fetch_tick(symbol)
+    bid, ask, _ = fetch_tick(symbol)
+    return (bid + ask) / 2.0 if bid is not None and ask is not None else None
+
 
 _TF_TWELVE_INTERVAL = {"1min": "1min", "3min": "1min", "5min": "5min", "15min": "15min", "30min": "30min", "1h": "1h", "4h": "4h"}
 _TF_YF_INTERVAL = {"1min": "1m", "3min": "1m", "5min": "5m", "15min": "15m", "30min": "30m", "1h": "60m", "4h": "60m"}
@@ -71,9 +164,11 @@ def is_mt5_ready():
 def fetch_candles(symbol, tf_code, count=250):
     """
     Returns a cleaned OHLC dataframe (Open/High/Low/Close columns, datetime
-    index, chronological order) sourced from MT5 if available, otherwise from
-    the Twelve Data / yfinance fallback.
+    index, chronological order) sourced from MT5/Deriv when applicable,
+    otherwise from the Twelve Data / yfinance fallback.
     """
+    if is_deriv_symbol(symbol):
+        return deriv_fetch_candles(symbol, tf_code, count)
     if is_mt5_ready():
         mt5_tf = _mt5_timeframe(tf_code)
         if mt5_tf is not None:

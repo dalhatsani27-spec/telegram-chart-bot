@@ -1804,493 +1804,346 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
         }
 
 
+def _trendline_structure_sequence(family: Dict[str, Any], limit: int = 4) -> str:
+    """Compact HH/HL/LH/LL sequence for the educational report."""
+    anns = [a for a in (family.get("trendline_annotations") or [])
+            if str(a.get("label")) in {"HH", "HL", "LH", "LL"}]
+    labels = [str(a["label"]) for a in anns[-limit:]]
+    return " → ".join(labels) if labels else "—"
+
+
+def _trendline_status_text(family: Dict[str, Any]) -> Dict[str, str]:
+    """Translate the raw lifecycle state into the short trader-facing state."""
+    tr = family.get("trendline_retest") or {}
+    status = str(tr.get("status") or "INTACT")
+    brk = family.get("breakout_grade") or {}
+    kind = str(family.get("family_kind") or "none").lower()
+
+    if status == "BREAK_RETEST_CONFIRMED":
+        return {
+            "breakout": "BROKEN",
+            "close": "✅ CONFIRMED",
+            "retest": "CONFIRMED",
+            "displacement": "CONFIRMED" if brk.get("strength") == "confirmed" else "DEVELOPING",
+            "status": status,
+        }
+    if status in ("BREAK_CONFIRMED", "BREAK_DEVELOPING"):
+        return {
+            "breakout": "BROKEN",
+            "close": "✅ CONFIRMED" if status == "BREAK_CONFIRMED" else "⏳ DEVELOPING",
+            "retest": "NOT CONFIRMED",
+            "displacement": "CONFIRMED" if brk.get("strength") == "confirmed" else "DEVELOPING",
+            "status": status,
+        }
+    if status == "FAKEOUT":
+        return {
+            "breakout": "FAKEOUT",
+            "close": "⚠️ RECLAIMED",
+            "retest": "INVALID",
+            "displacement": "FAILED",
+            "status": status,
+        }
+
+    return {
+        "breakout": "NOT BROKEN",
+        "close": "❌",
+        "retest": "NOT ACTIVE",
+        "displacement": "NOT ACTIVE",
+        "status": "INTACT",
+    }
+
+
 def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
+    """Clean educational Trendline report.
+
+    The report intentionally separates BIAS, STRUCTURE, BREAKOUT/RETEST and
+    DECISION. Raw detector output stays out of the main report so the trader
+    can see the actual market story instead of a pile of competing labels.
+    """
     if family.get("error"):
         return family["error"]
-    quality = family.get("primary_quality")
-    quality_tag = {
-        "unconfirmed": "⚠️ UNCONFIRMED (2 touches)",
-        "confirmed": "✅ CONFIRMED",
-        "crowded": "⚠️ CROWDED (5+ touches)",
-    }.get(quality, "")
-    short_sig = family.get("short_term_signal") or family.get("direction", "NEUTRAL")
-    lines = [
-        f"📐 TRENDLINE  |  {symbol}  (Short-term structure primary)",
-        f"Short-term Trend: {short_sig}",
-    ]
-    topdown = family.get("topdown")
-    if topdown:
-        lines.append(format_topdown_summary(topdown))
-        lines.append("—")
-    lines.append(
-        f"30M Family: {family.get('family_kind', '—').upper()}  |  "
-        f"Direction: {family.get('direction')}  |  Strength: {family.get('strength', 0)}/100"
-    )
-    if quality_tag:
-        lines.append(f"Trendline validation: {quality_tag} · {family.get('primary_touches', 0)} touches")
-    for r in family.get("gating_notes") or []:
-        lines.append(f"  • {r}")
-    for r in family.get("reasons") or []:
-        lines.append(f"  • {r}")
-    n_rails = len(family.get("family_lines") or [])
-    lines.append(f"Parallel rails: {n_rails}")
-    wedge = family.get("wedge")
-    if wedge:
-        lines.append(
-            f"Structure: {wedge['pattern']} · lower rail {wedge['lower']['touches']} touches, "
-            f"upper rail {wedge['upper']['touches']} touches · converging (gap {wedge['gap_end']:.5f})"
-        )
-    sp = family.get("scanned_pattern")
-    if sp:
-        lines.append(f"Chart pattern: {sp['name']} ({sp['bias']}, {sp['confidence']:.0f}%) — {sp['note']}")
 
-    mseq = family.get("market_sequence")
-    if mseq:
-        lines.append(
-            f"Market sequence: {mseq['sequence']} ({mseq['bias']}, {mseq['confidence']:.0f}%) — {mseq['note']}"
-        )
+    topdown = family.get("topdown") or {}
+    bias_4h = str(topdown.get("bias_4h") or topdown.get("bias") or "NEUTRAL").upper()
+    bias_1h = str(topdown.get("direction") or "NEUTRAL").upper()
+    bias_30 = str(family.get("short_term_signal") or family.get("direction") or "NEUTRAL").upper()
 
-    hz = family.get("horizontal_levels") or []
-    if hz:
-        lines.append("Horizontal levels: " + " · ".join(
-            f"{l['side'][0].upper()} {l['price']:.5f} ({l['touches']}x)" for l in hz))
-    obs = family.get("order_blocks") or []
-    if obs:
-        ob_lines = []
-        for ob in obs:
-            tag = "UNMITIGATED" if ob["freshness"] == "untested" else "mitigated"
-            ob_lines.append(
-                f"{ob['type'][:4].capitalize()} {ob['bottom']:.5f}-{ob['top']:.5f} "
-                f"({tag}, {ob['confidence']}%)"
-            )
-        lines.append("Order blocks: " + " · ".join(ob_lines))
-    mw = family.get("mw_pattern")
-    if mw:
-        lines.append(f"Pattern: {mw['name']} · neckline {mw['neckline']:.5f}")
-    if family.get("channel"):
-        w = family["channel"].get("width")
-        if w:
-            lines.append(f"Channel width: {w:.5f}")
-    projs = family.get("projections") or []
-    if projs:
-        lines.append("Projections: " + " · ".join(f"{p['label']} {p['price']:.5f}" for p in projs))
-    vp = family.get("volume_profile")
-    if vp:
-        lines.append(f"POC {vp['poc_price']:.5f} | VA {vp['value_area_low']:.5f}–{vp['value_area_high']:.5f}")
-    brk = family.get("breakout_grade")
-    if brk:
-        grade_tag = {"confirmed": "✅ CONFIRMED", "developing": "🟡 DEVELOPING",
-                     "weak": "🔴 WEAK / LIKELY FAKEOUT"}.get(brk["strength"], brk["strength"])
-        lines.append(
-            f"Breakout grade: {grade_tag} · {brk['penetration_atr']} ATR beyond · "
-            f"{brk['consecutive_closes']} consecutive close(s) · body {brk['body_ratio']}"
-        )
-        lines.append(f"Retest zone: {brk['retest_level']:.5f}")
-    tr = family.get("trendline_retest") or {}
-    if tr:
-        lines.append(f"Trendline lifecycle: {tr.get('status', 'INTACT')} — {tr.get('note', '')}")
+    primary_kind = str(family.get("family_kind") or "NONE").upper()
+    touches = int(family.get("primary_touches") or 0)
+    validation = str(family.get("primary_quality") or "").upper()
+    if validation == "CONFIRMED":
+        validation_text = "CONFIRMED"
+    elif validation == "CROWDED":
+        validation_text = "CROWDED"
+    else:
+        validation_text = "TENTATIVE"
+
+    lifecycle = _trendline_status_text(family)
+    structure = _trendline_structure_sequence(family)
+    structure_bias = "BULLISH" if bias_30 == "BUY" else "BEARISH" if bias_30 == "SELL" else "NEUTRAL"
+
+    # A setup is not an entry simply because the trendline points in one
+    # direction. Entry requires the actual confirmation engine to pass.
     pos = build_position_container(family)
-    if pos:
-        if pos.get("too_extended") or pos.get("entry") is None:
-            if pos.get("entry_note"):
-                lines.append(f"⚠️ {pos['entry_note']}")
-        else:
-            side = pos.get("side") or pos.get("direction") or "?"
-            lines.append(
-                f"Position: {side}  Entry {pos['entry']:.5f}  SL {pos['sl']:.5f}  "
-                f"TP1 {pos['tp1']:.5f}  TP2 {pos['tp2']:.5f}"
-            )
-            lines.append(
-                f"R:R 1:{pos.get('rr', 0):.2f}  (risk {pos.get('risk', 0):.5f} → reward {pos.get('reward', 0):.5f})"
-            )
-            if pos.get("liquidity_tp1"):
-                lines.append(f"TP1 liquidity: {pos['liquidity_tp1']}")
-            if pos.get("entry_note"):
-                lines.append(f"⚠️ {pos['entry_note']}")
+    confirmed_entry = bool(pos and pos.get("confirmed") and not family.get("force_wait_pattern"))
+    if lifecycle["status"] == "BREAK_RETEST_CONFIRMED" and pos:
+        confirmed_entry = bool(pos.get("confirmed"))
+
+    if confirmed_entry:
+        decision_status = "CONFIRMED"
+        decision_entry = "CONFIRMED"
+    else:
+        decision_status = "WAIT"
+        decision_entry = "NOT CONFIRMED"
+
+    # Keep confluence short: only the most useful structural facts.
+    obs = family.get("order_blocks") or []
+    bullish_ob = any(o.get("type") == "bullish" and o.get("freshness") == "untested" for o in obs)
+    bearish_ob = any(o.get("type") == "bearish" and o.get("freshness") == "untested" for o in obs)
+    mseq = family.get("market_sequence") or {}
+    seq = str(mseq.get("sequence") or "").upper()
+    seq_bias = str(mseq.get("bias") or "NEUTRAL").upper()
+    sp = family.get("scanned_pattern") or {}
+    sp_name = str(sp.get("name") or "")
+    sp_stage = str(family.get("pattern_stage") or sp.get("stage") or "").upper()
+
+    lines = [
+        f"📐 TRENDLINE ANALYSIS — {symbol} M30",
+        "",
+        "BIAS",
+        f"4H: {bias_4h}",
+        f"1H: {bias_1h}",
+        f"30M: {bias_30}",
+        "",
+        "TRENDLINE",
+        f"Type: {primary_kind if primary_kind != 'NONE' else 'NONE'}",
+        f"Touches: {touches}",
+        f"Validation: {validation_text}",
+        f"Status: {'INTACT' if lifecycle['status'] == 'INTACT' else lifecycle['breakout']}",
+        "",
+        "STRUCTURE",
+        f"{structure}",
+        f"Structure: {structure_bias}",
+        "",
+        "BREAKOUT",
+        f"Status: {lifecycle['breakout']}",
+        f"Close beyond trendline: {lifecycle['close']}",
+        "",
+        "RETEST",
+        f"Status: {lifecycle['retest']}",
+        "",
+        "CONFLUENCE",
+    ]
+
+    if bullish_ob and bias_30 == "BUY":
+        lines.append("Bullish OB: ✅")
+    elif bearish_ob and bias_30 == "SELL":
+        lines.append("Bearish OB: ✅")
+    else:
+        lines.append("Order block: —")
+
+    if seq:
+        icon = "✅" if (seq_bias == structure_bias) else "⚠️"
+        lines.append(f"{seq}: {icon} {seq_bias}")
+    if sp_name and sp_stage:
+        icon = "⚠️" if sp_stage in ("FORMING", "TRIGGERED") else "✅" if sp_stage == "CONFIRMED" else "🚫"
+        lines.append(f"{sp_name}: {icon} {sp_stage}")
+
+    lines += [
+        "",
+        "━━━━━━━━━━━━━━━━",
+        "",
+        "🎯 DECISION",
+        f"BIAS: {bias_30}",
+        f"STATUS: {decision_status}",
+        f"ENTRY: {decision_entry}",
+    ]
+
+    if not confirmed_entry:
+        waits = []
+        if lifecycle["status"] == "INTACT":
+            waits.append("trendline confirmation")
+        elif lifecycle["status"] in ("BREAK_CONFIRMED", "BREAK_DEVELOPING"):
+            waits.append("confirmed retest")
+        if lifecycle["status"] == "BREAK_RETEST_CONFIRMED":
+            waits.append("candle confirmation")
+        entry_rules = family.get("entry_rules") or {}
+        if entry_rules and not entry_rules.get("confirmed"):
+            waits.append(f"entry confirmation ({entry_rules.get('passed', 0)}/{entry_rules.get('required', 3)})")
+        if not waits:
+            waits.append("price-action confirmation")
+
+        lines.append("")
+        lines.append("WAIT FOR:")
+        for i, item in enumerate(dict.fromkeys(waits), 1):
+            lines.append(f"{i}. {item.capitalize()}")
+        lines.append("")
+        lines.append("No trade yet.")
+        return "\n".join(lines)
+
+    # Confirmed setup block — only shown after the confirmation gate passes.
+    direction = str(pos.get("direction") or bias_30).upper()
+    lines += [
+        "",
+        f"🔥 {direction} CONFIRMED",
+        "",
+        f"Trendline: {lifecycle['breakout']}",
+        f"Retest: {lifecycle['retest']}",
+        f"Structure: {structure_bias}",
+        f"Displacement: {lifecycle['displacement']}",
+        "",
+        f"ENTRY: {pos.get('entry'):.5f}",
+        f"SL: {pos.get('sl'):.5f}",
+        f"TP1: {pos.get('tp1'):.5f}",
+        f"TP2: {pos.get('tp2'):.5f}",
+        f"R:R: 1:{float(pos.get('rr') or 0):.1f}",
+    ]
     return "\n".join(lines)
 
 
 # ============================================================
-# OTE STRATEGY -- Fibonacci Fan + Fibonacci Expansion
-#
-#   1. Get 4H -> 1H top-down bias (topdown_engine.get_topdown_bias)
-#   2. Detect the most recent clear impulse swing on the 30M chart
-#   3. Draw Fibonacci Fan (38.2 / 50 / 61.8) from the impulse origin
-#   4. Entry zone = deeper fan lines (50-61.8%) acting as dynamic OTE
-#   5. Project Fibonacci Expansion targets (127.2 / 161.8 / 200 / 261.8)
-#   6. Gate/score the setup against the 4H/1H top-down bias
-#
-# Always runs and displays on the 30M timeframe.
+# OTE STRATEGY -- structural Fibonacci OTE
 # ============================================================
-
-FAN_RATIOS = [0.382, 0.50, 0.618]
-EXPANSION_RATIOS = [1.272, 1.618, 2.0, 2.618]
-
+OTE_RATIOS = [0.62, 0.705, 0.79]
+OTE_MIN_IMPULSE_ATR = 1.5
+OTE_MIN_PIVOT_GAP = 3
+OTE_CONFIRM_BODY_RATIO = 0.45
 
 def _ensure_atr(df: pd.DataFrame) -> pd.DataFrame:
     if "ATR" not in df.columns or df["ATR"].isna().all():
-        tr = pd.concat([
-            df["High"] - df["Low"],
-            (df["High"] - df["Close"].shift(1)).abs(),
-            (df["Low"] - df["Close"].shift(1)).abs(),
-        ], axis=1).max(axis=1)
-        df = df.copy()
-        df["ATR"] = tr.rolling(14, min_periods=1).mean()
+        tr = pd.concat([df["High"]-df["Low"], (df["High"]-df["Close"].shift(1)).abs(), (df["Low"]-df["Close"].shift(1)).abs()], axis=1).max(axis=1)
+        df=df.copy(); df["ATR"]=tr.rolling(14,min_periods=1).mean()
     return df
 
-
-def _find_impulse(df: pd.DataFrame, lookback: int = 120) -> Optional[Dict[str, Any]]:
-    """
-    Find the most recent clean impulse leg suitable for Fan + Expansion.
-
-    Returns:
-      {
-        "direction": "BUY" | "SELL",
-        "start": {index, price, type},
-        "end":   {index, price, type},
-        "retracement": {index, price, type} | None,   # point C if available
-        "leg_size": float,
-      }
-    """
-    if df is None or len(df) < 40:
-        return None
-
-    df = _ensure_atr(df)
-    n = len(df)
-    swings = zigzag_swings(df, depth=5, deviation_atr=0.40)
-    if len(swings) < 2:
-        swings = find_swings(df, left=3, right=3)
-    if len(swings) < 2:
-        return None
-
-    # Restrict to recent window
-    swings = [s for s in swings if s["index"] >= max(0, n - lookback)]
-    if len(swings) < 2:
-        return None
-
-    # Walk backwards looking for a strong directional leg
-    for i in range(len(swings) - 1, 0, -1):
-        a = swings[i - 1]
-        b = swings[i]
-        if a["type"] == b["type"]:
+def _refined_ote_pivots(df,left=3,right=3,min_leg_atr=0.85):
+    raw=find_fractal_pivots(df,left,right)
+    out=[]; atr=df["ATR"].values
+    for p in raw:
+        if not out: out.append(p); continue
+        q=out[-1]
+        if p["index"]-q["index"] < OTE_MIN_PIVOT_GAP:
+            if p["type"]==q["type"] and ((p["type"]=="high" and p["price"]>q["price"]) or (p["type"]=="low" and p["price"]<q["price"])): out[-1]=p
             continue
-
-        leg = abs(b["price"] - a["price"])
-        atr = float(df["ATR"].iloc[min(b["index"], n - 1)])
-        if atr <= 0:
-            atr = leg * 0.1
-        if leg < 1.2 * atr:          # require meaningful impulse
+        if p["type"]==q["type"]:
+            if (p["type"]=="high" and p["price"]>q["price"]) or (p["type"]=="low" and p["price"]<q["price"]): out[-1]=p
             continue
+        a=max(float(atr[min(p["index"],len(atr)-1)]),1e-9)
+        if abs(p["price"]-q["price"])>=min_leg_atr*a: out.append(p)
+    return out
 
-        # Bullish impulse: low -> high
-        if a["type"] == "low" and b["type"] == "high" and b["price"] > a["price"]:
-            retrace = None
-            for s in swings[i + 1:]:
-                if s["type"] == "low" and s["price"] < b["price"]:
-                    retrace = s
-                    break
-            return {"direction": "BUY", "start": a, "end": b, "retracement": retrace, "leg_size": leg}
+def _fib_retrace_price(start,end,r,direction):
+    leg=abs(end-start)
+    return end-leg*r if direction=="BUY" else end+leg*r
 
-        # Bearish impulse: high -> low
-        if a["type"] == "high" and b["type"] == "low" and b["price"] < a["price"]:
-            retrace = None
-            for s in swings[i + 1:]:
-                if s["type"] == "high" and s["price"] > b["price"]:
-                    retrace = s
-                    break
-            return {"direction": "SELL", "start": a, "end": b, "retracement": retrace, "leg_size": leg}
+def _find_ote_impulse(df,topdown=None,lookback=140):
+    if df is None or len(df)<50:return None
+    pivots=[p for p in _refined_ote_pivots(df) if p["index"]>=max(0,len(df)-lookback)]
+    if len(pivots)<2:return None
+    td=(topdown or {}).get("direction","NEUTRAL")
+    structure=analyse_structure(df,left=3,right=3,lookback=min(100,len(df)-1))
+    sb=structure.get("bias","NEUTRAL"); atrs=df["ATR"].values; candidates=[]
+    for i in range(1,len(pivots)):
+        a,b=pivots[i-1],pivots[i]
+        if a["type"]==b["type"]:continue
+        leg=abs(float(b["price"])-float(a["price"])); atr=max(float(atrs[min(b["index"],len(df)-1)]),1e-9); mult=leg/atr
+        if mult<OTE_MIN_IMPULSE_ATR:continue
+        if a["type"]=="low" and b["type"]=="high" and b["price"]>a["price"]:d="BUY"
+        elif a["type"]=="high" and b["type"]=="low" and b["price"]<a["price"]:d="SELL"
+        else:continue
+        score=mult*10+(18 if td==d else 0)+(15 if sb==d else 0)+b["index"]/len(df)*10
+        candidates.append((score,b["index"],{"direction":d,"start":a,"end":b,"leg_size":leg,"atr_multiple":mult,"structure":structure,"pivots":pivots}))
+    if not candidates:return None
+    candidates.sort(key=lambda x:(x[0],x[1]),reverse=True); imp=candidates[0][2]
+    if sb not in ("NEUTRAL",imp["direction"]) and td!=imp["direction"]:return None
+    retrace=None
+    for q in pivots:
+        if q["index"]<=imp["end"]["index"]:continue
+        if imp["direction"]=="BUY" and q["type"]=="low" and q["price"]<imp["end"]["price"]:retrace=q;break
+        if imp["direction"]=="SELL" and q["type"]=="high" and q["price"]>imp["end"]["price"]:retrace=q;break
+    imp["retracement"]=retrace; imp["structure_bias"]=sb; imp["structure_event"]=structure.get("last_event")
+    return imp
 
-    return None
+def _build_ote_zone(impulse):
+    start=float(impulse["start"]["price"]);end=float(impulse["end"]["price"]);d=impulse["direction"]
+    vals={"62":_fib_retrace_price(start,end,.62,d),"70.5":_fib_retrace_price(start,end,.705,d),"79":_fib_retrace_price(start,end,.79,d)}
+    return {**vals,"low":min(vals.values()),"high":max(vals.values()),"direction":d,"origin":start,"extreme":end,"leg_size":abs(end-start)}
 
+def _zone_state(close,zone,atr):
+    tol=max(atr*.10,1e-9)
+    if zone["low"]-tol<=close<=zone["high"]+tol:return "ACTIVE"
+    if close<zone["low"]-tol:return "TOO_DEEP / INVALID"
+    return "WAITING"
 
-def _build_fan(impulse: Dict[str, Any], n: int) -> List[Dict[str, Any]]:
-    """Build Fibonacci Fan rays from impulse start -> end, extendable to any bar index."""
-    x0 = impulse["start"]["index"]
-    y0 = impulse["start"]["price"]
-    x1 = impulse["end"]["index"]
-    y1 = impulse["end"]["price"]
-    dy = y1 - y0
+def _find_ote_poi(df,zone,direction):
+    try:obs=detect_order_blocks(df,max_per_side=3,min_confidence=45)
+    except Exception:obs=[]
+    wanted="bullish" if direction=="BUY" else "bearish"; candidates=[]
+    for ob in obs:
+        if str(ob.get("type","")).lower()!=wanted:continue
+        top=float(ob.get("top",0));bottom=float(ob.get("bottom",0))
+        if top<=0 or bottom<=0:continue
+        overlap=max(0.0,min(top,zone["high"])-max(bottom,zone["low"]))
+        dist=0.0 if overlap>0 else min(abs(top-zone["low"]),abs(bottom-zone["high"]))
+        candidates.append((dist,-overlap,{"type":wanted,"top":top,"bottom":bottom,"overlap":overlap,"confidence":ob.get("confidence"),"freshness":ob.get("freshness"),"grade":ob.get("grade")}))
+    if not candidates:return None
+    candidates.sort(key=lambda x:(x[0],x[1]));return candidates[0][2]
 
-    fans = []
-    for r in FAN_RATIOS:
-        y_div = y0 + dy * r
-        slope = (y_div - y0) / max(x1 - x0, 1)
-        y_end = y0 + slope * (n - 1 - x0)
-        fans.append({
-            "ratio": r, "label": f"{r*100:.1f}%",
-            "x0": x0, "y0": y0, "x1": x1, "y1": y_div,
-            "slope": slope, "y_at_end": y_end,
-        })
-    return fans
+def _ote_confirmation(df,direction,zone):
+    if len(df)<2:return {"confirmed":False,"label":None,"displacement":False}
+    o=float(df["Open"].iloc[-1]);h=float(df["High"].iloc[-1]);l=float(df["Low"].iloc[-1]);c=float(df["Close"].iloc[-1]);atr=max(float(df["ATR"].iloc[-1]),1e-9);rng=max(h-l,1e-9)
+    displacement=rng>=atr and abs(c-o)/rng>=OTE_CONFIRM_BODY_RATIO
+    near=zone["low"]-.15*atr<=c<=zone["high"]+.15*atr
+    confirmed=near and displacement and ((direction=="BUY" and c>o) or (direction=="SELL" and c<o))
+    return {"confirmed":bool(confirmed),"label":"Displacement candle" if confirmed else None,"displacement":bool(displacement)}
 
-
-def _fan_price_at(fan: Dict, x: float) -> float:
-    return fan["y0"] + fan["slope"] * (x - fan["x0"])
-
-
-def _build_expansion(impulse: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Fibonacci Expansion (3-point when a retracement point exists, else simple extension)."""
-    start = impulse["start"]["price"]
-    end = impulse["end"]["price"]
-    leg = impulse["leg_size"]
-    direction = impulse["direction"]
-    retrace = impulse.get("retracement")
-
-    expansions = []
-    if retrace is not None:
-        c = retrace["price"]
-        for r in EXPANSION_RATIOS:
-            price = c + leg * r if direction == "BUY" else c - leg * r
-            expansions.append({"ratio": r, "label": f"{r*100:.1f}%", "price": float(price), "from_point": "C"})
-    else:
-        for r in EXPANSION_RATIOS:
-            price = end + leg * (r - 1.0) if direction == "BUY" else end - leg * (r - 1.0)
-            expansions.append({"ratio": r, "label": f"{r*100:.1f}%", "price": float(price), "from_point": "B"})
-    return expansions
-
-
-def _evaluate_entry(
-    df: pd.DataFrame,
-    impulse: Dict[str, Any],
-    fans: List[Dict],
-    expansions: List[Dict],
-    topdown: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """
-    Decide if price is currently in a valid OTE entry zone on the Fan,
-    gate the score against the 4H/1H top-down bias, and build the ticket.
-    """
-    n = len(df)
-    close = float(df["Close"].iloc[-1])
-    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else abs(impulse["leg_size"]) * 0.1
-    direction = impulse["direction"]
-
-    fan_prices = sorted(
-        [{"ratio": f["ratio"], "label": f["label"], "price": _fan_price_at(f, n - 1)} for f in fans],
-        key=lambda x: x["price"],
-    )
-
-    in_zone = False
-    nearest_fan = None
-    min_dist = 1e18
-    for fp in fan_prices:
-        dist = abs(close - fp["price"])
-        if dist < min_dist:
-            min_dist = dist
-            nearest_fan = fp
-        if dist <= atr * 0.45:
-            in_zone = True
-
-    reasons = []
-    score = 40
-
-    if impulse["leg_size"] >= 2.0 * atr:
-        score += 15
-        reasons.append(f"Strong impulse ({impulse['leg_size']/atr:.1f} ATR)")
-    else:
-        reasons.append(f"Moderate impulse ({impulse['leg_size']/atr:.1f} ATR)")
-
-    if in_zone:
-        score += 25
-        reasons.append(f"Price interacting with Fan {nearest_fan['label']}")
-    else:
-        lowest = fan_prices[0]["price"]
-        highest = fan_prices[-1]["price"]
-        if direction == "BUY" and lowest <= close <= highest + atr * 0.3:
-            score += 10
-            reasons.append("Price inside Fan channel")
-        elif direction == "SELL" and highest >= close >= lowest - atr * 0.3:
-            score += 10
-            reasons.append("Price inside Fan channel")
-
-    if nearest_fan and nearest_fan["ratio"] >= 0.50:
-        score += 12
-        reasons.append(f"Deep Fan zone ({nearest_fan['label']}) — OTE quality")
-
-    if expansions:
-        score += 8
-        reasons.append(f"{len(expansions)} Expansion targets projected")
-
-    # --- gate against the 4H/1H top-down bias (advisory only) ---
-    # Short-term impulse / trendline structure is PRIMARY. Higher TF no longer blocks.
-    td_dir = (topdown or {}).get("direction", "NEUTRAL")
-    td_allowed = bool((topdown or {}).get("allowed"))
-    if td_dir in ("BUY", "SELL"):
-        if td_dir == direction and td_allowed:
-            score += 12
-            reasons.append(f"✅ Short-term impulse ({direction}) aligned with 4H/1H top-down ({td_dir})")
-        elif td_dir == direction and not td_allowed:
-            reasons.append(f"Short-term impulse ({direction}) matches top-down but 1H permission pending")
-        else:
-            score -= 8
-            reasons.append(
-                f"Short-term impulse: {direction} — higher TF still {td_dir} (advisory only, not blocking)"
-            )
-    else:
-        reasons.append(f"Short-term impulse: {direction} — higher TF neutral")
-
-    # Build ticket
-    entry = close
-    if direction == "BUY":
-        sl_candidates = [fp["price"] for fp in fan_prices] + [impulse["start"]["price"]]
-        sl = min(sl_candidates) - atr * 0.35
-        tps = sorted([e["price"] for e in expansions if e["price"] > entry])
-    else:
-        sl_candidates = [fp["price"] for fp in fan_prices] + [impulse["start"]["price"]]
-        sl = max(sl_candidates) + atr * 0.35
-        tps = sorted([e["price"] for e in expansions if e["price"] < entry], reverse=True)
-
-    tp1 = tps[0] if tps else (entry + atr * 1.8 if direction == "BUY" else entry - atr * 1.8)
-    tp2 = tps[1] if len(tps) > 1 else (entry + atr * 3.0 if direction == "BUY" else entry - atr * 3.0)
-
-    risk = abs(entry - sl)
-    reward = abs(tp1 - entry)
-    rr = (reward / risk) if risk > 0 else 0.0
-
-    score = max(0, min(100, score))
-    # No longer invalidate just because higher TF disagrees. RR floor
-    # matches MIN_RR used by the Trendline strategy's position container --
-    # a signal below this is not worth the risk regardless of how clean
-    # the Fan/Expansion read looks.
-    valid = direction in ("BUY", "SELL") and score >= 58 and in_zone and rr >= MIN_RR
-
-    ticket = {
-        "side": "LONG" if direction == "BUY" else "SHORT",
-        "direction": direction,
-        "entry": float(entry), "sl": float(sl), "tp1": float(tp1), "tp2": float(tp2),
-        "rr": round(rr, 2), "risk": float(risk), "reward": float(reward),
-        "order_type": "MARKET",
-        "nearest_fan": nearest_fan["label"] if nearest_fan else None,
-    }
-
-    return {
-        "in_zone": in_zone, "nearest_fan": nearest_fan, "score": score,
-        "reasons": reasons, "valid": valid,
-        "ticket": ticket if valid else None, "fan_prices": fan_prices,
-    }
-
+def _evaluate_ote(df,impulse,topdown=None):
+    close=float(df["Close"].iloc[-1]);atr=max(float(df["ATR"].iloc[-1]),1e-9);d=impulse["direction"];zone=_build_ote_zone(impulse);state=_zone_state(close,zone,atr);poi=_find_ote_poi(df,zone,d);confirm=_ote_confirmation(df,d,zone);reasons=[];score=40
+    if impulse["atr_multiple"]>=2:score+=15;reasons.append(f"Valid displacement leg ({impulse['atr_multiple']:.1f} ATR)")
+    else:score+=8;reasons.append(f"Moderate impulse ({impulse['atr_multiple']:.1f} ATR)")
+    td=(topdown or {}).get("direction","NEUTRAL")
+    if td==d:score+=15;reasons.append(f"HTF bias aligned ({td})")
+    elif td in ("BUY","SELL"):score-=12;reasons.append(f"HTF bias conflicts ({td})")
+    if impulse.get("structure_event") in ("BOS","MSS","CHoCH") and impulse.get("structure_bias")==d:score+=12;reasons.append(f"Structure confirmation: {impulse['structure_event']} ({d})")
+    elif impulse.get("structure_bias")==d:score+=7;reasons.append("Directional structure aligned")
+    else:reasons.append("Structural confirmation pending")
+    if state=="ACTIVE":score+=18;reasons.append("Price is inside the 62%-79% OTE zone")
+    elif state=="WAITING":reasons.append("Price has not reached the OTE zone")
+    else:score-=15;reasons.append("Retracement has exceeded the 79% boundary")
+    if poi and poi.get("overlap",0)>0:score+=10;reasons.append("Directional OB overlaps OTE")
+    elif poi:reasons.append("Directional OB is nearby, outside OTE")
+    else:reasons.append("No qualifying directional OB inside/near OTE")
+    if confirm["confirmed"]:score+=15;reasons.append("Displacement candle confirms the OTE reaction")
+    else:reasons.append("Entry confirmation not yet present")
+    score=int(max(0,min(100,score)))
+    entry=close;sl=impulse["start"]["price"]-atr*.20 if d=="BUY" else impulse["start"]["price"]+atr*.20;tp1=impulse["end"]["price"];tp2=impulse["end"]["price"]+impulse["leg_size"]*.618 if d=="BUY" else impulse["end"]["price"]-impulse["leg_size"]*.618
+    risk=abs(entry-sl);rr=abs(tp1-entry)/risk if risk>0 else 0
+    valid=d in ("BUY","SELL") and state=="ACTIVE" and confirm["confirmed"] and td in ("NEUTRAL",d) and rr>=MIN_RR
+    ticket={"side":"LONG" if d=="BUY" else "SHORT","direction":d,"entry":entry,"sl":sl,"tp1":tp1,"tp2":tp2,"rr":round(rr,2),"risk":risk,"reward":abs(tp1-entry),"order_type":"MARKET"} if valid else None
+    return {"zone":zone,"zone_state":state,"poi":poi,"confirmation":confirm,"score":score,"reasons":reasons,"valid":valid,"status":"CONFIRMED" if valid else state,"ticket":ticket,"entry":entry,"sl":sl,"tp1":tp1,"tp2":tp2,"rr":rr}
 
 def run_ote_analysis(symbol: str, df: pd.DataFrame = None) -> Dict[str, Any]:
-    """
-    Full OTE analysis for a symbol: 4H/1H top-down bias, then impulse +
-    Fan + Expansion detection and entry evaluation on the 30M chart.
-    Always fetches/displays on 30M (falls back to 15M only if 30M truly
-    doesn't have enough bars yet).
-    """
-    topdown = get_topdown_bias(symbol)
-
-    timeframe = "30min"
-    if df is None:
-        df = market_data.fetch_candles(symbol, "30min", count=220)
-        if df is None or df.empty or len(df) < 50:
-            df = market_data.fetch_candles(symbol, "15min", count=220)
-            timeframe = "15min (30M had insufficient history)"
-
-    if df is None or df.empty or len(df) < 50:
-        return {
-            "error": "Insufficient 30M data for OTE analysis",
-            "direction": "NEUTRAL", "score": 0, "valid": False,
-            "symbol": symbol, "topdown": topdown,
-        }
-
-    df = _ensure_atr(df)
-    n = len(df)
-
-    impulse = _find_impulse(df)
-    if impulse is None:
-        return {
-            "error": "No clear impulse swing found for Fan / Expansion",
-            "direction": "NEUTRAL", "score": 0, "valid": False,
-            "df": df, "timeframe": timeframe, "symbol": symbol, "topdown": topdown,
-        }
-
-    fans = _build_fan(impulse, n)
-    expansions = _build_expansion(impulse)
-    entry_eval = _evaluate_entry(df, impulse, fans, expansions, topdown=topdown)
-
-    direction = impulse["direction"]
-    score = entry_eval["score"]
-    valid = entry_eval["valid"]
-    reasons = entry_eval["reasons"]
-
-    return {
-        "strategy": "OTE",
-        "direction": direction if valid else "NEUTRAL",
-        "score": score,
-        "reasons": reasons,
-        "valid": valid,
-        "impulse": impulse,
-        "fans": fans,
-        "expansions": expansions,
-        "fan_prices": entry_eval["fan_prices"],
-        "nearest_fan": entry_eval["nearest_fan"],
-        "in_zone": entry_eval["in_zone"],
-        "position": entry_eval["ticket"],
-        "ticket": entry_eval["ticket"],
-        "df": df,
-        "timeframe": timeframe,
-        "symbol": symbol,
-        "topdown": topdown,
-    }
-
+    topdown=get_topdown_bias(symbol);df=market_data.fetch_candles(symbol,"30min",count=240) if df is None else df
+    if df is None or df.empty or len(df)<60:return {"error":"Insufficient 30M data for OTE analysis","direction":"NEUTRAL","score":0,"valid":False,"symbol":symbol,"topdown":topdown}
+    df=_ensure_atr(df);impulse=_find_ote_impulse(df,topdown)
+    if impulse is None:return {"error":"No valid structural impulse for OTE (waiting for meaningful BOS/displacement leg).","direction":"NEUTRAL","score":0,"valid":False,"df":df,"timeframe":"30min","symbol":symbol,"topdown":topdown}
+    ev=_evaluate_ote(df,impulse,topdown)
+    return {"strategy":"OTE","direction":impulse["direction"],"score":ev["score"],"reasons":ev["reasons"],"valid":ev["valid"],"status":ev["status"],"impulse":impulse,"zone":ev["zone"],"zone_state":ev["zone_state"],"poi":ev["poi"],"confirmation":ev["confirmation"],"position":ev["ticket"],"ticket":ev["ticket"],"entry":ev["entry"],"sl":ev["sl"],"tp1":ev["tp1"],"tp2":ev["tp2"],"rr":ev["rr"],"df":df,"timeframe":"30min","symbol":symbol,"topdown":topdown}
 
 def format_ote_report(analysis: Dict[str, Any]) -> str:
-    symbol = analysis.get("symbol", "")
+    symbol=analysis.get("symbol","")
     if analysis.get("error"):
-        lines = [f"🎯 OTE  (Fib Fan + Expansion)  |  {symbol}  (4H → 1H → 30M top-down)"]
-        topdown = analysis.get("topdown")
-        if topdown:
-            lines.append(format_topdown_summary(topdown))
-            lines.append("—")
-        lines.append(analysis["error"])
-        return "\n".join(lines)
-
-    direction = analysis.get("direction", "NEUTRAL")
-    score = analysis.get("score", 0)
-    valid = analysis.get("valid", False)
-    impulse = analysis.get("impulse") or {}
-    fans = analysis.get("fans") or []
-    expansions = analysis.get("expansions") or []
-    ticket = analysis.get("ticket")
-    nearest = analysis.get("nearest_fan")
-    topdown = analysis.get("topdown")
-
-    lines = [f"🎯 OTE  (Fib Fan + Expansion)  |  {symbol}  (4H → 1H → 30M top-down)"]
-    if topdown:
-        lines.append(format_topdown_summary(topdown))
-        lines.append("—")
-    lines.append(f"30M Direction: {direction}  |  Score: {score}/100  |  {'✅ VALID' if valid else '⏳ WAIT'}")
-    lines.append(
-        f"Impulse: {impulse.get('start', {}).get('type', '?')} → {impulse.get('end', {}).get('type', '?')}  "
-        f"({impulse.get('leg_size', 0):.5f})"
-    )
-
-    if fans:
-        lines.append("Fan rays: " + " · ".join(f["label"] for f in fans))
-    if nearest:
-        lines.append(f"Nearest Fan: {nearest.get('label')} @ {nearest.get('price', 0):.5f}")
-    if expansions:
-        lines.append("Expansion targets: " + " · ".join(f"{e['label']} {e['price']:.5f}" for e in expansions[:3]))
-
-    for r in analysis.get("reasons") or []:
-        lines.append(f"  • {r}")
-
-    if ticket and ticket.get("entry") is not None:
-        side = ticket.get("side") or ticket.get("direction") or "?"
-        lines.append(
-            f"Ticket: {side}  Entry {ticket['entry']:.5f}  "
-            f"SL {ticket['sl']:.5f}  TP1 {ticket['tp1']:.5f}  TP2 {ticket['tp2']:.5f}"
-        )
-        lines.append(f"R:R 1:{ticket.get('rr', 0):.2f}")
-    elif ticket and ticket.get("entry_note"):
-        lines.append(f"⚠️ {ticket['entry_note']}")
-
+        return f"🎯 OTE ANALYSIS — {symbol} M30\n\n{analysis['error']}"
+    imp=analysis.get("impulse") or {};z=analysis.get("zone") or {};poi=analysis.get("poi");conf=analysis.get("confirmation") or {};td=analysis.get("topdown") or {};d=analysis.get("direction","NEUTRAL");valid=analysis.get("valid",False);state=analysis.get("status","WAIT")
+    td_dir=td.get("direction","NEUTRAL")
+    lines=[f"🎯 OTE ANALYSIS — {symbol} M30","","BIAS",f"4H: {td_dir}",f"1H: {td_dir}",f"30M: {d}","","IMPULSE",f"{imp.get('start',{}).get('type','?').upper()} → {imp.get('end',{}).get('type','?').upper()}",f"Leg: {imp.get('leg_size',0):.5f} ({imp.get('atr_multiple',0):.1f} ATR)",f"Structure: {imp.get('structure_bias','NEUTRAL')}",f"Event: {imp.get('structure_event') or 'PENDING'}","","OTE ZONE",f"62%: {z.get('62',0):.5f}",f"70.5%: {z.get('70.5',0):.5f}",f"79%: {z.get('79',0):.5f}",f"Status: {analysis.get('zone_state','WAITING')}","","CONFLUENCE",f"Directional OB: {'✅' if poi else '❌'}",f"OB overlaps OTE: {'✅' if poi and poi.get('overlap',0)>0 else '❌'}",f"Displacement: {'✅' if conf.get('confirmed') else '❌'}","","━━━━━━━━━━━━━━━━","","🎯 DECISION",f"BIAS: {d}",f"STATUS: {'CONFIRMED' if valid else ('ACTIVE — WAIT' if state=='ACTIVE' else 'WAIT')}",f"ENTRY: {'CONFIRMED' if valid else 'NOT CONFIRMED'}"]
+    if not valid:
+        lines += ["","WAIT FOR:","1. Price to enter the 62–79% OTE zone" if analysis.get("zone_state")!="ACTIVE" else "1. OTE reaction","2. Directional POI reaction/alignment","3. Displacement confirmation","4. Structure to remain valid","","No trade yet."]
+    else:
+        t=analysis.get("ticket") or {};lines += ["","🔥 OTE CONFIRMED","",f"Direction: {d}","Structure: CONFIRMED","Displacement: CONFIRMED",f"Entry: {t.get('entry',0):.5f}",f"SL: {t.get('sl',0):.5f}",f"TP1: {t.get('tp1',0):.5f}",f"TP2: {t.get('tp2',0):.5f}",f"R:R: 1:{t.get('rr',0):.2f}"]
     return "\n".join(lines)
-
 
 def build_ote_ticket(analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return analysis.get("ticket")
-
 
 # ============================================================
 # TRENDLINE STRATEGY ORCHESTRATION -- full top-down cascade:

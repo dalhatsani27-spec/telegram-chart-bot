@@ -20,7 +20,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 
 import market_data
 from market_analysis import direction_banner
-from chart_engine import generate_trendline_map, generate_ote_map
+from chart_engine import generate_trendline_educational_map, generate_ote_map
 import strategies
 import execution_engine as engine
 from execution_engine import state as ts_state
@@ -117,6 +117,12 @@ ASSET_CONTAINER = {
     "Crypto": ["BTCUSD", "ETHUSD"],
     "Indices": ["US30", "NAS100", "SPX500"],
     "Stocks": ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "GOOGL", "META"],
+    "Deriv Synthetic": [
+        "Volatility 10 (1s)", "Volatility 25 (1s)", "Volatility 50 (1s)",
+        "Volatility 75 (1s)", "Volatility 100 (1s)",
+        "Volatility 10", "Volatility 25", "Volatility 50",
+        "Volatility 75", "Volatility 100",
+    ],
 }
 
 
@@ -141,7 +147,9 @@ def get_home_menu():
     keyboard = [
         [InlineKeyboardButton(f"🧠 STRATEGY: {strat_label}", callback_data="menu_strategy")],
         [InlineKeyboardButton("📐  Trendline (4H→1H→30M)", callback_data="menu_trendline")],
-        [InlineKeyboardButton("🎯  OTE (Fib Fan+Exp, 30M)", callback_data="menu_ote")],
+        [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],
+        [InlineKeyboardButton("👁  Watch Price Level", callback_data="menu_price_watch"),
+         InlineKeyboardButton("📋  My Watch Levels", callback_data="show_price_watches")],
         [InlineKeyboardButton("🔎  Custom Ticker", callback_data="prompt_custom_ticker")],
         [InlineKeyboardButton("📱  CONTROL PANEL", callback_data="menu_mobile_panel")],
         [InlineKeyboardButton("ℹ️  HELP & GUIDE", callback_data="menu_help")],
@@ -205,6 +213,7 @@ def get_category_keyboard(prefix, back_callback, extra_row=None):
          InlineKeyboardButton("🪙 Crypto", callback_data=f"{prefix}|Crypto")],
         [InlineKeyboardButton("📈 Indices", callback_data=f"{prefix}|Indices"),
          InlineKeyboardButton("📈 Stocks", callback_data=f"{prefix}|Stocks")],
+        [InlineKeyboardButton("⚡ Deriv Synthetic", callback_data=f"{prefix}|Deriv Synthetic")],
     ]
     if extra_row:
         kb.append(extra_row)
@@ -250,6 +259,41 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # hardcoded -- if no symbol is selected, this loop does nothing until you
 # pick one. Any error is logged (not swallowed) so a broken scan is visible
 # instead of just silently never producing a ticket.
+PRICE_WATCH_SCAN_INTERVAL_SECONDS = 2
+
+async def background_price_watch_scanner():
+    """Personal analysis alerts. Independent of trading mode/EA availability."""
+    await asyncio.sleep(5)
+    while True:
+        try:
+            watches = ts_state.get_watch_levels()
+            symbols = sorted({w["symbol"] for w in watches if not w.get("triggered")})
+            for symbol in symbols:
+                try:
+                    price = await asyncio.to_thread(market_data.fetch_watch_price, symbol)
+                    if price is None:
+                        continue
+                    for w in watches:
+                        if w["symbol"] != symbol or w.get("triggered"):
+                            continue
+                        event = ts_state.update_watch_level(w, price)
+                        if event:
+                            level = w["level"]
+                            side = "above" if event == "CROSSED_UP" else "below" if event == "CROSSED_DOWN" else "at"
+                            push_telegram_message(
+                                f"🔔 WATCH LEVEL ALERT — {symbol}\n\n"
+                                f"Level: {level:.10f}".rstrip("0").rstrip(".") + f"\n"
+                                f"Price: {price:.10f}".rstrip("0").rstrip(".") + f"\n"
+                                f"Event: {event.replace('_', ' ')}\n\n"
+                                f"Price is now {side} your watched level.\n"
+                                "This is an analysis alert — confirm structure/trendline/pattern/OTE before trading."
+                            )
+                except Exception as e:
+                    print(f"[price_watch] {symbol}: {e!r}")
+        except Exception as e:
+            print(f"[price_watch] scanner failure: {e!r}")
+        await asyncio.sleep(PRICE_WATCH_SCAN_INTERVAL_SECONDS)
+
 WATCHLIST_SCAN_INTERVAL_SECONDS = 300  # 5 minutes -- keeps well under free-tier rate limits
 _last_scan_error_notified = {"symbol": None, "at": 0}
 
@@ -295,7 +339,7 @@ async def send_trendline_analysis(context, chat_id, symbol):
                 pos = strategies.build_position_container(family)
                 chart_payload = dict(family)
                 chart_payload["position"] = pos
-                chart_img = generate_trendline_map(df_tl, symbol, chart_payload, title_suffix=ts_str)
+                chart_img = generate_trendline_educational_map(df_tl, symbol, chart_payload, title_suffix=ts_str)
                 await context.bot.send_photo(
                     chat_id=chat_id, photo=chart_img,
                     caption=f"{symbol} Trendline (30M) | {ts_str}",
@@ -346,7 +390,7 @@ async def send_ote_analysis(context, chat_id, symbol):
                 chart_img = generate_ote_map(df_ote, symbol, analysis, title_suffix=ts_str)
                 await context.bot.send_photo(
                     chat_id=chat_id, photo=chart_img,
-                    caption=f"{symbol} OTE (Fib Fan + Expansion, 30M) | {ts_str}",
+                    caption=f"{symbol} OTE (62–79% OTE, 30M) | {ts_str}",
                 )
             else:
                 print(f"[send_ote_analysis] {symbol}: no df in analysis, skipping chart. "
@@ -383,9 +427,27 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     global primary_chat_id
     chat_id = update.effective_chat.id
     primary_chat_id = chat_id
-    symbol = (update.message.text or "").strip().upper()
-    if not symbol:
+    raw_text = (update.message.text or "").strip()
+    if not raw_text:
         return
+    # If the user is entering a personal watch level, do not interpret it as a ticker.
+    if chat_id in _pending_price_watch:
+        symbol = _pending_price_watch.pop(chat_id)
+        try:
+            level = float(raw_text.replace(",", ""))
+            if level <= 0:
+                raise ValueError
+            ts_state.add_watch_level(symbol, level)
+            await update.message.reply_text(
+                f"👁 WATCH CREATED\\n\\n{symbol}\\nLevel: {level:.10f}".rstrip("0").rstrip(".") +
+                "\\n\\nI will alert you when price touches or crosses this level.",
+                reply_markup=get_home_menu()
+            )
+        except ValueError:
+            _pending_price_watch[chat_id] = symbol
+            await update.message.reply_text("❌ Invalid price. Send a positive numeric price, e.g. 4385.50.")
+        return
+    symbol = raw_text.upper()
     await update.message.reply_text(f"Running {ts_state.strategy_label()} analysis for {symbol}...")
     if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:
         await send_ote_analysis(context, chat_id, symbol)
@@ -457,7 +519,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "menu_ote":
         extra = [InlineKeyboardButton("🔎 Custom Ticker", callback_data="prompt_custom_ticker_ote")]
         await query.edit_message_text(
-            "🎯 OTE (Fib Fan + Expansion, 4H → 1H → 30M top-down):",
+            "🎯 OTE (62–79% OTE, 4H → 1H → 30M top-down):",
             reply_markup=get_category_keyboard("cat_ote", "menu_home", extra_row=extra),
         )
     elif data.startswith("cat_ote|"):
@@ -474,6 +536,47 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             "Type any ticker for OTE analysis.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_ote")]])
         )
+
+    # ---------------- Personal price-watch levels ----------------
+    elif data == "menu_price_watch":
+        await query.edit_message_text(
+            "👁 WATCH PRICE LEVEL\n\nChoose the market and asset. Then send the exact price level.\n\n"
+            "The bot will alert once when price touches or crosses your level.\n"
+            "This is an analysis alert only — it does not place a trade.",
+            reply_markup=get_category_keyboard("price_watch_cat", "menu_home")
+        )
+    elif data.startswith("price_watch_cat|"):
+        _, cat = data.split("|", 1)
+        await query.edit_message_text(
+            f"{cat} — choose the asset to watch:",
+            reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "price_watch_set", "menu_price_watch")
+        )
+    elif data.startswith("price_watch_set|"):
+        _, symbol = data.split("|", 1)
+        _pending_price_watch[chat_id] = symbol.upper()
+        await query.edit_message_text(
+            f"👁 WATCH LEVEL — {symbol.upper()}\n\nSend the exact price level to monitor.\nExample: 4385.50\n\n"
+            "The next meaningful touch/cross will trigger a Telegram alert.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Cancel", callback_data="menu_price_watch")]])
+        )
+    elif data == "show_price_watches":
+        watches = ts_state.get_watch_levels()
+        if not watches:
+            text = "📋 MY WATCH LEVELS\n\nNo personal price levels are being monitored."
+        else:
+            lines = ["📋 MY WATCH LEVELS\n"]
+            for w in watches:
+                status = "TRIGGERED" if w.get("triggered") else w.get("state", "WAITING")
+                lines.append(f"• {w['symbol']} — {w['level']:.10f}".rstrip("0").rstrip(".") + f" [{status}]")
+            text = "\n".join(lines)
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add Watch", callback_data="menu_price_watch")],
+            [InlineKeyboardButton("🗑 Clear All", callback_data="clear_price_watches")],
+            [InlineKeyboardButton("« Back", callback_data="menu_home")],
+        ]))
+    elif data == "clear_price_watches":
+        ts_state.clear_watch_levels()
+        await query.edit_message_text("🗑 All personal price watches cleared.", reply_markup=get_home_menu())
 
     # ---------------- Generic custom ticker (from home menu) ----------------
     elif data == "prompt_custom_ticker":
@@ -708,6 +811,7 @@ def run_telegram_bot():
     loop.run_until_complete(app_bot.start())
     loop.run_until_complete(app_bot.updater.start_polling(drop_pending_updates=True))
     loop.create_task(background_watchlist_scanner())
+    loop.create_task(background_price_watch_scanner())
     loop.run_forever()
 
 
