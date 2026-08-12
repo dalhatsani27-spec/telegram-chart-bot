@@ -486,6 +486,25 @@ def generate_trendline_map(
         ax.annotate(text, (px, py), fontsize=7.5, color="#e8e8e8", fontweight="bold",
                     xytext=(0, y_off), textcoords="offset points", ha="center", zorder=12)
 
+    # --- Shared label collision registry --------------------------------
+    # Every text annotation on this chart (scanned-pattern Top/Bottom/
+    # Neckline markers, M/W pattern markers, HH/HH Failed, Trendline
+    # Breakout/Retest) claims a slot here before it's placed. If another
+    # label already sits within min_gap_bars on the same side (above vs
+    # below price), it gets bumped to the next vertical shelf instead of
+    # printing directly on top of the earlier one. This is what was
+    # missing before and caused labels to render as unreadable overlapping
+    # text ("HHHFailedd" stamped on a "Top" box, etc.).
+    _claimed_slots = {"up": [], "down": []}
+
+    def _claim_slot(px, side, min_gap_bars=9):
+        level = 0
+        while any(abs(px - used_px) < min_gap_bars and used_level == level
+                  for used_px, used_level in _claimed_slots[side]):
+            level += 1
+        _claimed_slots[side].append((px, level))
+        return level
+
     family_kind = family.get("family_kind", "")
     bias_color = "#00e676" if family_kind == "ascending" else "#ff5252"
 
@@ -534,10 +553,27 @@ def generate_trendline_map(
         status = "UNMITIGATED" if is_unmitigated else "mitigated"
         role = " · INDUCEMENT" if ob.get("is_inducement") else ""
         label = f"{'Bullish' if is_bull else 'Bearish'} OB · {status}{role} · {ob['confidence']}%"
-        ax.text(x0 + 1, ob["top"] if is_bull else ob["bottom"], label, fontsize=6.5,
-                color="#ffffff" if is_unmitigated else edge_color, fontweight="bold",
-                va="bottom" if is_bull else "top",
-                alpha=0.95 if is_unmitigated else 0.55, zorder=9)
+        label_y = ob["top"] if is_bull else ob["bottom"]
+        # Collision avoidance: OBs formed close together in both bar-index
+        # and price (very common -- an inducement OB and the primary OB
+        # that replaces it usually sit within a few bars of each other)
+        # were previously stamped on top of one another. Stagger onto the
+        # next vertical shelf, same registry approach used for HH labels.
+        ob_level = _claim_slot(x0, "up" if is_bull else "down", min_gap_bars=6)
+        label_y_shift = ob_level * (10 if is_bull else -10)
+        # Edge clipping: a label starting at x0+1 near the right border of
+        # the chart ran past the visible axes and got cut off mid-word
+        # ("MITIGA..."). Anchor right-aligned against the chart edge
+        # instead of left-aligned off x0 once there isn't roughly enough
+        # room (in bars) left for the label to print normally.
+        near_right_edge = (chart_len - x0) < 22
+        text_x = (chart_len - 1) if near_right_edge else (x0 + 1)
+        ha = "right" if near_right_edge else "left"
+        ax.annotate(label, (text_x, label_y), fontsize=6.5,
+                    color="#ffffff" if is_unmitigated else edge_color, fontweight="bold",
+                    va="bottom" if is_bull else "top", ha=ha,
+                    xytext=(0, label_y_shift), textcoords="offset points",
+                    alpha=0.95 if is_unmitigated else 0.55, zorder=9, clip_on=True)
 
     # --- Classic chart pattern (triangle/wedge/flag/pennant/rectangle/H&S) -
     # Clean educational-style rendering: thick clear lines, proper labels,
@@ -602,9 +638,13 @@ def generate_trendline_map(
                             continue
                         ax.scatter([cx], [y], s=90, c=p_color, edgecolors="#ffffff",
                                    linewidths=1.8, zorder=9, marker="o")
-                        # Place label below for lows, above for highs
+                        # Place label below for lows, above for highs, staggered
+                        # so consecutive tops/bottoms (Top 1/Top 2/Top 3) don't
+                        # print directly on top of each other.
                         is_low_label = any(k in str(lbl).lower() for k in ("shoulder", "head", "bottom"))
-                        y_off = -14 if is_low_label else 12
+                        side = "down" if is_low_label else "up"
+                        level = _claim_slot(cx, side, min_gap_bars=7)
+                        y_off = (-14 - level * 16) if is_low_label else (12 + level * 16)
                         ax.annotate(str(lbl), (cx, y), fontsize=8.5, color="#ffffff",
                                     fontweight="bold", xytext=(0, y_off),
                                     textcoords="offset points", ha="center", zorder=10,
@@ -674,8 +714,11 @@ def generate_trendline_map(
                 if 0 <= px < chart_len:
                     ax.scatter([px], [float(p["price"])], s=90, c=mw_color,
                                edgecolors="#ffffff", linewidths=1.8, zorder=9)
+                    side = "down" if tag == "Bottom" else "up"
+                    level = _claim_slot(px, side, min_gap_bars=7)
+                    y_off = (12 + level * 16) if tag == "Top" else (-14 - level * 16)
                     ax.annotate(tag, (px, float(p["price"])), fontsize=8.5, color="#ffffff",
-                                fontweight="bold", xytext=(0, 12 if tag == "Top" else -14),
+                                fontweight="bold", xytext=(0, y_off),
                                 textcoords="offset points", ha="center", zorder=10,
                                 bbox=dict(boxstyle="round,pad=0.25", facecolor=mw_color,
                                           edgecolor="none", alpha=0.92))
@@ -716,41 +759,83 @@ def generate_trendline_map(
                         alpha=0.88, zorder=4, solid_capstyle="round")
 
     # --- Dual trendlines (MT5 hand-drawn style) -----------------------
-    # ALWAYS draw ascending support + descending resistance when present.
-    # Thick bright green so the lines are impossible to miss.
-    def _draw_one_tl(tl, color="#00e676", width=2.8):
+    # Draw BOTH the ascending support and the descending resistance when
+    # they exist — exactly like the two green lines on a typical MT5 chart.
+    def _draw_one_tl(tl, color="#00c853"):
         if not tl:
             return
-        try:
-            x0 = max(0, int(tl["x0"]) - offset)
-            # Use actual anchor y, then extend to current bar
-            y0 = float(tl["y0"])
-            y1 = float(tl.get("y_end", tl.get("y1", y0)))
-            if x0 >= chart_len:
-                return
+        x0 = max(0, int(tl["x0"]) - offset)
+        y0 = _line_at(tl, max(int(tl["x0"]), 0))
+        y1 = float(tl.get("y_end", tl.get("y1", 0)))
+        if x0 < chart_len:
             ax.plot([x0, chart_len - 1], [y0, y1], color=color, linestyle="-",
-                    linewidth=width, alpha=1.0, zorder=10, solid_capstyle="round")
-            # Anchor dots
-            for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
-                px = int(tl[ax_key]) - offset
-                if 0 <= px < chart_len:
-                    ax.scatter([px], [float(tl[ay_key])], s=90, c=color,
-                               edgecolors="#ffffff", linewidths=1.8, zorder=12, marker="o")
-        except Exception:
-            pass
+                    linewidth=2.4, alpha=0.95, zorder=8, solid_capstyle="round")
+        for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
+            px = int(tl[ax_key]) - offset
+            if 0 <= px < chart_len:
+                ax.scatter([px], [float(tl[ay_key])], s=70, c=color,
+                           edgecolors="#ffffff", linewidths=1.4, zorder=11, marker="o")
 
-    drawn = 0
+    # Green for both (matches the user's MT5 screenshot)
     for tl in (family.get("uptrends") or []):
-        _draw_one_tl(tl, color="#00e676", width=2.8)
-        drawn += 1
+        _draw_one_tl(tl, color="#00c853")
     for tl in (family.get("downtrends") or []):
-        _draw_one_tl(tl, color="#00e676", width=2.8)
-        drawn += 1
+        _draw_one_tl(tl, color="#00c853")
 
-    # Fallback: if uptrends/downtrends empty, try family_lines
-    if drawn == 0:
-        for tl in (family.get("family_lines") or []):
-            _draw_one_tl(tl, color="#00e676", width=2.8)
+    # --- HH / HH Failed structure labels (educational reference style) ---
+    for lbl in (family.get("hh_labels") or []):
+        px = int(lbl["index"]) - offset
+        if not (0 <= px < chart_len):
+            continue
+        level = _claim_slot(px, "up")
+        y_off = padding * (0.55 + 0.5 * level)
+        if lbl["label"] == "HH Failed" and "pair_index" in lbl:
+            ppx = int(lbl["pair_index"]) - offset
+            if 0 <= ppx < chart_len:
+                y = (float(lbl["price"]) + float(lbl["pair_price"])) / 2.0
+                ax.plot([ppx, px], [y, y], color="#ffffff", linestyle="--",
+                        linewidth=1.1, alpha=0.75, zorder=7)
+            ax.annotate("HH Failed", xy=(px, float(lbl["price"])),
+                        xytext=(px, float(lbl["price"]) + y_off),
+                        color="#ffffff", fontsize=9, fontweight="bold", ha="center",
+                        arrowprops=dict(arrowstyle="-", color="#ffffff", lw=0.9, alpha=0.7), zorder=12)
+        else:
+            ax.annotate("HH", xy=(px, float(lbl["price"])),
+                        xytext=(px, float(lbl["price"]) + y_off),
+                        color="#eeeeee", fontsize=9, fontweight="bold", ha="center", zorder=12)
+
+    # --- Trendline Breakout / Trendline Retest callouts + shaded zone ---
+    br = family.get("breakout_retest")
+    if br and br.get("breakout_index") is not None:
+        bx = int(br["breakout_index"]) - offset
+        if 0 <= bx < chart_len:
+            level = _claim_slot(bx, "up")
+            y_off = padding * (1.1 + 0.5 * level)
+            ax.annotate(
+                "Trendline\nBreakout",
+                xy=(bx, float(br["breakout_price"])),
+                xytext=(bx, float(br["breakout_price"]) + y_off),
+                color="#ff9800", fontsize=8.5, fontweight="bold", ha="center",
+                arrowprops=dict(arrowstyle="->", color="#ff9800", lw=1.3), zorder=12,
+            )
+        if br.get("retest_index") is not None:
+            rx = int(br["retest_index"]) - offset
+            if 0 <= rx < chart_len:
+                level = _claim_slot(rx, "down")
+                y_off = padding * (1.1 + 0.5 * level)
+                ax.annotate(
+                    "Trendline\nRetest",
+                    xy=(rx, float(br["retest_price"])),
+                    xytext=(rx, float(br["retest_price"]) - y_off),
+                    color="#ffca28", fontsize=8.5, fontweight="bold", ha="center",
+                    arrowprops=dict(arrowstyle="->", color="#ffca28", lw=1.3), zorder=12,
+                )
+            # Shade the zone after the retest the way the reference image
+            # highlights the continuation move (red = bearish, green = bullish).
+            zone_x0 = rx if br.get("retest_index") is not None else bx
+            if 0 <= zone_x0 < chart_len:
+                zone_color = "#ef5350" if family_kind == "ascending" else "#26a69a"
+                ax.axvspan(zone_x0, chart_len - 1, color=zone_color, alpha=0.08, zorder=1)
 
     # Discrete pattern-scanner output (Double Top/Bottom, H&S, Triangle,
     # Wedge, Flag, Rectangle -- from patterns.py). This payload shape is
