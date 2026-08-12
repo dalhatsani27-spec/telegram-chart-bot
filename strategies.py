@@ -45,38 +45,6 @@ def _line_value(x0: float, y0: float, x1: float, y1: float, x: float) -> float:
     return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
 
 
-def _fmt_price(x) -> str:
-    """
-    Adaptive decimal precision for displaying price levels across
-    different instrument types (forex majors, JPY pairs, indices, gold,
-    crypto, etc.) without needing per-symbol metadata threaded through
-    every call site. Hardcoded :.5f everywhere was correct for a
-    ~1.0000-scale forex pair but wrong (5 needless decimals, or a huge
-    unreadable number) for JPY pairs, indices, gold, or BTC-scale prices
-    -- one real contributor to "this doesn't work on most markets".
-
-    Magnitude-based buckets, roughly matching broker/platform convention:
-      >= 1000   -> 2dp with thousands separator (BTC, indices, gold-ish)
-      >= 100    -> 3dp (JPY pairs, some indices)
-      >= 10     -> 4dp
-      <  10     -> 5dp (major FX pairs, pip-level precision)
-    """
-    try:
-        val = float(x)
-    except (TypeError, ValueError):
-        return str(x)
-    if val != val:  # NaN
-        return "n/a"
-    ax = abs(val)
-    if ax >= 1000:
-        return f"{val:,.2f}"
-    if ax >= 100:
-        return f"{val:.3f}"
-    if ax >= 10:
-        return f"{val:.4f}"
-    return f"{val:.5f}"
-
-
 def _count_touches(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
                    kind: str, tol_atr: float = 0.35) -> int:
     if df is None or len(df) < 5:
@@ -277,86 +245,58 @@ def _get_sequential_pivots(pivots: List[Dict], kind: str, min_bars: int = 5) -> 
     return cleaned
 
 
-def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame,
-                  min_span: int = 12, recency_limit: int = 55) -> Optional[Dict]:
+def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
     """
-    Score EVERY valid pair of same-type pivots (not just the two most
-    recent) and keep the single best-fitting line.
-
-    The old approach always grabbed pts[-2]/pts[-1] and gave up entirely
-    if that one pair failed any filter (min gap, min move, slope
-    direction, touch count) -- one noisy recent swing could kill the
-    whole trendline even when perfectly good structure existed a bit
-    further back. That's the main reason analysis silently produced
-    NEUTRAL / no-line results across a lot of instruments.
-
-    This instead searches all same-type pivot pairs, scores each on
-    span (longer = more structural), touch count, and violation count,
-    and keeps the best one -- same idea as how a trader actually draws
-    a trendline: pick the two (or more) points that best describe the
-    whole visible structure, not just whatever happened most recently.
+    Classic trendline: connect sequential Higher Lows (support) or
+    Lower Highs (resistance). Filters are kept light so the line is
+    almost always drawn when structure exists — matching MT5 hand-drawn style.
     """
-    want = "low" if kind == "support" else "high"
-    pts = sorted([p for p in pivots if p["type"] == want], key=lambda p: p["index"])
+    pts = _get_sequential_pivots(pivots, kind, min_bars=3)
     if len(pts) < 2:
+        # Fallback: any two pivots of the correct type
+        want = "low" if kind == "support" else "high"
+        pts = [p for p in pivots if p["type"] == want]
+        if len(pts) < 2:
+            return None
+        pts = pts[-2:]
+
+    # Prefer longer span when 3+ sequential points exist
+    if len(pts) >= 3 and (pts[-1]["index"] - pts[-3]["index"]) <= 90:
+        a, b = pts[-3], pts[-1]
+    else:
+        a, b = pts[-2], pts[-1]
+
+    if b["index"] <= a["index"]:
+        return None
+    if b["index"] - a["index"] < 4:
         return None
 
-    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
-
-    best = None
-    best_score = -1e9
-    for i in range(len(pts)):
-        for j in range(i + 1, len(pts)):
-            a, b = pts[i], pts[j]
-            span = b["index"] - a["index"]
-            if span < min_span:
-                continue
-            if b["index"] < n - recency_limit:
-                continue  # line must still be relevant to current price
-            if kind == "support" and b["price"] <= a["price"]:
-                continue
-            if kind == "resistance" and b["price"] >= a["price"]:
-                continue
-            # Minimum meaningful move (prevents near-flat lines) --
-            # soft-skipped rather than an early hard return so a shallow
-            # pair doesn't block a better, steeper pair elsewhere.
-            if atr_now and atr_now > 0 and abs(b["price"] - a["price"]) < 0.5 * atr_now:
-                continue
-
-            touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.40)
-            violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.28)
-            if touches < 2:
-                continue
-            if violations > touches + 1:
-                continue
-
-            span_score = min(span / 55.0, 1.6)
-            recency_score = 1.0 - (n - 1 - b["index"]) / max(recency_limit, 1)
-            score = touches * 2.0 - violations * 3.2 + span_score * 3.5 + recency_score * 1.2
-
-            if score > best_score:
-                best_score = score
-                best = (a, b, touches, violations)
-
-    if not best:
-        return None
-    a, b, touches, violations = best
     slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
     y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
-    quality = "unconfirmed" if touches < 3 else "confirmed"
+
+    # Direction must match kind (light check only)
+    if kind == "support" and slope < -1e-12:
+        return None
+    if kind == "resistance" and slope > 1e-12:
+        return None
+
+    touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.50)
+    violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.35)
+
+    quality = "unconfirmed" if touches < 2 else ("confirmed" if touches <= 4 else "crowded")
 
     return {
-        "x0": a["index"], "y0": a["price"],
-        "x1": b["index"], "y1": b["price"],
-        "y_end": y_end,
-        "slope": slope,
-        "touches": touches,
+        "x0": a["index"], "y0": float(a["price"]),
+        "x1": b["index"], "y1": float(b["price"]),
+        "y_end": float(y_end),
+        "slope": float(slope),
+        "touches": max(touches, 2),
         "violations": violations,
         "confirmed": quality == "confirmed",
         "quality": quality,
         "kind": kind,
         "bars_since_last_touch": n - 1 - b["index"],
-        "method": "structural_best_fit",
+        "method": "classic_sequential",
     }
 
 
@@ -607,7 +547,7 @@ def _detect_mw_pattern(pivots, df):
                 "neckline": neck["price"],
                 "neck_index": neck["index"],
                 "bias": "SELL",
-                "note": f"Clean M pattern — neckline at {_fmt_price(neck['price'])} (peaks within {rel*100:.2f}%)",
+                "note": f"Clean M pattern — neckline at {neck['price']:.5f} (peaks within {rel*100:.2f}%)",
             }
 
     # Double bottom (W)
@@ -639,7 +579,7 @@ def _detect_mw_pattern(pivots, df):
                 "neckline": neck["price"],
                 "neck_index": neck["index"],
                 "bias": "BUY",
-                "note": f"Clean W pattern — neckline at {_fmt_price(neck['price'])} (bottoms within {rel*100:.2f}%)",
+                "note": f"Clean W pattern — neckline at {neck['price']:.5f} (bottoms within {rel*100:.2f}%)",
             }
     return None
 
@@ -794,7 +734,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # "ascending" rail is misleading -- it should be left for the
     # horizontal S/R clustering below (_detect_horizontal_levels) to pick
     # up instead, which is exactly what that layer is for.
-    MIN_TREND_MOVE_ATR = 1.0
+    MIN_TREND_MOVE_ATR = 0.35
     atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
 
     def _has_meaningful_slope(line):
@@ -814,56 +754,21 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         resistance = None
         shallow_rejected = True
 
-    # LOCKED RULE (updated):
-    #   Uptrend  → map sequential pivot LOWS (A→N higher lows / ascending support)
-    #   Downtrend → map sequential pivot HIGHS (lower highs / descending resistance)
-    # Prefer the directional family that matches structure; do not mix.
-    # Short-term trendline structure is PRIMARY — we adapt to what price is
-    # actually doing instead of fighting it with lagging higher-timeframe bias.
+    # SIMPLE RULE (matches MT5 hand-drawn style):
+    # Always keep BOTH a clean ascending support AND a clean descending
+    # resistance when they exist. This is exactly how a trader draws the
+    # two green lines on the chart you showed.
     close = float(df["Close"].iloc[-1])
     primary = None
     family_kind = "none"
 
-    # Detect simple structure bias from recent non-ranging pivots
-    # Prefer sequential higher lows (A→N) for bullish, sequential lower highs for bearish.
-    recent = pivots[-8:] if len(pivots) >= 4 else pivots
-    highs = [p for p in recent if p["type"] == "high"]
-    lows = [p for p in recent if p["type"] == "low"]
-    struct_bias = "NEUTRAL"
-    if len(highs) >= 2 and len(lows) >= 2:
-        hh = highs[-1]["price"] > highs[-2]["price"]
-        hl = lows[-1]["price"] > lows[-2]["price"]
-        lh = highs[-1]["price"] < highs[-2]["price"]
-        ll = lows[-1]["price"] < lows[-2]["price"]
-        if hh and hl:
-            struct_bias = "BULLISH"
-        elif lh and ll:
-            struct_bias = "BEARISH"
-        # Also accept pure sequential higher lows even without clear HH yet
-        elif len(lows) >= 3 and lows[-1]["price"] > lows[-2]["price"] > lows[-3]["price"]:
-            struct_bias = "BULLISH"
-        elif len(highs) >= 3 and highs[-1]["price"] < highs[-2]["price"] < highs[-3]["price"]:
-            struct_bias = "BEARISH"
-
-    if struct_bias == "BULLISH" and support:
-        # Uptrend: only map pivot lows (sequential A→N)
-        primary, family_kind = support, "ascending"
-    elif struct_bias == "BEARISH" and resistance:
-        # Downtrend: only map pivot highs
-        primary, family_kind = resistance, "descending"
-    elif support and resistance:
+    if support and resistance:
+        # Both valid → treat as a converging structure (triangle / wedge)
+        # Pick the primary for scoring based on which side price is closer to,
+        # but we will still return BOTH lines for drawing.
         s_end = support["y_end"]
         r_end = resistance["y_end"]
-        # Prefer ascending when price is clearly above the rising support
-        if close >= s_end * 0.998:
-            primary, family_kind = support, "ascending"
-        elif close <= r_end * 1.002:
-            primary, family_kind = resistance, "descending"
-        elif support["touches"] >= resistance["touches"]:
-            primary, family_kind = support, "ascending"
-        elif resistance["touches"] > support["touches"]:
-            primary, family_kind = resistance, "descending"
-        elif close > (s_end + r_end) / 2:
+        if abs(close - s_end) <= abs(close - r_end):
             primary, family_kind = support, "ascending"
         else:
             primary, family_kind = resistance, "descending"
@@ -872,40 +777,31 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     elif resistance:
         primary, family_kind = resistance, "descending"
 
-    # HARD RULE: yellow bias line must stay on the correct side of price.
-    # Uptrend  → line BELOW price (support)
-    # Downtrend → line ABOVE price (resistance)
-    # If the fitted primary violates this on the most recent bars, discard it
-    # so we never draw a "support" line cutting through or above price.
-    if primary is not None:
-        line_now = float(primary.get("y_end", primary.get("y1", 0)))
-        atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else abs(close) * 0.002
-        buffer = max(atr_now * 0.15, 1e-9)
-        if family_kind == "ascending":
-            # Must be support: recent closes should be at or above the line
-            recent_closes = df["Close"].iloc[-6:].astype(float)
-            if (recent_closes < line_now - buffer).sum() >= 3 or close < line_now - buffer * 2:
-                # Line is not acting as support — invalidate
-                primary = None
-                family_kind = "none"
-        elif family_kind == "descending":
-            recent_closes = df["Close"].iloc[-6:].astype(float)
-            if (recent_closes > line_now + buffer).sum() >= 3 or close > line_now + buffer * 2:
-                primary = None
-                family_kind = "none"
+    # KEEP the primary trendline even after a break.
+    # Classic breakout + retest analysis (like the reference image) requires
+    # the line to stay visible so the break and the retest can be scored.
+    # Direction / strength logic below correctly labels the current state.
 
     family_lines = []
     channel = None
     if primary:
-        family_lines = _build_parallel_family(primary, recent_pivots, n, max_members=min(2, max_lines))
-        if len(family_lines) >= 2:
-            channel = {
-                "lower": family_lines[0],
-                "upper": family_lines[-1],
-                "mid_end": (family_lines[0]["y_end"] + family_lines[-1]["y_end"]) / 2.0,
-                "width": abs(family_lines[-1]["y_end"] - family_lines[0]["y_end"]),
-                "members": family_lines,
-            }
+        # Prefer a single clean primary trendline (the black line style in
+        # the reference image). Only add a parallel rail when the channel
+        # is meaningfully wide.
+        family_lines = [primary]
+        extras = _build_parallel_family(primary, recent_pivots, n, max_members=2)
+        if len(extras) >= 2:
+            width = abs(extras[-1]["y_end"] - extras[0]["y_end"])
+            atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
+            if atr_now and width > 0.8 * atr_now:
+                family_lines = extras
+                channel = {
+                    "lower": family_lines[0],
+                    "upper": family_lines[-1],
+                    "mid_end": (family_lines[0]["y_end"] + family_lines[-1]["y_end"]) / 2.0,
+                    "width": width,
+                    "members": family_lines,
+                }
 
     # Direction from family geometry (price reveals it)
     direction = "NEUTRAL"
@@ -967,7 +863,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
                     strength = 52
                     reasons.append(f"Developing break below support ({brk['consecutive_closes']} close(s), "
                                     f"{brk['penetration_atr']} ATR) — not yet confirmed, watch for retest "
-                                    f"at {_fmt_price(brk['retest_level'])}")
+                                    f"at {brk['retest_level']:.5f}")
                 else:
                     strength = 38
                     reasons.append(f"Weak/wick break below support ({brk['penetration_atr']} ATR, "
@@ -1011,7 +907,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
                     strength = 52
                     reasons.append(f"Developing break above resistance ({brk['consecutive_closes']} close(s), "
                                     f"{brk['penetration_atr']} ATR) — not yet confirmed, watch for retest "
-                                    f"at {_fmt_price(brk['retest_level'])}")
+                                    f"at {brk['retest_level']:.5f}")
                 else:
                     strength = 38
                     reasons.append(f"Weak/wick break above resistance ({brk['penetration_atr']} ATR, "
@@ -1194,8 +1090,9 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         "entry_rules": entry_rules,
         "family_kind": family_kind,
         "family_lines": family_lines,  # the clean parallel set
-        "uptrends": [primary] if family_kind == "ascending" and primary else [],
-        "downtrends": [primary] if family_kind == "descending" and primary else [],
+        # Always expose both lines when they exist (MT5-style dual trendlines)
+        "uptrends": [support] if support else [],
+        "downtrends": [resistance] if resistance else [],
         "channel": channel,
         "wedge": wedge,
         "horizontal_levels": horizontal_levels,
@@ -1493,7 +1390,7 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
                 order_type = "LIMIT"
                 entry_note = (
                     f"Pattern {family.get('pattern_stage', 'TRIGGERED')} — "
-                    f"entry routed to neckline retest at {_fmt_price(entry)} (do not chase breakout)"
+                    f"entry routed to neckline retest at {entry:.5f} (do not chase breakout)"
                 )
                 if sl >= entry:
                     sl = entry - atr * 1.0
@@ -1501,14 +1398,14 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             entry = brk["retest_level"]
             order_type = "LIMIT"
             entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
-                          f"broken rail at {_fmt_price(entry)} instead of chasing at market")
+                          f"broken rail at {entry:.5f} instead of chasing at market")
             # Rebuild SL relative to new entry
             if sl >= entry:
                 sl = entry - atr * 1.0
         elif order_type == "MARKET" and atr > 0 and (close - entry) > FAR_ATR_MULTIPLE * atr:
             pullback_entry = _fib_pullback_entry(entry, close, "BUY")
             entry_note = (f"Price extended {(close - entry) / atr:.1f}x ATR beyond the rail -- "
-                          f"entry routed to a pullback at {_fmt_price(pullback_entry)} instead of chasing")
+                          f"entry routed to a pullback at {pullback_entry:.5f} instead of chasing")
             entry = pullback_entry
             order_type = "LIMIT"
             if sl >= entry:
@@ -1558,11 +1455,11 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             magnet_edge = float(nearest_magnet["bottom"])
             if magnet_edge > tp3:
                 tp3 = magnet_edge
-                tp3_basis = f"unmitigated bearish OB @ {_fmt_price(magnet_edge)} ({nearest_magnet['confidence']}%)"
+                tp3_basis = f"unmitigated bearish OB @ {magnet_edge:.5f} ({nearest_magnet['confidence']}%)"
         poc = vp.get("poc_price")
         if poc is not None and float(poc) > entry and float(poc) > tp3:
             tp3 = float(poc)
-            tp3_basis = f"POC magnet @ {_fmt_price(tp3)}"
+            tp3_basis = f"POC magnet @ {tp3:.5f}"
 
         return {
             "side": "LONG",
@@ -1675,7 +1572,7 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
                 order_type = "LIMIT"
                 entry_note = (
                     f"Pattern {family.get('pattern_stage', 'TRIGGERED')} — "
-                    f"entry routed to neckline retest at {_fmt_price(entry)} (do not chase breakout)"
+                    f"entry routed to neckline retest at {entry:.5f} (do not chase breakout)"
                 )
                 if sl <= entry:
                     sl = entry + atr * 1.0
@@ -1683,13 +1580,13 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             entry = brk["retest_level"]
             order_type = "LIMIT"
             entry_note = (f"Unconfirmed breakout ({brk['strength']}) -- entry routed to retest of the "
-                          f"broken rail at {_fmt_price(entry)} instead of chasing at market")
+                          f"broken rail at {entry:.5f} instead of chasing at market")
             if sl <= entry:
                 sl = entry + atr * 1.0
         elif order_type == "MARKET" and atr > 0 and (entry - close) > FAR_ATR_MULTIPLE * atr:
             pullback_entry = _fib_pullback_entry(entry, close, "SELL")
             entry_note = (f"Price extended {(entry - close) / atr:.1f}x ATR beyond the rail -- "
-                          f"entry routed to a pullback at {_fmt_price(pullback_entry)} instead of chasing")
+                          f"entry routed to a pullback at {pullback_entry:.5f} instead of chasing")
             entry = pullback_entry
             order_type = "LIMIT"
             if sl <= entry:
@@ -1732,11 +1629,11 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
             magnet_edge = float(nearest_magnet["top"])
             if magnet_edge < tp3:
                 tp3 = magnet_edge
-                tp3_basis = f"unmitigated bullish OB @ {_fmt_price(magnet_edge)} ({nearest_magnet['confidence']}%)"
+                tp3_basis = f"unmitigated bullish OB @ {magnet_edge:.5f} ({nearest_magnet['confidence']}%)"
         poc = vp.get("poc_price")
         if poc is not None and float(poc) < entry and float(poc) < tp3:
             tp3 = float(poc)
-            tp3_basis = f"POC magnet @ {_fmt_price(tp3)}"
+            tp3_basis = f"POC magnet @ {tp3:.5f}"
 
         return {
             "side": "SHORT",
@@ -1794,7 +1691,7 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
     if wedge:
         lines.append(
             f"Structure: {wedge['pattern']} · lower rail {wedge['lower']['touches']} touches, "
-            f"upper rail {wedge['upper']['touches']} touches · converging (gap {_fmt_price(wedge['gap_end'])})"
+            f"upper rail {wedge['upper']['touches']} touches · converging (gap {wedge['gap_end']:.5f})"
         )
     sp = family.get("scanned_pattern")
     if sp:
@@ -1809,30 +1706,30 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
     hz = family.get("horizontal_levels") or []
     if hz:
         lines.append("Horizontal levels: " + " · ".join(
-            f"{l['side'][0].upper()} {_fmt_price(l['price'])} ({l['touches']}x)" for l in hz))
+            f"{l['side'][0].upper()} {l['price']:.5f} ({l['touches']}x)" for l in hz))
     obs = family.get("order_blocks") or []
     if obs:
         ob_lines = []
         for ob in obs:
             tag = "UNMITIGATED" if ob["freshness"] == "untested" else "mitigated"
             ob_lines.append(
-                f"{ob['type'][:4].capitalize()} {_fmt_price(ob['bottom'])}-{_fmt_price(ob['top'])} "
+                f"{ob['type'][:4].capitalize()} {ob['bottom']:.5f}-{ob['top']:.5f} "
                 f"({tag}, {ob['confidence']}%)"
             )
         lines.append("Order blocks: " + " · ".join(ob_lines))
     mw = family.get("mw_pattern")
     if mw:
-        lines.append(f"Pattern: {mw['name']} · neckline {_fmt_price(mw['neckline'])}")
+        lines.append(f"Pattern: {mw['name']} · neckline {mw['neckline']:.5f}")
     if family.get("channel"):
         w = family["channel"].get("width")
         if w:
-            lines.append(f"Channel width: {_fmt_price(w)}")
+            lines.append(f"Channel width: {w:.5f}")
     projs = family.get("projections") or []
     if projs:
-        lines.append("Projections: " + " · ".join(f"{p['label']} {_fmt_price(p['price'])}" for p in projs))
+        lines.append("Projections: " + " · ".join(f"{p['label']} {p['price']:.5f}" for p in projs))
     vp = family.get("volume_profile")
     if vp:
-        lines.append(f"POC {_fmt_price(vp['poc_price'])} | VA {_fmt_price(vp['value_area_low'])}–{_fmt_price(vp['value_area_high'])}")
+        lines.append(f"POC {vp['poc_price']:.5f} | VA {vp['value_area_low']:.5f}–{vp['value_area_high']:.5f}")
     brk = family.get("breakout_grade")
     if brk:
         grade_tag = {"confirmed": "✅ CONFIRMED", "developing": "🟡 DEVELOPING",
@@ -1841,29 +1738,25 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
             f"Breakout grade: {grade_tag} · {brk['penetration_atr']} ATR beyond · "
             f"{brk['consecutive_closes']} consecutive close(s) · body {brk['body_ratio']}"
         )
-        lines.append(f"Retest zone: {_fmt_price(brk['retest_level'])}")
+        lines.append(f"Retest zone: {brk['retest_level']:.5f}")
     pos = build_position_container(family)
     if pos:
-        # Defensive: some paths (e.g. "too extended, no entry") intentionally
-        # return entry/sl/tp1/tp2 as None and omit "side" -- formatting those
-        # directly with :.5f or pos['side'] used to crash the whole report.
-        side = pos.get("side") or pos.get("direction", "?")
-        if pos.get("entry") is None or pos.get("sl") is None:
-            lines.append(f"Position: {side}  — no entry (see note below)")
+        if pos.get("too_extended") or pos.get("entry") is None:
+            if pos.get("entry_note"):
+                lines.append(f"⚠️ {pos['entry_note']}")
         else:
+            side = pos.get("side") or pos.get("direction") or "?"
             lines.append(
-                f"Position: {side}  Entry {_fmt_price(pos['entry'])}  SL {_fmt_price(pos['sl'])}  "
-                f"TP1 {_fmt_price(pos.get('tp1'))}  TP2 {_fmt_price(pos.get('tp2'))}"
-                if pos.get("tp1") is not None and pos.get("tp2") is not None else
-                f"Position: {side}  Entry {_fmt_price(pos['entry'])}  SL {_fmt_price(pos['sl'])}"
+                f"Position: {side}  Entry {pos['entry']:.5f}  SL {pos['sl']:.5f}  "
+                f"TP1 {pos['tp1']:.5f}  TP2 {pos['tp2']:.5f}"
             )
-        lines.append(
-            f"R:R 1:{pos.get('rr', 0):.2f}  (risk {_fmt_price(pos.get('risk', 0))} → reward {_fmt_price(pos.get('reward', 0))})"
-        )
-        if pos.get("liquidity_tp1"):
-            lines.append(f"TP1 liquidity: {pos['liquidity_tp1']}")
-        if pos.get("entry_note"):
-            lines.append(f"⚠️ {pos['entry_note']}")
+            lines.append(
+                f"R:R 1:{pos.get('rr', 0):.2f}  (risk {pos.get('risk', 0):.5f} → reward {pos.get('reward', 0):.5f})"
+            )
+            if pos.get("liquidity_tp1"):
+                lines.append(f"TP1 liquidity: {pos['liquidity_tp1']}")
+            if pos.get("entry_note"):
+                lines.append(f"⚠️ {pos['entry_note']}")
     return "\n".join(lines)
 
 
@@ -2216,32 +2109,31 @@ def format_ote_report(analysis: Dict[str, Any]) -> str:
     if topdown:
         lines.append(format_topdown_summary(topdown))
         lines.append("—")
-    valid_tag = "VALID (checked)" if valid else "WAIT (pending)"
-    lines.append(
-        "30M Direction: " + str(direction) +
-        "  |  Score: " + str(score) + "/100  |  " + valid_tag
-    )
+    lines.append(f"30M Direction: {direction}  |  Score: {score}/100  |  {'✅ VALID' if valid else '⏳ WAIT'}")
     lines.append(
         f"Impulse: {impulse.get('start', {}).get('type', '?')} → {impulse.get('end', {}).get('type', '?')}  "
-        f"({_fmt_price(impulse.get('leg_size', 0))})"
+        f"({impulse.get('leg_size', 0):.5f})"
     )
 
     if fans:
         lines.append("Fan rays: " + " · ".join(f["label"] for f in fans))
     if nearest:
-        lines.append(f"Nearest Fan: {nearest.get('label')} @ {_fmt_price(nearest.get('price', 0))}")
+        lines.append(f"Nearest Fan: {nearest.get('label')} @ {nearest.get('price', 0):.5f}")
     if expansions:
-        lines.append("Expansion targets: " + " · ".join(f"{e['label']} {_fmt_price(e['price'])}" for e in expansions[:3]))
+        lines.append("Expansion targets: " + " · ".join(f"{e['label']} {e['price']:.5f}" for e in expansions[:3]))
 
     for r in analysis.get("reasons") or []:
         lines.append(f"  • {r}")
 
-    if ticket:
+    if ticket and ticket.get("entry") is not None:
+        side = ticket.get("side") or ticket.get("direction") or "?"
         lines.append(
-            f"Ticket: {ticket['side']}  Entry {_fmt_price(ticket['entry'])}  "
-            f"SL {_fmt_price(ticket['sl'])}  TP1 {_fmt_price(ticket['tp1'])}  TP2 {_fmt_price(ticket['tp2'])}"
+            f"Ticket: {side}  Entry {ticket['entry']:.5f}  "
+            f"SL {ticket['sl']:.5f}  TP1 {ticket['tp1']:.5f}  TP2 {ticket['tp2']:.5f}"
         )
         lines.append(f"R:R 1:{ticket.get('rr', 0):.2f}")
+    elif ticket and ticket.get("entry_note"):
+        lines.append(f"⚠️ {ticket['entry_note']}")
 
     return "\n".join(lines)
 
@@ -2262,4 +2154,240 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     df_30m = market_data.fetch_candles(symbol, "30min", count=250)
     if df_30m is None or df_30m.empty or len(df_30m) < 30:
         return {
-            "error": "Insufficient 30M data for Trendline anal
+            "error": "Insufficient 30M data for Trendline analysis",
+            "direction": "NEUTRAL", "symbol": symbol, "topdown": topdown,
+        }
+
+    family = build_trendline_family(df_30m, max_lines=4, lookback_bars=90)
+    family["symbol"] = symbol
+    family["timeframe"] = "30min"
+    family["topdown"] = topdown
+    if family.get("error"):
+        return family
+
+    # Classic chart-pattern scan (triangles, wedges, flags/pennants, H&S,
+    # double/triple tops, rectangles) -- this already existed for the
+    # auto-trade engine but was never surfaced on the Trendline chart/report.
+    try:
+        best_pattern, all_patterns = scan_all_patterns(df_30m)
+        family["scanned_pattern"] = best_pattern.to_dict() if best_pattern else None
+        family["scanned_patterns"] = [p.to_dict() for p in all_patterns]
+    except Exception as e:
+        print(f"[run_trendline_analysis] pattern scan failed for {symbol}: {e!r}")
+        family["scanned_pattern"] = None
+        family["scanned_patterns"] = []
+
+    direction = family.get("direction", "NEUTRAL")
+    strength = family.get("strength", 0)
+    td_dir = topdown.get("direction", "NEUTRAL")
+    gating_notes = []
+    mw = family.get("mw_pattern")
+    reasons = list(family.get("reasons") or [])
+
+    # ------------------------------------------------------------------
+    # Pattern conflict resolution (v2)
+    # Priority of truth:
+    #   1. Clear trendline geometry (already set)
+    #   2. Strong continuation (Bull/Bear Flag, channels) — preferred over forced reversals
+    #   3. Strong classic reversal (Inverse H&S etc.)
+    #   4. Tightened M/W detector
+    #   5. Order-block reaction
+    # Also demotes Double Top (M) when ascending structure or Bull Flag is present.
+    # ------------------------------------------------------------------
+    sp = family.get("scanned_pattern")
+    close = float(df_30m["Close"].iloc[-1])
+    family_kind = family.get("family_kind", "none")
+
+    # ------------------------------------------------------------------
+    # Neckline stage gate (FORMING / TRIGGERED / CONFIRMED / FAKEOUT)
+    # Never treat an unbroken pattern as a live entry. Liquidity grabs
+    # that spike the neckline and reclaim are marked FAKEOUT.
+    # ------------------------------------------------------------------
+    reversal_names = {
+        "Double Top", "Double Bottom", "Triple Top", "Triple Bottom",
+        "Head and Shoulders", "Inverse Head and Shoulders",
+        "Double Top (M)", "Double Bottom (W)",
+    }
+    if sp and sp.get("name") in reversal_names:
+        stage = str(sp.get("stage") or "FORMING").upper()
+        stage_note = sp.get("stage_note") or ""
+        reasons.append(f"Pattern stage: {stage} — {stage_note}")
+        family["pattern_stage"] = stage
+        if stage == "FORMING":
+            # Shape only — force WAIT, do not let pattern override to ACTIVE
+            gating_notes.append("⏳ Pattern FORMING — neckline not broken by close. No entry yet.")
+            # Soften strength so entry_rules alone cannot flip to confirmed trade
+            strength = min(strength, 55)
+            family["force_wait_pattern"] = True
+        elif stage == "FAKEOUT":
+            gating_notes.append("🚫 Pattern FAKEOUT — neckline reclaimed (liquidity grab). Invalidated.")
+            strength = max(0, strength - 25)
+            family["force_wait_pattern"] = True
+            # Do not let a fakeout pattern set direction
+            if family.get("active_pattern") == "scanned":
+                family["active_pattern"] = "none"
+        elif stage == "TRIGGERED":
+            gating_notes.append(
+                f"⚡ Pattern TRIGGERED — real neckline break. Prefer retest entry near "
+                f"{sp.get('retest_level') or sp.get('trigger_price')}"
+            )
+            family["prefer_retest_entry"] = True
+            family["retest_level"] = sp.get("retest_level") or sp.get("trigger_price")
+        elif stage == "CONFIRMED":
+            gating_notes.append("✅ Pattern CONFIRMED — break + retest held. Highest quality trigger.")
+            strength = min(100, strength + 8)
+            family["prefer_retest_entry"] = True
+            family["retest_level"] = sp.get("retest_level") or sp.get("trigger_price")
+
+    # Demote Double Top (M) when structure is clearly bullish continuation
+    if mw and mw.get("pattern") == "M":
+        has_bull_cont = False
+        for p in (family.get("scanned_patterns") or []):
+            if p.get("name") in ("Bull Flag", "Bullish Pennant", "Ascending Triangle", "Ascending Channel") and float(p.get("confidence") or 0) >= 68:
+                has_bull_cont = True
+                break
+        if has_bull_cont or (family_kind == "ascending" and direction == "BUY"):
+            reasons.append(
+                "⚠ Demoted Double Top (M) — bullish continuation / ascending structure is cleaner"
+            )
+            family["mw_pattern"] = None
+            mw = None
+            if has_bull_cont and sp and sp.get("name") in ("Bull Flag", "Bullish Pennant", "Ascending Triangle"):
+                family["active_pattern"] = "scanned"
+                family["pattern_confidence"] = int(sp.get("confidence") or 70)
+            elif family_kind == "ascending":
+                family["active_pattern"] = "channel" if family.get("channel") else "none"
+
+    if sp:
+        sp_name = sp.get("name", "")
+        sp_bias = sp.get("bias", "NEUTRAL")
+        sp_conf = float(sp.get("confidence") or 0)
+        is_strong_bullish_rev = (
+            sp_name in ("Inverse Head and Shoulders", "Double Bottom", "Triple Bottom")
+            and sp_bias == "BUY" and sp_conf >= 72
+        )
+        is_strong_bearish_rev = (
+            sp_name in ("Head and Shoulders", "Double Top", "Triple Top")
+            and sp_bias == "SELL" and sp_conf >= 72
+        )
+        is_bullish_cont = (
+            sp_name in ("Bull Flag", "Bullish Pennant", "Ascending Triangle", "Ascending Channel")
+            and sp_conf >= 68
+        )
+        is_bearish_cont = (
+            sp_name in ("Bear Flag", "Bearish Pennant", "Descending Triangle", "Descending Channel")
+            and sp_conf >= 68
+        )
+
+        # Continuation patterns own the bias when they are clear
+        if is_bullish_cont and direction in ("SELL", "NEUTRAL"):
+            direction = "BUY"
+            strength = max(strength, int(sp_conf) - 2)
+            reasons.append(f"✅ {sp_name} ({sp_conf:.0f}%) — bullish continuation preferred")
+            family["active_pattern"] = "scanned"
+            family["pattern_confidence"] = int(sp_conf)
+            if mw and mw.get("pattern") == "M":
+                family["mw_pattern"] = None
+                mw = None
+        elif is_bearish_cont and direction in ("BUY", "NEUTRAL"):
+            direction = "SELL"
+            strength = max(strength, int(sp_conf) - 2)
+            reasons.append(f"✅ {sp_name} ({sp_conf:.0f}%) — bearish continuation preferred")
+            family["active_pattern"] = "scanned"
+            family["pattern_confidence"] = int(sp_conf)
+            if mw and mw.get("pattern") == "W":
+                family["mw_pattern"] = None
+                mw = None
+
+        # Strong Inverse H&S / Double Bottom vs weak M or NEUTRAL
+        elif is_strong_bullish_rev and direction in ("SELL", "NEUTRAL"):
+            head_price = None
+            for kp in (sp.get("key_points") or []):
+                if len(kp) >= 3 and "Head" in str(kp[2]):
+                    head_price = float(kp[1])
+                    break
+            head_broken = head_price is None or close > head_price * 1.001
+            bullish_ob_support = False
+            for ob in (family.get("order_blocks") or []):
+                if ob.get("type") == "bullish":
+                    ob_top = float(ob.get("top", 0))
+                    ob_bot = float(ob.get("bottom", 0))
+                    if ob_bot <= close <= ob_top * 1.015 or abs(close - ob_top) / max(close, 1e-9) < 0.005:
+                        bullish_ob_support = True
+                        break
+            if head_broken or bullish_ob_support or sp_conf >= 70:
+                old_dir = direction
+                direction = "BUY"
+                strength = max(strength, int(sp_conf) - 4)
+                if mw and mw.get("pattern") == "M":
+                    reasons.append(
+                        f"⚠ Overrode weak Double Top (M) — {sp_name} ({sp_conf:.0f}%) cleaner "
+                        f"(head broken / bullish OB). Bias {old_dir} → BUY"
+                    )
+                    family["mw_pattern"] = None
+                else:
+                    reasons.append(f"✅ {sp_name} ({sp_conf:.0f}%) confirms bullish reversal")
+                family["active_pattern"] = "scanned"
+                family["pattern_confidence"] = max(int(family.get("pattern_confidence") or 0), int(sp_conf))
+
+        # Strong H&S / Double Top vs weak W or NEUTRAL
+        elif is_strong_bearish_rev and direction in ("BUY", "NEUTRAL"):
+            head_price = None
+            for kp in (sp.get("key_points") or []):
+                if len(kp) >= 3 and "Head" in str(kp[2]):
+                    head_price = float(kp[1])
+                    break
+            head_broken = head_price is None or close < head_price * 0.999
+            if head_broken or sp_conf >= 70:
+                old_dir = direction
+                direction = "SELL"
+                strength = max(strength, int(sp_conf) - 4)
+                if mw and mw.get("pattern") == "W":
+                    reasons.append(
+                        f"⚠ Overrode weak Double Bottom (W) — {sp_name} ({sp_conf:.0f}%) cleaner. "
+                        f"Bias {old_dir} → SELL"
+                    )
+                    family["mw_pattern"] = None
+                else:
+                    reasons.append(f"✅ {sp_name} ({sp_conf:.0f}%) confirms bearish reversal")
+                family["active_pattern"] = "scanned"
+                family["pattern_confidence"] = max(int(family.get("pattern_confidence") or 0), int(sp_conf))
+
+        elif sp_bias == direction and sp_conf >= 65:
+            strength = min(100, strength + 8)
+            reasons.append(f"✅ {sp_name} ({sp_conf:.0f}%) aligns with current bias — conviction +")
+
+    family["direction"] = direction
+    family["strength"] = max(0, min(100, int(strength)))
+    family["reasons"] = reasons
+
+    # SHORT-TERM TRENDLINE IS PRIMARY.
+    # We adapt to the structure the trendlines show instead of fighting it
+    # with lagging higher-timeframe direction. 4H/1H is now advisory only.
+    if direction in ("BUY", "SELL"):
+        if td_dir == direction and topdown.get("allowed"):
+            strength = min(100, strength + 12)
+            gating_notes.append(
+                f"✅ Short-term trend ({direction}) aligned with 4H/1H top-down ({td_dir})"
+            )
+        elif td_dir == direction and not topdown.get("allowed"):
+            gating_notes.append(
+                f"Short-term trend ({direction}) matches top-down direction but 1H permission "
+                f"not yet granted — still valid, slightly lower conviction"
+            )
+        elif td_dir == "NEUTRAL":
+            gating_notes.append(
+                f"Short-term Trend: {direction} (trendline structure) — higher TF neutral"
+            )
+        else:
+            # Conflict: keep the short-term signal, only mild confidence reduction
+            strength = max(0, strength - 8)
+            gating_notes.append(
+                f"Short-term Trend: {direction} (from trendline) — higher TF still {td_dir} "
+                f"(advisory only, not blocking)"
+            )
+
+    family["strength"] = max(0, min(100, int(strength)))
+    family["gating_notes"] = gating_notes
+    family["short_term_signal"] = direction  # explicit short-term read for reports
+    return family
