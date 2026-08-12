@@ -245,58 +245,64 @@ def _get_sequential_pivots(pivots: List[Dict], kind: str, min_bars: int = 5) -> 
     return cleaned
 
 
-def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
+def _select_best_line(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame,
+                       min_span: int = 12, recency_limit: int = 55) -> Optional[Dict]:
     """
-    Classic dynamic trendline (matches the educational image style).
-    Uses sequential higher lows (support) or lower highs (resistance).
-    Prefers a line that spans enough of the chart to look like a real
-    trendline while still anchoring on the most recent valid pivots.
+    Score EVERY valid pair of same-type pivots (not just chain-adjacent
+    ones) and keep the single best-fitting line.
+
+    This replaces the old "sequential chain that restarts on any minor
+    violation" approach. That approach almost always collapsed to the two
+    most recent, tiniest pivots on real (noisy) price action, which then
+    failed the min-move filter and produced NO line at all -- the root
+    cause of trendlines never appearing.
+
+    A trader draws a trendline by picking the two (or more) swing points
+    that best describe the whole visible structure -- exactly what this
+    scoring does: reward long span + high touch count + low violations,
+    same as the reference chart (one clean diagonal spanning most of the
+    visible range, not a 10-bar sliver).
     """
-    pts = _get_sequential_pivots(pivots, kind, min_bars=5)
+    want = "low" if kind == "support" else "high"
+    pts = sorted([p for p in pivots if p["type"] == want], key=lambda p: p["index"])
     if len(pts) < 2:
         return None
 
-    # Prefer the last 2 points. If we have 3+ clean sequential pivots and
-    # the earlier one is not too old, start from pts[-3] so the line has
-    # better visual length (closer to the reference image).
-    if len(pts) >= 3 and (pts[-1]["index"] - pts[-3]["index"]) <= 70:
-        a, b = pts[-3], pts[-1]   # longer span
-        # Only accept if the middle point also respects the line roughly
-        mid = pts[-2]
-        mid_on_line = _line_value(a["index"], a["price"], b["index"], b["price"], mid["index"])
-        atr = float(df["ATR"].iloc[min(mid["index"], len(df)-1)]) if "ATR" in df.columns else abs(b["price"]-a["price"])*0.1
-        if abs(mid["price"] - mid_on_line) > max(atr * 0.55, 1e-9):
-            a, b = pts[-2], pts[-1]  # fall back to last two
-    else:
-        a, b = pts[-2], pts[-1]
+    best = None
+    best_score = -1e9
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            a, b = pts[i], pts[j]
+            span = b["index"] - a["index"]
+            if span < min_span:
+                continue
+            if b["index"] < n - recency_limit:
+                continue  # the line must still be relevant to current price
+            if kind == "support" and b["price"] <= a["price"]:
+                continue
+            if kind == "resistance" and b["price"] >= a["price"]:
+                continue
 
-    # Quality filters
-    if b["index"] - a["index"] < 8:
-        return None
-    if b["index"] < n - 60:
-        return None
+            touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.45)
+            violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.32)
+            if touches < 2:
+                continue
+            if violations > touches:
+                continue
 
+            span_score = min(span / 55.0, 1.6)          # reward structural length
+            recency_score = 1.0 - (n - 1 - b["index"]) / max(recency_limit, 1)
+            score = touches * 2.0 - violations * 3.2 + span_score * 3.5 + recency_score * 1.2
+
+            if score > best_score:
+                best_score = score
+                best = (a, b, touches, violations)
+
+    if not best:
+        return None
+    a, b, touches, violations = best
     slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
     y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
-
-    if kind == "support" and slope <= 0:
-        return None
-    if kind == "resistance" and slope >= 0:
-        return None
-
-    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
-    if atr_now and atr_now > 0:
-        if abs(b["price"] - a["price"]) < 0.6 * atr_now:
-            return None
-
-    touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.42)
-    violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.30)
-
-    if touches < 2:
-        return None
-    if violations > touches + 1:
-        return None
-
     quality = "unconfirmed" if touches < 3 else "confirmed"
 
     return {
@@ -310,8 +316,31 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Opt
         "quality": quality,
         "kind": kind,
         "bars_since_last_touch": n - 1 - b["index"],
-        "method": "classic_sequential",
+        "method": "structural_best_fit",
     }
+
+
+def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
+    """
+    Classic dynamic trendline (matches the educational image style).
+    Picks the best-scoring structural pivot pair (see _select_best_line)
+    instead of always chasing the most recent 2 pivots.
+    """
+    line = _select_best_line(pivots, kind, n, df)
+    if not line:
+        return None
+
+    # Soft sanity check only -- no longer a hard kill. A structurally
+    # well-touched, long-span line is real even if the raw price delta
+    # between its two anchor points is modest (this used to reject good
+    # lines that just happened to have a shallow-looking start/end pair).
+    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
+    if atr_now and atr_now > 0:
+        total_move = abs(line["y1"] - line["y0"])
+        if total_move < 0.35 * atr_now and line["touches"] < 3:
+            return None
+
+    return line
 
 
 def _fit_line_any_slope(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
@@ -710,6 +739,87 @@ def _entry_confirmation(df: pd.DataFrame, direction: str) -> Dict[str, Any]:
     return {"checks": checks, "passed": passed, "required": required, "confirmed": passed >= required}
 
 
+def _label_hh_structure(pivots: List[Dict], df: pd.DataFrame, n: int, max_labels: int = 4) -> List[Dict]:
+    """
+    Label the swing-high sequence as HH (Higher High) / 'HH Failed' the
+    way the reference chart does: consecutive higher highs get 'HH', and
+    when a high comes in roughly equal to (fails to clear) the prior HH,
+    it's tagged 'HH Failed' -- the classic early warning that a trend is
+    losing momentum right before a trendline break.
+    """
+    highs = sorted([p for p in pivots if p["type"] == "high"], key=lambda p: p["index"])
+    if len(highs) < 2:
+        return []
+    recent = highs[-max_labels:]
+    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
+
+    labels = []
+    for idx, p in enumerate(recent):
+        if idx == 0:
+            labels.append({"index": p["index"], "price": p["price"], "label": "HH"})
+            continue
+        prev = recent[idx - 1]
+        tol = atr * 0.3 if atr else abs(p["price"]) * 0.0015
+        if p["price"] > prev["price"] + tol:
+            labels.append({"index": p["index"], "price": p["price"], "label": "HH"})
+        elif abs(p["price"] - prev["price"]) <= tol:
+            labels.append({"index": p["index"], "price": p["price"], "label": "HH Failed",
+                            "pair_index": prev["index"], "pair_price": prev["price"]})
+        # a clear lower high isn't labeled -- it's no longer part of the HH story
+    return labels
+
+
+def _detect_breakout_and_retest(df: pd.DataFrame, line: Dict, kind: str, n: int) -> Optional[Dict]:
+    """
+    Find the breakout candle (confirmed close through the line) and, if
+    it happened, the first retest afterward -- matching the two callouts
+    in the reference image ('Trendline Breakout' / 'Trendline Retest').
+
+    kind: 'support' looks for a downside break, 'resistance' an upside break.
+    """
+    if df is None or n < 5:
+        return None
+    close = df["Close"].values
+    high = df["High"].values
+    low = df["Low"].values
+    atr_col = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
+    x0, y0, x1, y1 = line["x0"], line["y0"], line["x1"], line["y1"]
+
+    break_idx = None
+    for i in range(int(x1) + 1, n):
+        lv = _line_value(x0, y0, x1, y1, i)
+        atr = float(atr_col[i]) if atr_col[i] and atr_col[i] > 0 else abs(y1 - y0) * 0.05 or 1e-9
+        if kind == "support" and close[i] < lv - 0.15 * atr:
+            break_idx = i
+            break
+        if kind == "resistance" and close[i] > lv + 0.15 * atr:
+            break_idx = i
+            break
+    if break_idx is None:
+        return None
+
+    retest_idx = None
+    for i in range(break_idx + 1, n):
+        lv = _line_value(x0, y0, x1, y1, i)
+        atr = float(atr_col[i]) if atr_col[i] and atr_col[i] > 0 else abs(y1 - y0) * 0.05 or 1e-9
+        tol = 0.30 * atr
+        if kind == "support" and high[i] >= lv - tol:
+            retest_idx = i
+            break
+        if kind == "resistance" and low[i] <= lv + tol:
+            retest_idx = i
+            break
+
+    result = {
+        "breakout_index": break_idx,
+        "breakout_price": float(close[break_idx]),
+        "retest_index": retest_idx,
+    }
+    if retest_idx is not None:
+        result["retest_price"] = float(high[retest_idx] if kind == "support" else low[retest_idx])
+    return result
+
+
 def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: int = 60) -> Dict[str, Any]:
     """
     Build one clean parallel family (ascending OR descending), not both mixed.
@@ -741,19 +851,26 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     support = _fit_primary(recent_pivots, "support", n, df)
     resistance = _fit_primary(recent_pivots, "resistance", n, df)
 
-    # Reject a candidate diagonal line whose actual price movement across
-    # its own span is too shallow to be a meaningful trend -- e.g. two
-    # swing lows that are technically "rising" by a few points over three
-    # days. That's a range, not an uptrend, and drawing it as a diagonal
-    # "ascending" rail is misleading -- it should be left for the
-    # horizontal S/R clustering below (_detect_horizontal_levels) to pick
-    # up instead, which is exactly what that layer is for.
-    MIN_TREND_MOVE_ATR = 1.0
+    # Reject a candidate diagonal line only when it's BOTH shallow AND
+    # poorly touched -- e.g. two swing lows that are technically "rising"
+    # by a few points with barely any structure behind them. That's a
+    # range, not a trend, and belongs to horizontal S/R clustering below.
+    #
+    # NOTE: this used to reject on shallow endpoint-to-endpoint move alone
+    # (>= 1.0 ATR required), which threw out well-touched, long-span,
+    # low-violation structural lines just because their two anchor points
+    # happened to be close in price (very common for a wide, gently-sloped
+    # rail with 20-40 touches). _select_best_line already validates
+    # structure via touches/violations/span, so this is now a safety net
+    # only, not the primary quality gate.
+    MIN_TREND_MOVE_ATR = 0.35
     atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
 
     def _has_meaningful_slope(line):
         if not line:
             return False
+        if line.get("touches", 0) >= 4:
+            return True  # well-touched structural line -- trust it regardless of raw delta
         if not atr_now or atr_now <= 0:
             return True  # can't measure -- don't reject on a technicality
         total_move = abs(line["y1"] - line["y0"])
@@ -1097,6 +1214,14 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
             lower_line[i] = _line_value(lo["x0"], lo["y0"], lo["x1"], lo["y1"], i)
             mid_line[i] = (upper_line[i] + lower_line[i]) / 2.0
 
+    # HH / HH Failed structure labels (educational-image style) and the
+    # breakout + retest callouts for whichever primary line is active.
+    hh_labels = _label_hh_structure(recent_pivots, df, n)
+    breakout_retest = None
+    if primary:
+        primary_kind_for_break = "support" if family_kind == "ascending" else "resistance"
+        breakout_retest = _detect_breakout_and_retest(df, primary, primary_kind_for_break, n)
+
     return {
         "direction": direction,
         "strength": max(0, min(100, int(strength))),
@@ -1104,6 +1229,8 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         "entry_rules": entry_rules,
         "family_kind": family_kind,
         "family_lines": family_lines,  # the clean parallel set
+        "hh_labels": hh_labels,
+        "breakout_retest": breakout_retest,
         # Always expose both lines when they exist (MT5-style dual trendlines)
         "uptrends": [support] if support else [],
         "downtrends": [resistance] if resistance else [],
