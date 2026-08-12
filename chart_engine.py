@@ -553,10 +553,27 @@ def generate_trendline_map(
         status = "UNMITIGATED" if is_unmitigated else "mitigated"
         role = " · INDUCEMENT" if ob.get("is_inducement") else ""
         label = f"{'Bullish' if is_bull else 'Bearish'} OB · {status}{role} · {ob['confidence']}%"
-        ax.text(x0 + 1, ob["top"] if is_bull else ob["bottom"], label, fontsize=6.5,
-                color="#ffffff" if is_unmitigated else edge_color, fontweight="bold",
-                va="bottom" if is_bull else "top",
-                alpha=0.95 if is_unmitigated else 0.55, zorder=9)
+        label_y = ob["top"] if is_bull else ob["bottom"]
+        # Collision avoidance: OBs formed close together in both bar-index
+        # and price (very common -- an inducement OB and the primary OB
+        # that replaces it usually sit within a few bars of each other)
+        # were previously stamped on top of one another. Stagger onto the
+        # next vertical shelf, same registry approach used for HH labels.
+        ob_level = _claim_slot(x0, "up" if is_bull else "down", min_gap_bars=6)
+        label_y_shift = ob_level * (10 if is_bull else -10)
+        # Edge clipping: a label starting at x0+1 near the right border of
+        # the chart ran past the visible axes and got cut off mid-word
+        # ("MITIGA..."). Anchor right-aligned against the chart edge
+        # instead of left-aligned off x0 once there isn't roughly enough
+        # room (in bars) left for the label to print normally.
+        near_right_edge = (chart_len - x0) < 22
+        text_x = (chart_len - 1) if near_right_edge else (x0 + 1)
+        ha = "right" if near_right_edge else "left"
+        ax.annotate(label, (text_x, label_y), fontsize=6.5,
+                    color="#ffffff" if is_unmitigated else edge_color, fontweight="bold",
+                    va="bottom" if is_bull else "top", ha=ha,
+                    xytext=(0, label_y_shift), textcoords="offset points",
+                    alpha=0.95 if is_unmitigated else 0.55, zorder=9, clip_on=True)
 
     # --- Classic chart pattern (triangle/wedge/flag/pennant/rectangle/H&S) -
     # Clean educational-style rendering: thick clear lines, proper labels,
