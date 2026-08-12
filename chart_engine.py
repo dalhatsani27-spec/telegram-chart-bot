@@ -739,6 +739,55 @@ def generate_trendline_map(
     for tl in (family.get("downtrends") or []):
         _draw_one_tl(tl, color="#00c853")
 
+    # --- HH / HH Failed structure labels (educational reference style) ---
+    for lbl in (family.get("hh_labels") or []):
+        px = int(lbl["index"]) - offset
+        if not (0 <= px < chart_len):
+            continue
+        if lbl["label"] == "HH Failed" and "pair_index" in lbl:
+            ppx = int(lbl["pair_index"]) - offset
+            if 0 <= ppx < chart_len:
+                y = (float(lbl["price"]) + float(lbl["pair_price"])) / 2.0
+                ax.plot([ppx, px], [y, y], color="#ffffff", linestyle="--",
+                        linewidth=1.1, alpha=0.75, zorder=7)
+            ax.annotate("HH Failed", xy=(px, float(lbl["price"])),
+                        xytext=(px, float(lbl["price"]) + padding * 0.9),
+                        color="#ffffff", fontsize=9, fontweight="bold", ha="center",
+                        arrowprops=dict(arrowstyle="-", color="#ffffff", lw=0.9, alpha=0.7), zorder=12)
+        else:
+            ax.annotate("HH", xy=(px, float(lbl["price"])),
+                        xytext=(px, float(lbl["price"]) + padding * 0.6),
+                        color="#eeeeee", fontsize=9, fontweight="bold", ha="center", zorder=12)
+
+    # --- Trendline Breakout / Trendline Retest callouts + shaded zone ---
+    br = family.get("breakout_retest")
+    if br and br.get("breakout_index") is not None:
+        bx = int(br["breakout_index"]) - offset
+        if 0 <= bx < chart_len:
+            ax.annotate(
+                "Trendline\nBreakout",
+                xy=(bx, float(br["breakout_price"])),
+                xytext=(bx, float(br["breakout_price"]) + padding * 1.3),
+                color="#ff9800", fontsize=8.5, fontweight="bold", ha="center",
+                arrowprops=dict(arrowstyle="->", color="#ff9800", lw=1.3), zorder=12,
+            )
+        if br.get("retest_index") is not None:
+            rx = int(br["retest_index"]) - offset
+            if 0 <= rx < chart_len:
+                ax.annotate(
+                    "Trendline\nRetest",
+                    xy=(rx, float(br["retest_price"])),
+                    xytext=(rx, float(br["retest_price"]) - padding * 1.3),
+                    color="#ffca28", fontsize=8.5, fontweight="bold", ha="center",
+                    arrowprops=dict(arrowstyle="->", color="#ffca28", lw=1.3), zorder=12,
+                )
+            # Shade the zone after the retest the way the reference image
+            # highlights the continuation move (red = bearish, green = bullish).
+            zone_x0 = rx if br.get("retest_index") is not None else bx
+            if 0 <= zone_x0 < chart_len:
+                zone_color = "#ef5350" if family_kind == "ascending" else "#26a69a"
+                ax.axvspan(zone_x0, chart_len - 1, color=zone_color, alpha=0.08, zorder=1)
+
     # Discrete pattern-scanner output (Double Top/Bottom, H&S, Triangle,
     # Wedge, Flag, Rectangle -- from patterns.py). This payload shape is
     # different from the trendline-family payload above (single trigger
