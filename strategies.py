@@ -2274,4 +2274,6 @@ def format_ote_report(analysis: Dict[str, Any]) -> str:
     if topdown:
         lines.append(format_topdown_summary(topdown))
         lines.append("—")
-    lines.append(f"30M Direction: {direction}  |  Score: {score}/100  |  {'✅ VALID' if
+    valid_tag = "VALID (checked)" if valid else "WAIT (pending)"
+    lines.append(
+   
