@@ -696,6 +696,134 @@ def _entry_confirmation(df: pd.DataFrame, direction: str) -> Dict[str, Any]:
     return {"checks": checks, "passed": passed, "required": required, "confirmed": passed >= required}
 
 
+
+
+def _trendline_retest_state(df: pd.DataFrame, line: Optional[Dict[str, Any]],
+                            breakout: Optional[Dict[str, Any]],
+                            break_kind: Optional[str]) -> Dict[str, Any]:
+    """
+    Confirm the classic break -> retest sequence without predicting.
+
+    A retest is only marked when:
+      1) the line was actually broken by a candle close,
+      2) a later candle trades back to the line within 0.35 ATR,
+      3) price closes back on the breakout side of the line.
+
+    A wick through the line that closes back across it is classified as a
+    likely fakeout, not a confirmed breakout/retest.
+    """
+    out = {
+        "status": "INTACT",
+        "break_index": None,
+        "retest_index": None,
+        "retest_level": None,
+        "fakeout": False,
+        "note": "No confirmed trendline break.",
+    }
+    if df is None or df.empty or not line:
+        return out
+
+    n = len(df)
+    def lv(i):
+        return _line_value(line["x0"], line["y0"], line["x1"], line["y1"], i)
+
+    # Locate the first meaningful close beyond the line in the recent window.
+    kind = break_kind
+    if kind is None:
+        if breakout and breakout.get("strength") in ("confirmed", "developing", "weak"):
+            # Infer from the line role and current close.
+            kind = "support_break_down" if line.get("kind") == "support" else "resistance_break_up"
+    if kind not in ("support_break_down", "resistance_break_up"):
+        return out
+
+    is_down = kind == "support_break_down"
+    closes = df["Close"].to_numpy(float)
+    highs = df["High"].to_numpy(float)
+    lows = df["Low"].to_numpy(float)
+    opens = df["Open"].to_numpy(float)
+    atrs = df["ATR"].to_numpy(float) if "ATR" in df.columns else (df["High"]-df["Low"]).to_numpy(float)
+
+    start = max(int(line.get("x1", 0)) + 1, n - 30)
+    break_i = None
+    for i in range(start, n):
+        line_i = lv(i)
+        if (closes[i] < line_i) if is_down else (closes[i] > line_i):
+            body = abs(closes[i] - opens[i])
+            rng = max(highs[i] - lows[i], 1e-9)
+            pen = abs(closes[i] - line_i) / max(float(atrs[i]), 1e-9)
+            if pen >= 0.10 and body / rng >= 0.35:
+                break_i = i
+                break
+
+    if break_i is None:
+        # A wick-only excursion through the line is a fakeout candidate.
+        for i in range(start, n):
+            line_i = lv(i)
+            wick_cross = (highs[i] > line_i and closes[i] <= line_i) if not is_down else (
+                lows[i] < line_i and closes[i] >= line_i
+            )
+            if wick_cross:
+                out.update(status="FAKEOUT", break_index=i, fakeout=True,
+                           retest_level=float(line_i),
+                           note="Wick crossed the trendline but the candle reclaimed it.")
+                return out
+        return out
+
+    out["break_index"] = break_i
+    # If price has not had a chance to retest, keep the break state.
+    tol_mult = 0.35
+    for i in range(break_i + 1, n):
+        line_i = lv(i)
+        atr = max(float(atrs[i]), 1e-9)
+        touched = (highs[i] >= line_i - atr*tol_mult) if is_down else (
+            lows[i] <= line_i + atr*tol_mult
+        )
+        # The retest candle must close on the new side of the line.
+        held = closes[i] < line_i if is_down else closes[i] > line_i
+        if touched and held:
+            out.update(
+                status="BREAK_RETEST_CONFIRMED",
+                retest_index=i,
+                retest_level=float(line_i),
+                note="Confirmed break followed by a held retest."
+            )
+            return out
+
+        # Reclaim across the line after the break = failed break/fakeout.
+        reclaimed = closes[i] > line_i if is_down else closes[i] < line_i
+        if reclaimed:
+            out.update(
+                status="FAKEOUT",
+                retest_index=i,
+                retest_level=float(line_i),
+                fakeout=True,
+                note="Break was reclaimed before a valid retest held."
+            )
+            return out
+
+    out["status"] = "BREAK_CONFIRMED" if breakout and breakout.get("strength") == "confirmed" else "BREAK_DEVELOPING"
+    out["retest_level"] = float(lv(n-1))
+    out["note"] = "Trendline break detected; waiting for a clean retest."
+    return out
+
+
+def _trendline_swing_annotations(pivots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return compact HH/HL/LH/LL labels for the pivots used by the lines."""
+    highs = [p for p in pivots if p.get("type") == "high"]
+    lows = [p for p in pivots if p.get("type") == "low"]
+    labels = []
+    prev_h = prev_l = None
+    for p in sorted(pivots, key=lambda z: z.get("index", 0)):
+        if p.get("type") == "high":
+            label = "HH" if prev_h is not None and p["price"] > prev_h else "LH" if prev_h is not None else "H"
+            prev_h = p["price"]
+        else:
+            label = "HL" if prev_l is not None and p["price"] > prev_l else "LL" if prev_l is not None else "L"
+            prev_l = p["price"]
+        labels.append({"index": int(p["index"]), "price": float(p["price"]),
+                       "label": label, "type": p.get("type")})
+    return labels
+
 def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: int = 60) -> Dict[str, Any]:
     """
     Build one clean parallel family (ascending OR descending), not both mixed.
@@ -915,6 +1043,22 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
                 reasons.append(touch_note)
                 breakout_grade = brk
 
+    # Trendline lifecycle: intact -> break -> retest (or fakeout).
+    # Keep the line visible after a break so the chart can show the exact
+    # break/retest geometry rather than deleting the evidence.
+    trendline_retest = {"status": "INTACT", "note": "No confirmed trendline break."}
+    if primary and breakout_grade:
+        break_kind = "support_break_down" if primary.get("kind") == "support" else "resistance_break_up"
+        trendline_retest = _trendline_retest_state(df, primary, breakout_grade, break_kind)
+        if trendline_retest.get("status") == "BREAK_RETEST_CONFIRMED":
+            reasons.append("✅ Trendline break + retest confirmed — continuation entry can be evaluated.")
+        elif trendline_retest.get("status") == "FAKEOUT":
+            reasons.append("🚫 Trendline break reclaimed — treat as fakeout, not confirmation.")
+        elif trendline_retest.get("status") in ("BREAK_CONFIRMED", "BREAK_DEVELOPING"):
+            reasons.append("⏳ Trendline broken — wait for a clean retest before chasing.")
+
+    trendline_annotations = _trendline_swing_annotations(recent_pivots)
+
     # Converging wedge/triangle (independent-slope rails) and full-history
     # horizontal S/R -- computed off the FULL pivot list, before it gets
     # truncated to the last 16 below, so an older well-tested level or a
@@ -1107,6 +1251,9 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         "df": df,
         "mode": "channel" if channel else "lines",
         "breakout_grade": breakout_grade,
+        "trendline_retest": trendline_retest,
+        "trendline_annotations": trendline_annotations,
+        "trendline_status": trendline_retest.get("status", "INTACT"),
         "primary_quality": primary.get("quality") if primary else None,
         "primary_touches": primary.get("touches") if primary else 0,
         # Single "which pattern wins the chart" decision, so the renderer
@@ -1739,6 +1886,9 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
             f"{brk['consecutive_closes']} consecutive close(s) · body {brk['body_ratio']}"
         )
         lines.append(f"Retest zone: {brk['retest_level']:.5f}")
+    tr = family.get("trendline_retest") or {}
+    if tr:
+        lines.append(f"Trendline lifecycle: {tr.get('status', 'INTACT')} — {tr.get('note', '')}")
     pos = build_position_container(family)
     if pos:
         if pos.get("too_extended") or pos.get("entry") is None:

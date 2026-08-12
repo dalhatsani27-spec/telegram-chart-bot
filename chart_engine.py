@@ -739,6 +739,24 @@ def generate_trendline_map(
         except Exception:
             pass
 
+    # Swing labels: HH/HL/LH/LL are shown only for the pivots that build the
+    # current trendline structure. This keeps the chart readable while making
+    # the line's anchors obvious.
+    for ann in (family.get("trendline_annotations") or []):
+        px = int(ann.get("index", -1)) - offset
+        py = float(ann.get("price", 0))
+        if not (0 <= px < chart_len):
+            continue
+        label = str(ann.get("label", ""))
+        if label in ("H", "L"):
+            continue
+        is_high = ann.get("type") == "high"
+        ax.scatter([px], [py], s=42, c="#ffffff", edgecolors="#00e676",
+                   linewidths=1.1, zorder=12)
+        ax.annotate(label, (px, py), fontsize=7.2, color="#ffffff",
+                    fontweight="bold", xytext=(0, 10 if is_high else -13),
+                    textcoords="offset points", ha="center", zorder=13)
+
     drawn = 0
     for tl in (family.get("uptrends") or []):
         _draw_one_tl(tl, color="#00e676", width=2.8)
@@ -751,6 +769,42 @@ def generate_trendline_map(
     if drawn == 0:
         for tl in (family.get("family_lines") or []):
             _draw_one_tl(tl, color="#00e676", width=2.8)
+
+    # Trendline lifecycle markers: BREAK / RETEST are derived from candle
+    # closes and the line itself, never from prediction.
+    tr = family.get("trendline_retest") or {}
+    status = tr.get("status")
+    if status in ("BREAK_CONFIRMED", "BREAK_DEVELOPING", "BREAK_RETEST_CONFIRMED", "FAKEOUT"):
+        bi = tr.get("break_index")
+        ri = tr.get("retest_index")
+        level = tr.get("retest_level")
+        if bi is not None:
+            bx = int(bi) - offset
+            if 0 <= bx < chart_len:
+                by = float(chart_df["Close"].iloc[bx])
+                ax.scatter([bx], [by], s=72,
+                           c="#ffab00" if status != "FAKEOUT" else "#ff1744",
+                           edgecolors="#ffffff", linewidths=1.4, zorder=15,
+                           marker="D")
+                ax.annotate("BREAK", (bx, by), fontsize=7.5,
+                            color="#ffab00" if status != "FAKEOUT" else "#ff1744",
+                            fontweight="bold", xytext=(6, 8),
+                            textcoords="offset points", zorder=16)
+        if ri is not None and level is not None:
+            rx = int(ri) - offset
+            if 0 <= rx < chart_len:
+                ax.scatter([rx], [float(level)], s=78,
+                           c="#00e676" if status == "BREAK_RETEST_CONFIRMED" else "#ff1744",
+                           edgecolors="#ffffff", linewidths=1.5, zorder=16,
+                           marker="o")
+                ax.annotate("RETEST" if status == "BREAK_RETEST_CONFIRMED" else "RECLAIM",
+                            (rx, float(level)), fontsize=7.5,
+                            color="#00e676" if status == "BREAK_RETEST_CONFIRMED" else "#ff1744",
+                            fontweight="bold", xytext=(6, -14),
+                            textcoords="offset points", zorder=16)
+        if level is not None and status != "INTACT":
+            ax.axhline(float(level), color="#ffab00" if status != "FAKEOUT" else "#ff1744",
+                       linestyle=":", linewidth=1.0, alpha=0.55, zorder=7)
 
     # Discrete pattern-scanner output (Double Top/Bottom, H&S, Triangle,
     # Wedge, Flag, Rectangle -- from patterns.py). This payload shape is
