@@ -247,40 +247,50 @@ def _get_sequential_pivots(pivots: List[Dict], kind: str, min_bars: int = 5) -> 
 
 def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
     """
-    Clean dynamic trendline using the two most recent sequential pivots.
-    No ZigZag. Produces the classic hugging style (last two higher lows /
-    lower highs) that updates as soon as new structure forms.
+    Classic dynamic trendline (matches the educational image style).
+    Uses sequential higher lows (support) or lower highs (resistance).
+    Prefers a line that spans enough of the chart to look like a real
+    trendline while still anchoring on the most recent valid pivots.
     """
     pts = _get_sequential_pivots(pivots, kind, min_bars=5)
     if len(pts) < 2:
         return None
 
-    # Always take the two most recent valid sequential pivots
-    a, b = pts[-2], pts[-1]
+    # Prefer the last 2 points. If we have 3+ clean sequential pivots and
+    # the earlier one is not too old, start from pts[-3] so the line has
+    # better visual length (closer to the reference image).
+    if len(pts) >= 3 and (pts[-1]["index"] - pts[-3]["index"]) <= 70:
+        a, b = pts[-3], pts[-1]   # longer span
+        # Only accept if the middle point also respects the line roughly
+        mid = pts[-2]
+        mid_on_line = _line_value(a["index"], a["price"], b["index"], b["price"], mid["index"])
+        atr = float(df["ATR"].iloc[min(mid["index"], len(df)-1)]) if "ATR" in df.columns else abs(b["price"]-a["price"])*0.1
+        if abs(mid["price"] - mid_on_line) > max(atr * 0.55, 1e-9):
+            a, b = pts[-2], pts[-1]  # fall back to last two
+    else:
+        a, b = pts[-2], pts[-1]
 
     # Quality filters
-    if b["index"] - a["index"] < 6:
+    if b["index"] - a["index"] < 8:
         return None
-    if b["index"] < n - 55:  # last pivot must be reasonably recent
+    if b["index"] < n - 60:
         return None
 
     slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
     y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
 
-    # Slope must match the requested kind
     if kind == "support" and slope <= 0:
         return None
     if kind == "resistance" and slope >= 0:
         return None
 
-    # Minimum meaningful move (prevents almost-flat lines)
     atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
     if atr_now and atr_now > 0:
-        if abs(b["price"] - a["price"]) < 0.65 * atr_now:
+        if abs(b["price"] - a["price"]) < 0.6 * atr_now:
             return None
 
-    touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.40)
-    violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.28)
+    touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.42)
+    violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.30)
 
     if touches < 2:
         return None
@@ -300,7 +310,7 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Opt
         "quality": quality,
         "kind": kind,
         "bars_since_last_touch": n - 1 - b["index"],
-        "method": "recent_2pt_fractal",
+        "method": "classic_sequential",
     }
 
 
@@ -816,40 +826,31 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     elif resistance:
         primary, family_kind = resistance, "descending"
 
-    # HARD RULE: yellow bias line must stay on the correct side of price.
-    # Uptrend  → line BELOW price (support)
-    # Downtrend → line ABOVE price (resistance)
-    # If the fitted primary violates this on the most recent bars, discard it
-    # so we never draw a "support" line cutting through or above price.
-    if primary is not None:
-        line_now = float(primary.get("y_end", primary.get("y1", 0)))
-        atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else abs(close) * 0.002
-        buffer = max(atr_now * 0.15, 1e-9)
-        if family_kind == "ascending":
-            # Must be support: recent closes should be at or above the line
-            recent_closes = df["Close"].iloc[-6:].astype(float)
-            if (recent_closes < line_now - buffer).sum() >= 3 or close < line_now - buffer * 2:
-                # Line is not acting as support — invalidate
-                primary = None
-                family_kind = "none"
-        elif family_kind == "descending":
-            recent_closes = df["Close"].iloc[-6:].astype(float)
-            if (recent_closes > line_now + buffer).sum() >= 3 or close > line_now + buffer * 2:
-                primary = None
-                family_kind = "none"
+    # KEEP the primary trendline even after a break.
+    # Classic breakout + retest analysis (like the reference image) requires
+    # the line to stay visible so the break and the retest can be scored.
+    # Direction / strength logic below correctly labels the current state.
 
     family_lines = []
     channel = None
     if primary:
-        family_lines = _build_parallel_family(primary, recent_pivots, n, max_members=min(2, max_lines))
-        if len(family_lines) >= 2:
-            channel = {
-                "lower": family_lines[0],
-                "upper": family_lines[-1],
-                "mid_end": (family_lines[0]["y_end"] + family_lines[-1]["y_end"]) / 2.0,
-                "width": abs(family_lines[-1]["y_end"] - family_lines[0]["y_end"]),
-                "members": family_lines,
-            }
+        # Prefer a single clean primary trendline (the black line style in
+        # the reference image). Only add a parallel rail when the channel
+        # is meaningfully wide.
+        family_lines = [primary]
+        extras = _build_parallel_family(primary, recent_pivots, n, max_members=2)
+        if len(extras) >= 2:
+            width = abs(extras[-1]["y_end"] - extras[0]["y_end"])
+            atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
+            if atr_now and width > 0.8 * atr_now:
+                family_lines = extras
+                channel = {
+                    "lower": family_lines[0],
+                    "upper": family_lines[-1],
+                    "mid_end": (family_lines[0]["y_end"] + family_lines[-1]["y_end"]) / 2.0,
+                    "width": width,
+                    "members": family_lines,
+                }
 
     # Direction from family geometry (price reveals it)
     direction = "NEUTRAL"
