@@ -486,6 +486,25 @@ def generate_trendline_map(
         ax.annotate(text, (px, py), fontsize=7.5, color="#e8e8e8", fontweight="bold",
                     xytext=(0, y_off), textcoords="offset points", ha="center", zorder=12)
 
+    # --- Shared label collision registry --------------------------------
+    # Every text annotation on this chart (scanned-pattern Top/Bottom/
+    # Neckline markers, M/W pattern markers, HH/HH Failed, Trendline
+    # Breakout/Retest) claims a slot here before it's placed. If another
+    # label already sits within min_gap_bars on the same side (above vs
+    # below price), it gets bumped to the next vertical shelf instead of
+    # printing directly on top of the earlier one. This is what was
+    # missing before and caused labels to render as unreadable overlapping
+    # text ("HHHFailedd" stamped on a "Top" box, etc.).
+    _claimed_slots = {"up": [], "down": []}
+
+    def _claim_slot(px, side, min_gap_bars=9):
+        level = 0
+        while any(abs(px - used_px) < min_gap_bars and used_level == level
+                  for used_px, used_level in _claimed_slots[side]):
+            level += 1
+        _claimed_slots[side].append((px, level))
+        return level
+
     family_kind = family.get("family_kind", "")
     bias_color = "#00e676" if family_kind == "ascending" else "#ff5252"
 
@@ -602,9 +621,13 @@ def generate_trendline_map(
                             continue
                         ax.scatter([cx], [y], s=90, c=p_color, edgecolors="#ffffff",
                                    linewidths=1.8, zorder=9, marker="o")
-                        # Place label below for lows, above for highs
+                        # Place label below for lows, above for highs, staggered
+                        # so consecutive tops/bottoms (Top 1/Top 2/Top 3) don't
+                        # print directly on top of each other.
                         is_low_label = any(k in str(lbl).lower() for k in ("shoulder", "head", "bottom"))
-                        y_off = -14 if is_low_label else 12
+                        side = "down" if is_low_label else "up"
+                        level = _claim_slot(cx, side, min_gap_bars=7)
+                        y_off = (-14 - level * 16) if is_low_label else (12 + level * 16)
                         ax.annotate(str(lbl), (cx, y), fontsize=8.5, color="#ffffff",
                                     fontweight="bold", xytext=(0, y_off),
                                     textcoords="offset points", ha="center", zorder=10,
@@ -674,8 +697,11 @@ def generate_trendline_map(
                 if 0 <= px < chart_len:
                     ax.scatter([px], [float(p["price"])], s=90, c=mw_color,
                                edgecolors="#ffffff", linewidths=1.8, zorder=9)
+                    side = "down" if tag == "Bottom" else "up"
+                    level = _claim_slot(px, side, min_gap_bars=7)
+                    y_off = (12 + level * 16) if tag == "Top" else (-14 - level * 16)
                     ax.annotate(tag, (px, float(p["price"])), fontsize=8.5, color="#ffffff",
-                                fontweight="bold", xytext=(0, 12 if tag == "Top" else -14),
+                                fontweight="bold", xytext=(0, y_off),
                                 textcoords="offset points", ha="center", zorder=10,
                                 bbox=dict(boxstyle="round,pad=0.25", facecolor=mw_color,
                                           edgecolor="none", alpha=0.92))
@@ -744,6 +770,8 @@ def generate_trendline_map(
         px = int(lbl["index"]) - offset
         if not (0 <= px < chart_len):
             continue
+        level = _claim_slot(px, "up")
+        y_off = padding * (0.55 + 0.5 * level)
         if lbl["label"] == "HH Failed" and "pair_index" in lbl:
             ppx = int(lbl["pair_index"]) - offset
             if 0 <= ppx < chart_len:
@@ -751,12 +779,12 @@ def generate_trendline_map(
                 ax.plot([ppx, px], [y, y], color="#ffffff", linestyle="--",
                         linewidth=1.1, alpha=0.75, zorder=7)
             ax.annotate("HH Failed", xy=(px, float(lbl["price"])),
-                        xytext=(px, float(lbl["price"]) + padding * 0.9),
+                        xytext=(px, float(lbl["price"]) + y_off),
                         color="#ffffff", fontsize=9, fontweight="bold", ha="center",
                         arrowprops=dict(arrowstyle="-", color="#ffffff", lw=0.9, alpha=0.7), zorder=12)
         else:
             ax.annotate("HH", xy=(px, float(lbl["price"])),
-                        xytext=(px, float(lbl["price"]) + padding * 0.6),
+                        xytext=(px, float(lbl["price"]) + y_off),
                         color="#eeeeee", fontsize=9, fontweight="bold", ha="center", zorder=12)
 
     # --- Trendline Breakout / Trendline Retest callouts + shaded zone ---
@@ -764,20 +792,24 @@ def generate_trendline_map(
     if br and br.get("breakout_index") is not None:
         bx = int(br["breakout_index"]) - offset
         if 0 <= bx < chart_len:
+            level = _claim_slot(bx, "up")
+            y_off = padding * (1.1 + 0.5 * level)
             ax.annotate(
                 "Trendline\nBreakout",
                 xy=(bx, float(br["breakout_price"])),
-                xytext=(bx, float(br["breakout_price"]) + padding * 1.3),
+                xytext=(bx, float(br["breakout_price"]) + y_off),
                 color="#ff9800", fontsize=8.5, fontweight="bold", ha="center",
                 arrowprops=dict(arrowstyle="->", color="#ff9800", lw=1.3), zorder=12,
             )
         if br.get("retest_index") is not None:
             rx = int(br["retest_index"]) - offset
             if 0 <= rx < chart_len:
+                level = _claim_slot(rx, "down")
+                y_off = padding * (1.1 + 0.5 * level)
                 ax.annotate(
                     "Trendline\nRetest",
                     xy=(rx, float(br["retest_price"])),
-                    xytext=(rx, float(br["retest_price"]) - padding * 1.3),
+                    xytext=(rx, float(br["retest_price"]) - y_off),
                     color="#ffca28", fontsize=8.5, fontweight="bold", ha="center",
                     arrowprops=dict(arrowstyle="->", color="#ffca28", lw=1.3), zorder=12,
                 )
