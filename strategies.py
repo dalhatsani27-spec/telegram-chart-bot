@@ -768,56 +768,21 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         resistance = None
         shallow_rejected = True
 
-    # LOCKED RULE (updated):
-    #   Uptrend  → map sequential pivot LOWS (A→N higher lows / ascending support)
-    #   Downtrend → map sequential pivot HIGHS (lower highs / descending resistance)
-    # Prefer the directional family that matches structure; do not mix.
-    # Short-term trendline structure is PRIMARY — we adapt to what price is
-    # actually doing instead of fighting it with lagging higher-timeframe bias.
+    # SIMPLE RULE (matches MT5 hand-drawn style):
+    # Always keep BOTH a clean ascending support AND a clean descending
+    # resistance when they exist. This is exactly how a trader draws the
+    # two green lines on the chart you showed.
     close = float(df["Close"].iloc[-1])
     primary = None
     family_kind = "none"
 
-    # Detect simple structure bias from recent non-ranging pivots
-    # Prefer sequential higher lows (A→N) for bullish, sequential lower highs for bearish.
-    recent = pivots[-8:] if len(pivots) >= 4 else pivots
-    highs = [p for p in recent if p["type"] == "high"]
-    lows = [p for p in recent if p["type"] == "low"]
-    struct_bias = "NEUTRAL"
-    if len(highs) >= 2 and len(lows) >= 2:
-        hh = highs[-1]["price"] > highs[-2]["price"]
-        hl = lows[-1]["price"] > lows[-2]["price"]
-        lh = highs[-1]["price"] < highs[-2]["price"]
-        ll = lows[-1]["price"] < lows[-2]["price"]
-        if hh and hl:
-            struct_bias = "BULLISH"
-        elif lh and ll:
-            struct_bias = "BEARISH"
-        # Also accept pure sequential higher lows even without clear HH yet
-        elif len(lows) >= 3 and lows[-1]["price"] > lows[-2]["price"] > lows[-3]["price"]:
-            struct_bias = "BULLISH"
-        elif len(highs) >= 3 and highs[-1]["price"] < highs[-2]["price"] < highs[-3]["price"]:
-            struct_bias = "BEARISH"
-
-    if struct_bias == "BULLISH" and support:
-        # Uptrend: only map pivot lows (sequential A→N)
-        primary, family_kind = support, "ascending"
-    elif struct_bias == "BEARISH" and resistance:
-        # Downtrend: only map pivot highs
-        primary, family_kind = resistance, "descending"
-    elif support and resistance:
+    if support and resistance:
+        # Both valid → treat as a converging structure (triangle / wedge)
+        # Pick the primary for scoring based on which side price is closer to,
+        # but we will still return BOTH lines for drawing.
         s_end = support["y_end"]
         r_end = resistance["y_end"]
-        # Prefer ascending when price is clearly above the rising support
-        if close >= s_end * 0.998:
-            primary, family_kind = support, "ascending"
-        elif close <= r_end * 1.002:
-            primary, family_kind = resistance, "descending"
-        elif support["touches"] >= resistance["touches"]:
-            primary, family_kind = support, "ascending"
-        elif resistance["touches"] > support["touches"]:
-            primary, family_kind = resistance, "descending"
-        elif close > (s_end + r_end) / 2:
+        if abs(close - s_end) <= abs(close - r_end):
             primary, family_kind = support, "ascending"
         else:
             primary, family_kind = resistance, "descending"
@@ -1139,8 +1104,9 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         "entry_rules": entry_rules,
         "family_kind": family_kind,
         "family_lines": family_lines,  # the clean parallel set
-        "uptrends": [primary] if family_kind == "ascending" and primary else [],
-        "downtrends": [primary] if family_kind == "descending" and primary else [],
+        # Always expose both lines when they exist (MT5-style dual trendlines)
+        "uptrends": [support] if support else [],
+        "downtrends": [resistance] if resistance else [],
         "channel": channel,
         "wedge": wedge,
         "horizontal_levels": horizontal_levels,
