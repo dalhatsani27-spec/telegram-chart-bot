@@ -22,6 +22,7 @@ import market_data
 from market_analysis import direction_banner
 from chart_engine import generate_trendline_educational_map, generate_ote_map
 import strategies
+import smc_engine
 import execution_engine as engine
 from execution_engine import state as ts_state
 
@@ -107,6 +108,7 @@ def format_trade_ticket(symbol, strategy_name, direction, score, ticket, reasons
 # 3. TELEGRAM: STATE, MENUS, HANDLERS
 # ==========================================
 primary_chat_id = None  # this is a personal single-user bot; captured on first contact
+_analysis_mode = {}
 TELEGRAM_LOOP = None
 TELEGRAM_APP = None
 
@@ -152,6 +154,7 @@ def get_home_menu():
         [InlineKeyboardButton(f"🧠 STRATEGY: {strat_label}", callback_data="menu_strategy")],
         [InlineKeyboardButton("📐  Trendline (4H→1H→30M)", callback_data="menu_trendline")],
         [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],
+        [InlineKeyboardButton("🏦  SMC Strategy", callback_data="menu_smc"), InlineKeyboardButton("🔀  Hybrid", callback_data="menu_hybrid")],
         [InlineKeyboardButton("👁  Watch Price Level", callback_data="menu_price_watch"),
          InlineKeyboardButton("📋  My Watch Levels", callback_data="show_price_watches")],
         [InlineKeyboardButton("🔎  Custom Ticker", callback_data="prompt_custom_ticker")],
@@ -211,6 +214,7 @@ def get_mobile_panel_menu():
 
 def get_category_keyboard(prefix, back_callback, extra_row=None):
     kb = [
+        [InlineKeyboardButton("🏠 Dashboard", callback_data="menu_home")],
         [InlineKeyboardButton("💱 Forex Majors", callback_data=f"{prefix}|Forex Majors"),
          InlineKeyboardButton("💱 Forex Crosses", callback_data=f"{prefix}|Forex Crosses")],
         [InlineKeyboardButton("🥇 Commodities", callback_data=f"{prefix}|Commodities"),
@@ -226,7 +230,7 @@ def get_category_keyboard(prefix, back_callback, extra_row=None):
 
 
 def get_pairs_keyboard(pairs, prefix, back_callback):
-    kb, row = [], []
+    kb, row = [[InlineKeyboardButton("🏠 Dashboard", callback_data="menu_home")]], []
     for pair in pairs:
         row.append(InlineKeyboardButton(pair, callback_data=f"{prefix}|{pair}"))
         if len(row) == 2:
@@ -436,6 +440,22 @@ async def send_ote_analysis(context, chat_id, symbol):
         )
 
 
+async def send_smc_analysis(context, chat_id, symbol):
+    try:
+        a=smc_engine.run_smc_analysis(symbol)
+        if not a.get("error"):
+            try: await context.bot.send_photo(chat_id=chat_id, photo=smc_engine.generate_smc_chart(a), caption=f"{symbol} SMC M30")
+            except Exception: pass
+        await context.bot.send_message(chat_id=chat_id,text=smc_engine.format_smc_report(a),reply_markup=get_home_menu())
+    except Exception as e: await context.bot.send_message(chat_id=chat_id,text=f"SMC analysis failed: {e}",reply_markup=get_home_menu())
+
+async def send_hybrid_analysis(context, chat_id, symbol):
+    try:
+        a=smc_engine.run_hybrid_analysis(symbol)
+        await context.bot.send_message(chat_id=chat_id,text=smc_engine.format_hybrid_report(a),reply_markup=get_home_menu())
+    except Exception as e: await context.bot.send_message(chat_id=chat_id,text=f"Hybrid analysis failed: {e}",reply_markup=get_home_menu())
+
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A typed symbol is routed to whichever strategy is currently selected."""
     global primary_chat_id
@@ -462,6 +482,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Invalid price. Send a positive numeric price, e.g. 4385.50.")
         return
     symbol = raw_text.upper()
+    if _analysis_mode.get(chat_id) == "SMC":
+        await send_smc_analysis(context, chat_id, symbol); return
+    if _analysis_mode.get(chat_id) == "HYBRID":
+        await send_hybrid_analysis(context, chat_id, symbol); return
     await update.message.reply_text(f"Running {ts_state.strategy_label()} analysis for {symbol}...")
     if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:
         await send_ote_analysis(context, chat_id, symbol)
@@ -506,6 +530,22 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             f"Strategy set → {ts_state.strategy_label()}",
             reply_markup=get_strategy_menu(),
         )
+
+    # ---------------- SMC / Hybrid ----------------
+    elif data == "menu_smc":
+        _analysis_mode[chat_id]="SMC"
+        await query.edit_message_text("🏦 SMC STRATEGY\n\n4H → 1H → 30M\nLiquidity → Sweep → Displacement → BOS/MSS → OB/FVG → Targets", reply_markup=get_category_keyboard("cat_smc","menu_home"))
+    elif data.startswith("cat_smc|"):
+        _,cat=data.split("|",1); await query.edit_message_text(f"🏦 SMC — {cat}",reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat,[]),"run_smc","menu_smc"))
+    elif data.startswith("run_smc|"):
+        _,symbol=data.split("|",1); _analysis_mode[chat_id]="SMC"; await query.edit_message_text(f"Running SMC analysis for {symbol}..."); await send_smc_analysis(context,chat_id,symbol)
+    elif data == "menu_hybrid":
+        _analysis_mode[chat_id]="HYBRID"
+        await query.edit_message_text("🔀 HYBRID\n\nSMC + Trendline. Agreement can confirm; conflict always means WAIT.",reply_markup=get_category_keyboard("cat_hybrid","menu_home"))
+    elif data.startswith("cat_hybrid|"):
+        _,cat=data.split("|",1); await query.edit_message_text(f"🔀 Hybrid — {cat}",reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat,[]),"run_hybrid","menu_hybrid"))
+    elif data.startswith("run_hybrid|"):
+        _,symbol=data.split("|",1); _analysis_mode[chat_id]="HYBRID"; await query.edit_message_text(f"Running Hybrid analysis for {symbol}..."); await send_hybrid_analysis(context,chat_id,symbol)
 
     # ---------------- Trendline ----------------
     elif data == "menu_trendline":
@@ -756,6 +796,16 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         )
 
 
+async def smc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global primary_chat_id
+    primary_chat_id=update.effective_chat.id; _analysis_mode[primary_chat_id]="SMC"
+    await update.message.reply_text("🏦 SMC mode selected. Send a symbol.",reply_markup=get_home_menu())
+
+async def hybrid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global primary_chat_id
+    primary_chat_id=update.effective_chat.id; _analysis_mode[primary_chat_id]="HYBRID"
+    await update.message.reply_text("🔀 Hybrid mode selected. Send a symbol.",reply_markup=get_home_menu())
+
 # ==========================================
 # 4. NOTIFIER CALLBACKS (wired into execution_engine.py so it can push
 #    Telegram messages without importing bot.py directly)
@@ -818,10 +868,13 @@ def run_telegram_bot():
     app_bot = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     TELEGRAM_APP = app_bot
     app_bot.add_handler(CommandHandler("start", start_command))
+    app_bot.add_handler(CommandHandler("smc", smc_command))
+    app_bot.add_handler(CommandHandler("hybrid", hybrid_command))
     app_bot.add_handler(CallbackQueryHandler(button_callback_handler))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     loop.run_until_complete(app_bot.initialize())
+    loop.run_until_complete(app_bot.bot.set_my_commands([('start','Open Dashboard'),('smc','SMC analysis'),('hybrid','SMC + Trendline')]))
     loop.run_until_complete(app_bot.start())
     loop.run_until_complete(app_bot.updater.start_polling(drop_pending_updates=True))
     loop.create_task(background_watchlist_scanner())
