@@ -2040,6 +2040,7 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
         validation_text = "TENTATIVE"
 
     lifecycle = _trendline_status_text(family)
+    modern_state = family.get("market_state") or {}
     structure = _trendline_structure_sequence(family)
     structure_bias = "BULLISH" if bias_30 == "BUY" else "BEARISH" if bias_30 == "SELL" else "NEUTRAL"
 
@@ -2373,6 +2374,57 @@ def build_ote_ticket(analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 # read gates and scores it (see topdown_engine.get_topdown_bias).
 # ============================================================
 
+
+
+def _modern_trendline_market_state(family: Dict[str, Any]) -> Dict[str, Any]:
+    """Professional market-state filter layered over the existing trendline geometry.
+
+    It does not replace the existing edge. It grades trend quality using slope,
+    structure sequence, volatility expansion and line integrity, then converts
+    that context into a trade permission.
+    """
+    df = family.get("df")
+    if df is None or len(df) < 30:
+        return {"state":"UNKNOWN","confidence":0,"trade_permission":"WAIT","reason":"Insufficient price history."}
+    close = pd.to_numeric(df["Close"], errors="coerce")
+    atr = pd.to_numeric(df.get("ATR", pd.Series(index=df.index, dtype=float)), errors="coerce")
+    atr_now = float(atr.iloc[-1]) if len(atr) and pd.notna(atr.iloc[-1]) else float((df.High-df.Low).tail(14).mean())
+    atr_med = float(atr.tail(50).median()) if len(atr.dropna()) else atr_now
+    vol_ratio = atr_now / max(atr_med, 1e-9)
+    anns = [a for a in (family.get("trendline_annotations") or []) if a.get("label") in {"HH","HL","LH","LL"}]
+    labels = [a.get("label") for a in anns[-6:]]
+    bull_seq = labels.count("HH") + labels.count("HL")
+    bear_seq = labels.count("LH") + labels.count("LL")
+    quality = float(family.get("primary_quality") or 0)
+    touches = int(family.get("primary_touches") or 0)
+    brk = family.get("trendline_retest") or {}
+    retest = brk.get("status", "INTACT")
+    direction = family.get("direction", "NEUTRAL")
+    if direction == "BUY" and bull_seq >= 2 and quality >= 55:
+        state = "TRENDING_BULL"
+    elif direction == "SELL" and bear_seq >= 2 and quality >= 55:
+        state = "TRENDING_BEAR"
+    elif vol_ratio >= 1.35:
+        state = "EXPANSION"
+    elif bull_seq and bear_seq and abs(bull_seq-bear_seq) <= 1:
+        state = "TRANSITION"
+    elif quality < 45 or touches < 2:
+        state = "CONSOLIDATION"
+    else:
+        state = "TRANSITION"
+    confidence = min(100, int(35 + min(touches,5)*8 + min(max(quality,0),100)*.35 + (10 if vol_ratio>1.1 else 0)))
+    permission = "WAIT"
+    if state in ("TRENDING_BULL","TRENDING_BEAR") and direction in ("BUY","SELL"):
+        permission = "CONTINUATION"
+    if retest == "BREAK_RETEST_CONFIRMED":
+        permission = "BREAK_RETEST"
+        confidence = min(100, confidence+10)
+    elif retest == "FAKEOUT":
+        permission = "WAIT"
+        confidence = max(0, confidence-15)
+    reason = f"{state}: structure {bull_seq} bull/{bear_seq} bear, line quality {quality:.0f}, {touches} touches, ATR regime {vol_ratio:.2f}x."
+    return {"state":state,"confidence":confidence,"trade_permission":permission,"reason":reason,"volatility_ratio":vol_ratio,"bull_structure":bull_seq,"bear_structure":bear_seq}
+
 def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     topdown = get_topdown_bias(symbol)
     df_30m = market_data.fetch_candles(symbol, "30min", count=250)
@@ -2392,6 +2444,14 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     family["htf_structure_4h"] = (topdown.get("swing_context_4h") or {}).get("structure_bias", "NEUTRAL")
     family["htf_structure_1h"] = (topdown.get("swing_context_1h") or {}).get("structure_bias", "NEUTRAL")
     family["continuation_state"] = _classify_trendline_state(family)
+    family["market_state"] = _modern_trendline_market_state(family)
+    # Market-state is a permission layer, not a geometry replacement. A weak
+    # state cannot create a trade; it can only downgrade an existing bias.
+    if family.get("market_state", {}).get("trade_permission") == "WAIT" and family.get("direction") in ("BUY", "SELL"):
+        family["gating_notes"] = list(family.get("gating_notes") or []) + [
+            "⚠ Market-state filter: trendline geometry exists, but the current state is not clean enough for an immediate entry."
+        ]
+        family["strength"] = max(0, int(family.get("strength", 0)) - 8)
     if family.get("error"):
         return family
 
