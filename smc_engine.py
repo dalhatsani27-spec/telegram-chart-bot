@@ -3,6 +3,7 @@ from io import BytesIO
 import mplfinance as mpf
 import numpy as np
 import pandas as pd
+import matplotlib.patches as mpatches
 import market_data
 from market_analysis import detect_confirmation_candle
 from topdown_engine import get_topdown_bias
@@ -38,6 +39,26 @@ def _pivots(df, left=3, right=3, min_leg_atr=.55):
     return out[-32:]
 
 
+def _structure_labels(pivots):
+    """Classify alternating swing points as HH/HL/LH/LL like the education map."""
+    highs = [p for p in pivots if p['type'] == 'high']
+    lows = [p for p in pivots if p['type'] == 'low']
+    out = []
+    for i, p in enumerate(highs):
+        if i == 0:
+            label = 'H'
+        else:
+            label = 'HH' if p['close'] > highs[i-1]['close'] else 'LH'
+        out.append({**p, 'label': label})
+    for i, p in enumerate(lows):
+        if i == 0:
+            label = 'L'
+        else:
+            label = 'HL' if p['close'] > lows[i-1]['close'] else 'LL'
+        out.append({**p, 'label': label})
+    return sorted(out, key=lambda x: x['i'])
+
+
 def _bias(p):
     hs = [x for x in p if x['type'] == 'high']
     ls = [x for x in p if x['type'] == 'low']
@@ -63,7 +84,7 @@ def _liquidity(p, atr):
     return sorted(out, key=lambda x: x['i'], reverse=True)
 
 
-def _find_sweep(df, pools, lookback=40):
+def _find_sweep(df, pools, lookback=60):
     start = max(0, len(df)-lookback)
     found = None
     for i in range(start, len(df)):
@@ -104,8 +125,6 @@ def _sequence(df, pivots, sweep, forced_direction=None):
     ls = [p for p in before if p['type'] == 'low']
     pre_bias = _bias(before)
     anchor = hs[-1] if direction == 'BUY' and hs else ls[-1] if direction == 'SELL' and ls else None
-
-    # The screenshot model: reversal requires a structural change first, then BOS.
     reversal = (direction == 'BUY' and pre_bias == 'BEARISH') or (direction == 'SELL' and pre_bias == 'BULLISH')
     continuation = (direction == 'BUY' and pre_bias == 'BULLISH') or (direction == 'SELL' and pre_bias == 'BEARISH')
 
@@ -114,12 +133,8 @@ def _sequence(df, pivots, sweep, forced_direction=None):
 
     choch = _first_break(df, anchor['price'], direction, si+1)
     if not reversal:
-        # Continuation: sweep + inducement + BOS in the existing direction.
         bos = choch
-        if continuation and bos:
-            label = 'CONTINUATION'
-        else:
-            label = 'UNCONFIRMED'
+        label = 'CONTINUATION' if continuation and bos else 'UNCONFIRMED'
         end_i = bos['i'] if bos else len(df)-1
     else:
         if not choch:
@@ -138,7 +153,7 @@ def _sequence(df, pivots, sweep, forced_direction=None):
 
 
 def _displacement(df, direction, start_i=0):
-    for i in range(len(df)-1, max(start_i, len(df)-10)-1, -1):
+    for i in range(len(df)-1, max(start_i, len(df)-12)-1, -1):
         o, h, l, c = map(float, [df.Open.iloc[i], df.High.iloc[i], df.Low.iloc[i], df.Close.iloc[i]])
         rng = max(h-l, 1e-9)
         body = abs(c-o)
@@ -153,12 +168,21 @@ def _ob(df, disp):
     if not disp:
         return None
     a = max(float(df.ATR.iloc[disp['i']]), 1e-9)
-    for i in range(disp['i']-1, max(-1, disp['i']-9), -1):
+    for i in range(disp['i']-1, max(-1, disp['i']-12), -1):
         o, h, l, c = map(float, [df.Open.iloc[i], df.High.iloc[i], df.Low.iloc[i], df.Close.iloc[i]])
         if h-l < .25*a:
             continue
         if (disp['direction'] == 'BUY' and c < o) or (disp['direction'] == 'SELL' and c > o):
-            return {'type': 'Bullish OB' if disp['direction'] == 'BUY' else 'Bearish OB', 'low': l, 'high': h, 'i': i, 'fresh': True, 'direction': disp['direction']}
+            ob = {'type': 'Bullish OB' if disp['direction'] == 'BUY' else 'Bearish OB', 'low': l, 'high': h, 'i': i, 'direction': disp['direction']}
+            subsequent = df.iloc[i+1:]
+            if disp['direction'] == 'BUY':
+                ob['mitigated'] = bool(len(subsequent) and float(subsequent.Low.min()) <= h)
+                ob['invalidated'] = bool(len(subsequent) and float(subsequent.Close.min()) < l)
+            else:
+                ob['mitigated'] = bool(len(subsequent) and float(subsequent.High.max()) >= l)
+                ob['invalidated'] = bool(len(subsequent) and float(subsequent.Close.max()) > h)
+            ob['fresh'] = not ob['mitigated'] and not ob['invalidated']
+            return ob
     return None
 
 
@@ -168,9 +192,15 @@ def _fvg(df, direction, start_i=0):
         h, l = float(df.High.iloc[i]), float(df.Low.iloc[i])
         a = max(float(df.ATR.iloc[i]), 1e-9)
         if direction == 'BUY' and l > h2 and l-h2 >= .10*a:
-            return {'low': h2, 'high': l, 'direction': 'BUY', 'i': i}
+            low, high = h2, l
+            post = df.iloc[i+1:]
+            mitigated = bool(len(post) and float(post.Low.min()) <= high)
+            return {'low': low, 'high': high, 'direction': 'BUY', 'i': i, 'mitigated': mitigated, 'fresh': not mitigated}
         if direction == 'SELL' and h < l2 and l2-h >= .10*a:
-            return {'low': h, 'high': l2, 'direction': 'SELL', 'i': i}
+            low, high = h, l2
+            post = df.iloc[i+1:]
+            mitigated = bool(len(post) and float(post.High.max()) >= low)
+            return {'low': low, 'high': high, 'direction': 'SELL', 'i': i, 'mitigated': mitigated, 'fresh': not mitigated}
     return None
 
 
@@ -211,8 +241,6 @@ def run_smc_analysis(symbol, count=260):
         td_dir = td.get('direction') if td.get('direction') in ('BUY', 'SELL') else None
         seq = _sequence(m30, p30, sweep, None)
         direction = seq.get('direction') if seq.get('direction') in ('BUY', 'SELL') else td_dir or 'WAIT'
-
-        # A directional conflict after a sweep is not an entry. We keep the sweep visible but force WAIT.
         conflict = bool(sweep and td_dir and direction != td_dir and seq.get('model') == 'LIQUIDITY_CONFLICT')
         disp_start = sweep['i'] if sweep else max(0, len(m30)-12)
         disp = _displacement(m30, direction, disp_start) if direction in ('BUY', 'SELL') else None
@@ -222,8 +250,8 @@ def run_smc_analysis(symbol, count=260):
         entry = float(m30.Close.iloc[-1])
         sl = ob['low']-atr*.15 if direction == 'BUY' and ob else ob['high']+atr*.15 if direction == 'SELL' and ob else entry-atr*1.5 if direction == 'BUY' else entry+atr*1.5 if direction == 'SELL' else entry
         risk = abs(entry-sl)
-        targets = _targets(pools, entry, direction, risk) if direction in ('BUY', 'SELL') else []
-        ok, candle = detect_confirmation_candle(m30, direction) if direction in ('BUY', 'SELL') else (False, None)
+        targets = _targets(pools, entry, direction, risk) if direction in ('BUY','SELL') else []
+        ok, candle = detect_confirmation_candle(m30, direction) if direction in ('BUY','SELL') else (False, None)
 
         sweep_ok = bool(sweep and sweep['event'] == ('SSL_SWEEP' if direction == 'BUY' else 'BSL_SWEEP'))
         inducement_ok = bool(seq.get('inducement'))
@@ -231,25 +259,26 @@ def run_smc_analysis(symbol, count=260):
         bos_ok = bool(seq.get('bos'))
         structure_ok = bos_ok and (seq.get('model') == 'CONTINUATION' or choch_ok)
         displacement_ok = bool(disp and disp['direction'] == direction and (not bos_ok or disp['i'] >= bos_ok['i']))
-        # If displacement happened before BOS, it is still valid for the sequence only when it follows CHoCH.
         if bos_ok and disp and disp['i'] < bos_ok['i']:
             displacement_ok = False
-        ob_ok = bool(ob and ob['direction'] == direction)
+        ob_ok = bool(ob and ob['direction'] == direction and not ob.get('invalidated'))
         fv_ok = bool(fvg and fvg['direction'] == direction)
         a4 = (direction == 'BUY' and b4 == 'BULLISH') or (direction == 'SELL' and b4 == 'BEARISH')
         a1 = (direction == 'BUY' and b1 == 'BULLISH') or (direction == 'SELL' and b1 == 'BEARISH')
         score = sum([15 if a4 else 0, 10 if a1 else 0, 20 if sweep_ok else 0, 10 if inducement_ok else 0, 15 if displacement_ok else 0, 15 if structure_ok else 0, 8 if ob_ok else 0, 4 if fv_ok else 0, 3 if ok else 0])
-        confirmed = direction in ('BUY', 'SELL') and not conflict and sweep_ok and inducement_ok and structure_ok and displacement_ok and ob_ok and score >= 70
+        confirmed = direction in ('BUY','SELL') and not conflict and sweep_ok and inducement_ok and structure_ok and displacement_ok and ob_ok and score >= 70
         status = 'CONFIRMED' if confirmed else 'WAIT'
+        structures = _structure_labels(p30)
 
         return {
-            'symbol': symbol, 'df': m30, 'direction': direction, 'status': status, 'score': min(score, 100),
+            'symbol': symbol, 'df': m30, 'direction': direction, 'status': status, 'score': min(score,100),
             'bias_4h': b4, 'bias_1h': b1, 'bias_30m': b30, 'topdown': td, 'dealing_range': dr,
             'liquidity': pools, 'sweep': sweep, 'inducement': seq.get('inducement'), 'displacement': disp,
             'structure_event': seq.get('bos') or seq.get('choch'), 'choch': seq.get('choch'), 'bos': seq.get('bos'),
-            'setup_type': seq.get('model', 'NONE'), 'pre_sweep_bias': seq.get('pre_bias'), 'order_block': ob,
+            'setup_type': seq.get('model','NONE'), 'pre_sweep_bias': seq.get('pre_bias'), 'order_block': ob,
             'fvg': fvg, 'candle_confirmation': candle if ok else None, 'entry': entry, 'sl': sl,
             'risk': risk, 'targets': targets, 'key_levels_4h': td.get('key_levels_4h', []),
+            'structure_labels': structures,
             'requirements': {'sweep': sweep_ok, 'inducement': inducement_ok, 'choch': choch_ok, 'bos': bos_ok, 'structure': structure_ok, 'displacement': displacement_ok, 'order_block': ob_ok, 'fvg': fv_ok},
         }
     except Exception as e:
@@ -257,91 +286,206 @@ def run_smc_analysis(symbol, count=260):
 
 
 def _p(x):
-    return f'{float(x):.5f}' if isinstance(x, (int, float, np.floating)) else '—'
+    return f'{float(x):.5f}' if isinstance(x,(int,float,np.floating)) else '—'
 
 
 def format_smc_report(a):
     if a.get('error'):
         return '🏦 SMC ANALYSIS\n\n❌ ' + a['error']
-    dr, s, o, f = a['dealing_range'], a.get('sweep'), a.get('order_block'), a.get('fvg')
-    ch, bos, ind, d = a.get('choch'), a.get('bos'), a.get('inducement'), a.get('displacement')
-    r = a.get('requirements', {})
-    lines = [
-        f"🏦 SMC ANALYSIS — {a['symbol']} M30", '', 'TOP-DOWN CONTEXT',
-        f"4H structure: {a['bias_4h']}", f"1H structure: {a['bias_1h']}", f"30M structure: {a['bias_30m']}",
-        f"4H dealing range: {_p(dr['low'])} — {_p(dr['high'])}", f"Equilibrium: {_p(dr['equilibrium'])}", f"Price location: {dr['location']}", '',
-        'LIQUIDITY / SETUP', f"Sweep: {s['event'] if s else '—'}", f"Inducement: {_p(ind['price']) if ind else '—'}",
-        f"Setup type: {a.get('setup_type','—')}", '', 'STRUCTURE / ORDER FLOW',
-        f"CHoCH/MSS: {_p(ch['level']) if ch else '—'}", f"BOS: {_p(bos['level']) if bos else '—'}",
-        f"Displacement: {d['direction']} ({d['atr_multiple']:.2f} ATR)" if d else 'Displacement: —',
-        f"Order Block: {o['type']} {_p(o['low'])} — {_p(o['high'])}" if o else 'Order Block: —',
-        f"FVG: {_p(f['low'])} — {_p(f['high'])}" if f else 'FVG: —', f"Candle confirmation: {a.get('candle_confirmation') or '—'}", '',
-        'SEQUENCE CHECK',
-        f"Sweep {'✅' if r.get('sweep') else '❌'} | Inducement {'✅' if r.get('inducement') else '❌'}",
-        f"CHoCH {'✅' if r.get('choch') else '—'} | BOS {'✅' if r.get('bos') else '❌'}",
-        f"Displacement {'✅' if r.get('displacement') else '❌'} | OB {'✅' if r.get('order_block') else '❌'} | FVG {'✅' if r.get('fvg') else '—'}", '',
-        '━━━━━━━━━━━━━━━━', '🎯 DECISION', f"BIAS: {a['direction']}", f"SETUP: {a.get('setup_type','—')}",
-        f"STATUS: {a['status']}", f"SMC SCORE: {a['score']}/100", f"ENTRY: {_p(a['entry'])}", f"SL: {_p(a['sl'])}",
-    ]
-    for i, t in enumerate(a.get('targets', [])[:3], 1):
-        lines.append(f"TP{i}: {_p(t['price'])} ({t['kind']} liquidity, {t['rr']:.2f}R)")
-    if not a.get('targets'):
-        lines.append('TP: No qualifying liquidity target ≥1.2R')
+    dr,s,o,f=a['dealing_range'],a.get('sweep'),a.get('order_block'),a.get('fvg')
+    ch,bos,ind,d=a.get('choch'),a.get('bos'),a.get('inducement'),a.get('displacement')
+    r=a.get('requirements',{})
+    lines=[f"🏦 SMC ANALYSIS — {a['symbol']} M30",'', 'TOP-DOWN CONTEXT',
+           f"4H structure: {a['bias_4h']}",f"1H structure: {a['bias_1h']}",f"30M structure: {a['bias_30m']}",
+           f"4H dealing range: {_p(dr['low'])} — {_p(dr['high'])}",f"Equilibrium: {_p(dr['equilibrium'])}",f"Price location: {dr['location']}",'',
+           'LIQUIDITY / SETUP',f"Sweep: {s['event'] if s else '—'}",f"Inducement: {_p(ind['price']) if ind else '—'}",f"Setup type: {a.get('setup_type','—')}",'',
+           'STRUCTURE / ORDER FLOW',f"CHoCH/MSS: {_p(ch['level']) if ch else '—'}",f"BOS: {_p(bos['level']) if bos else '—'}",
+           f"Displacement: {d['direction']} ({d['atr_multiple']:.2f} ATR)" if d else 'Displacement: —',
+           f"Order Block: {o['type']} {_p(o['low'])} — {_p(o['high'])}" if o else 'Order Block: —',
+           f"OB state: {'FRESH' if o and o.get('fresh') else 'MITIGATED' if o else '—'}",f"FVG: {_p(f['low'])} — {_p(f['high'])}" if f else 'FVG: —',
+           f"FVG state: {'FRESH' if f and f.get('fresh') else 'MITIGATED' if f else '—'}",f"Candle confirmation: {a.get('candle_confirmation') or '—'}",'',
+           'SEQUENCE CHECK',f"Sweep {'✅' if r.get('sweep') else '❌'} | Inducement {'✅' if r.get('inducement') else '❌'}",
+           f"CHoCH {'✅' if r.get('choch') else '—'} | BOS {'✅' if r.get('bos') else '❌'}",
+           f"Displacement {'✅' if r.get('displacement') else '❌'} | OB {'✅' if r.get('order_block') else '❌'} | FVG {'✅' if r.get('fvg') else '—'}",'',
+           '━━━━━━━━━━━━━━━━','🎯 DECISION',f"BIAS: {a['direction']}",f"SETUP: {a.get('setup_type','—')}",f"STATUS: {a['status']}",f"SMC SCORE: {a['score']}/100",f"ENTRY: {_p(a['entry'])}",f"SL: {_p(a['sl'])}"]
+    for i,t in enumerate(a.get('targets',[])[:3],1): lines.append(f"TP{i}: {_p(t['price'])} ({t['kind']} liquidity, {t['rr']:.2f}R)")
+    if not a.get('targets'): lines.append('TP: No qualifying liquidity target ≥1.2R')
     return '\n'.join(lines)
 
 
+def _draw_label(ax, x, y, text, color='#f8fafc', yoff=10, size=8, box=True):
+    kw={'fontsize':size,'fontweight':'bold','color':color,'zorder':20,'ha':'center'}
+    if box: kw['bbox']=dict(boxstyle='round,pad=.18',facecolor='#0b0f14',edgecolor=color,alpha=.86,linewidth=.7)
+    ax.annotate(text,(x,y),xytext=(0,yoff),textcoords='offset points',**kw)
+
+
+def _draw_smc_structure(ax, a, df, offset=0, compact=False):
+    """Educational SMC map: HH/HL/LH/LL, sweep, CHoCH, BOS, OB/FVG, liquidity."""
+    n=len(df); atr=float(df.ATR.iloc[-1]); lo=float(df.Low.min()); hi=float(df.High.max())
+    for s in (a.get('structure_labels') or [])[-10:]:
+        x=int(s['i'])-offset; y=float(s['price'])
+        if not 0<=x<n: continue
+        color='#60a5fa' if s['type']=='high' else '#a78bfa'
+        ax.scatter([x],[y],s=34,color='#f8fafc',edgecolors=color,linewidths=1,zorder=18)
+        _draw_label(ax,x,y,s['label'],color=color,yoff=9 if s['type']=='high' else -14,size=7.5,box=False)
+
+    # Liquidity pools and the actual sweep candle.
+    for q in (a.get('liquidity') or [])[:10]:
+        px=float(q['price'])
+        if lo-3*atr <= px <= hi+3*atr:
+            color='#38bdf8' if q['side']=='BSL' else '#a78bfa'
+            ax.axhline(px,color=color,linestyle=':',linewidth=.75,alpha=.42,zorder=2)
+            ax.text(n-1,px,f" {q['side']} {q['kind']}",fontsize=6.3,color=color,ha='right',va='bottom',zorder=10)
+    sw=a.get('sweep')
+    if sw:
+        x=int(sw['i'])-offset; px=float(sw['price'])
+        if 0<=x<n:
+            ax.scatter([x],[px],s=105,marker='D',color='#ffb300',edgecolors='#ffffff',linewidths=1.2,zorder=19)
+            _draw_label(ax,x,px,'SWEEP',color='#ffb300',yoff=18 if sw['event']=='BSL_SWEEP' else -20,size=8)
+            ax.plot([x,x],[float(df.Low.iloc[sw['i']-offset]) if 0<=sw['i']-offset<n else px, float(df.High.iloc[sw['i']-offset]) if 0<=sw['i']-offset<n else px],color='#ffb300',linewidth=1.4,alpha=.75,zorder=17)
+
+    # Explicit CHoCH/BOS break lines and labels.
+    for key,label,color,yoff in [('choch','CHOCH','#f59e0b',15),('bos','BOS','#22c55e',-15)]:
+        br=a.get(key)
+        if not br: continue
+        x=int(br['i'])-offset; level=float(br['level'])
+        if x<0 or x>=n: continue
+        ax.axhline(level,color=color,linestyle='--',linewidth=1.15,alpha=.78,zorder=5)
+        ax.scatter([x],[level],s=70,marker='D',color=color,edgecolors='#ffffff',linewidths=1,zorder=19)
+        _draw_label(ax,x,level,label,color=color,yoff=yoff,size=8)
+        ax.text(max(0,x-2),level,f" {label} {level:.2f}",fontsize=6.2,color=color,ha='right',va='bottom',zorder=10)
+
+    # Inducement marker.
+    ind=a.get('inducement')
+    if ind:
+        x=int(ind['i'])-offset; px=float(ind['price'])
+        if 0<=x<n:
+            ax.scatter([x],[px],s=55,marker='o',color='#f59e0b',edgecolors='#ffffff',linewidths=.9,zorder=18)
+            _draw_label(ax,x,px,'INDUCEMENT',color='#f59e0b',yoff=-20 if ind['type']=='low' else 15,size=6.8)
+
+    # Dealing range / premium-discount map.
+    dr=a.get('dealing_range') or {}
+    if dr:
+        eq=float(dr.get('equilibrium',0))
+        if lo-3*atr <= eq <= hi+3*atr:
+            ax.axhline(eq,color='#f59e0b',linestyle='-.',linewidth=1.0,alpha=.65,zorder=3)
+            ax.text(n*.02,eq,'EQUILIBRIUM',fontsize=6.5,color='#f59e0b',fontweight='bold',va='bottom',zorder=10)
+            ax.text(n*.02,hi,'PREMIUM',fontsize=7,color='#ef4444',fontweight='bold',va='top',zorder=10)
+            ax.text(n*.02,lo,'DISCOUNT',fontsize=7,color='#22c55e',fontweight='bold',va='bottom',zorder=10)
+
+    # OB rectangle, extended to current price. Mitigated zones remain visible but muted.
+    o=a.get('order_block')
+    if o:
+        x0=max(0,int(o['i'])-offset); width=max(1,n-1-x0)
+        bull=o['direction']=='BUY'; fresh=o.get('fresh',False)
+        face='#0d47a1' if bull else '#8b1e2d'; edge='#22c55e' if bull else '#ef4444'
+        rect=mpatches.Rectangle((x0,o['low']),width,o['high']-o['low'],facecolor=face,edgecolor=edge,linewidth=1.5,alpha=.48 if fresh else .14,zorder=1)
+        ax.add_patch(rect)
+        ax.text(x0+1,o['high'] if bull else o['low'],f"{'BULLISH' if bull else 'BEARISH'} OB | {'FRESH' if fresh else 'MITIGATED'}",fontsize=6.8,color=edge,fontweight='bold',va='bottom' if bull else 'top',zorder=14)
+
+    f=a.get('fvg')
+    if f:
+        x0=max(0,int(f['i']-2)-offset); width=max(1,n-1-x0)
+        bull=f['direction']=='BUY'; face='#166534' if bull else '#991b1b'; edge='#4ade80' if bull else '#fb7185'
+        rect=mpatches.Rectangle((x0,f['low']),width,f['high']-f['low'],facecolor=face,edgecolor=edge,linewidth=1.1,alpha=.34 if f.get('fresh') else .10,linestyle='-' if f.get('fresh') else '--',zorder=2)
+        ax.add_patch(rect)
+        ax.text(x0+1,f['high'],'FVG | FRESH' if f.get('fresh') else 'FVG | MITIGATED',fontsize=6.6,color=edge,fontweight='bold',va='bottom',zorder=14)
+
+    d=a.get('displacement')
+    if d:
+        x=int(d['i'])-offset
+        if 0<=x<n:
+            y=float(df.High.iloc[d['i']-offset]) if 0<=d['i']-offset<n else float(df.High.iloc[-1])
+            _draw_label(ax,x,y,'DISPLACEMENT',color='#22c55e' if d['direction']=='BUY' else '#ef4444',yoff=18 if d['direction']=='SELL' else -20,size=6.8)
+
+
 def generate_smc_chart(a):
-    df = a['df'].tail(120).copy()
-    df['ATR'] = _atr(df)
-    fig, axes = mpf.plot(df[['Open','High','Low','Close']], type='candle', style='charles', volume=False, returnfig=True, figsize=(12,7), warn_too_much_data=10000)
-    ax = axes[0]
-    atr = float(df.ATR.iloc[-1])
-    n = len(df)
-    for q in a.get('key_levels_4h', []):
-        px = float(q['price'])
-        if df.Low.min()-5*atr <= px <= df.High.max()+5*atr:
-            ax.axhline(px, linestyle='--', linewidth=.9, alpha=.55)
-            ax.text(n-1, px, f"  4H {q.get('side','LIQ')} ({q.get('touches','')})", fontsize=6.5, ha='right')
-    for q in a.get('liquidity', [])[:8]:
-        px = float(q['price'])
-        if df.Low.min()-4*atr <= px <= df.High.max()+4*atr:
-            ax.axhline(px, linestyle=':', linewidth=.7, alpha=.28)
-    if a.get('dealing_range'):
-        ax.axhline(a['dealing_range']['equilibrium'], linestyle='-.', linewidth=.7, alpha=.35)
-    if a.get('order_block'):
-        o = a['order_block']; ax.axhspan(o['low'], o['high'], alpha=.18); ax.text(2, o['high'], o['type'], fontsize=7, fontweight='bold')
-    if a.get('fvg'):
-        f = a['fvg']; ax.axhspan(f['low'], f['high'], alpha=.12); ax.text(2, f['high'], 'FVG', fontsize=7, fontweight='bold')
-    if a.get('inducement'):
-        ax.axhline(a['inducement']['price'], linestyle='--', linewidth=.8, alpha=.35)
-        ax.text(2, a['inducement']['price'], 'Inducement', fontsize=7)
-    ax.set_title(f"{a['symbol']} | M30 | SMC {a['direction']} | {a.get('setup_type','—')} | {a['status']}")
-    fig.tight_layout(); out = BytesIO(); fig.savefig(out, format='png', dpi=150, bbox_inches='tight'); out.seek(0); return out
+    df=a['df'].tail(140).copy(); df['ATR']=_atr(df); offset=max(0,len(a['df'])-len(df))
+    style=mpf.make_mpf_style(marketcolors=mpf.make_marketcolors(up='#089981',down='#f23645',edge='inherit',wick='inherit'),gridstyle=':',gridcolor='#25303b',y_on_right=True,facecolor='#0b0f14',figcolor='#0b0f14',rc={'axes.labelcolor':'#e5e7eb','xtick.color':'#94a3b8','ytick.color':'#94a3b8'})
+    fig,axlist=mpf.plot(df[['Open','High','Low','Close']],type='candle',style=style,volume=False,returnfig=True,figsize=(14,8),warn_too_much_data=10000)
+    ax=axlist[0]; _draw_smc_structure(ax,a,df,offset=offset)
+    for q in (a.get('key_levels_4h') or [])[:3]:
+        px=float(q['price'])
+        if float(df.Low.min())-5*float(df.ATR.iloc[-1])<=px<=float(df.High.max())+5*float(df.ATR.iloc[-1]):
+            c='#60a5fa' if str(q.get('side','')).lower()=='support' else '#f59e0b'
+            ax.axhline(px,linestyle='--',linewidth=1.0,color=c,alpha=.5,zorder=3)
+            ax.text(len(df)-1,px,f" 4H {str(q.get('side','LEVEL')).upper()}",fontsize=6.5,color=c,ha='right',fontweight='bold',zorder=10)
+    ax.set_title(f"{a['symbol']} | M30 | SMC {a['direction']} | {a.get('setup_type','—')} | {a['status']} | {a['score']}/100",color='#f8fafc',fontsize=11,fontweight='bold',pad=10)
+    fig.tight_layout(); out=BytesIO(); fig.savefig(out,format='png',dpi=180,bbox_inches='tight',facecolor=fig.get_facecolor()); out.seek(0); return out
+
+
+def _draw_hybrid_trendline(ax, trend, df):
+    offset=max(0,len(trend.get('df',df))-len(df))
+    for tl,color,label in [
+        ((trend.get('uptrends') or [None])[0],'#22c55e','RISING SUPPORT'),
+        ((trend.get('downtrends') or [None])[0],'#ef4444','FALLING RESISTANCE'),
+    ]:
+        if not tl: continue
+        x0=int(tl.get('x0',0))-offset; x1=int(tl.get('x1',0))-offset
+        if x1<=0 or x0>=len(df): continue
+        slope=(float(tl['y1'])-float(tl['y0']))/max(float(tl['x1'])-float(tl['x0']),1.0)
+        xa=max(0,x0); xb=len(df)-1
+        ya=float(tl['y0'])+slope*((xa+offset)-float(tl['x0']))
+        yb=float(tl['y0'])+slope*((xb+offset)-float(tl['x0']))
+        ax.plot([xa,xb],[ya,yb],color=color,linewidth=3.0,alpha=.95,zorder=15,solid_capstyle='round')
+        ax.scatter([xa],[ya],s=62,color=color,edgecolors='#fff',linewidths=1.0,zorder=16)
+        ax.text(min(xb-25,max(xa+3,int(xa+(xb-xa)*.68))),yb,label,color=color,fontsize=7.2,fontweight='bold',zorder=17)
+
+    anns=[a for a in (trend.get('trendline_annotations') or []) if a.get('label') in ('HH','HL','LH','LL')][-6:]
+    for ann in anns:
+        x=int(ann['index'])-offset; y=float(ann['price'])
+        if 0<=x<len(df):
+            ax.scatter([x],[y],s=30,color='#fff',edgecolors='#94a3b8',linewidths=.8,zorder=17)
+            ax.annotate(ann['label'],(x,y),xytext=(0,9 if ann.get('type')=='high' else -13),textcoords='offset points',ha='center',fontsize=7,color='#fff',fontweight='bold',zorder=18)
+
+    tr=trend.get('trendline_retest') or {}; status=tr.get('status','INTACT')
+    for key,label,color in [('break_index','BREAK','#f59e0b'),('retest_index','RETEST','#22c55e' if status=='BREAK_RETEST_CONFIRMED' else '#ef4444')]:
+        idx=tr.get(key)
+        if idx is None: continue
+        x=int(idx)-offset
+        if 0<=x<len(df):
+            y=float(df.Close.iloc[x]) if key=='break_index' else float(tr.get('retest_level',df.Close.iloc[x]))
+            ax.scatter([x],[y],s=85,marker='D',color=color,edgecolors='#fff',linewidths=1.1,zorder=19)
+            ax.annotate(label,(x,y),xytext=(8,12 if key=='break_index' else -18),textcoords='offset points',color=color,fontsize=8,fontweight='bold',zorder=20)
+
+
+def generate_hybrid_chart(h):
+    """SMC + Trendline educational map; Hybrid must actually draw the trendline."""
+    s=h['smc']; t=h['trendline']; base=s['df'].tail(140).copy(); base['ATR']=_atr(base); offset=max(0,len(s['df'])-len(base))
+    style=mpf.make_mpf_style(marketcolors=mpf.make_marketcolors(up='#089981',down='#f23645',edge='inherit',wick='inherit'),gridstyle=':',gridcolor='#25303b',y_on_right=True,facecolor='#0b0f14',figcolor='#0b0f14',rc={'axes.labelcolor':'#e5e7eb','xtick.color':'#94a3b8','ytick.color':'#94a3b8'})
+    fig,axlist=mpf.plot(base[['Open','High','Low','Close']],type='candle',style=style,volume=False,returnfig=True,figsize=(14,8),warn_too_much_data=10000)
+    ax=axlist[0]
+    _draw_smc_structure(ax,s,base,offset=offset,compact=True)
+    _draw_hybrid_trendline(ax,t,base)
+    direction=h.get('direction','WAIT'); state=h.get('status','WAIT')
+    ax.set_title(f"{h['symbol']} | M30 | HYBRID {direction} | SMC + TRENDLINE | {state} | {h.get('score',0)}/100",color='#f8fafc',fontsize=11,fontweight='bold',pad=10)
+    fig.tight_layout(); out=BytesIO(); fig.savefig(out,format='png',dpi=180,bbox_inches='tight',facecolor=fig.get_facecolor()); out.seek(0); return out
 
 
 def run_hybrid_analysis(symbol):
     import strategies
-    s = run_smc_analysis(symbol)
-    t = strategies.run_trendline_analysis(symbol)
+    s=run_smc_analysis(symbol); t=strategies.run_trendline_analysis(symbol)
     if s.get('error') or t.get('error'):
-        return {'error': s.get('error') or t.get('error'), 'smc': s, 'trendline': t}
-    agree = s.get('direction') in ('BUY','SELL') and s.get('direction') == t.get('direction')
-    score = min(100, int((s.get('score',0) + t.get('strength',0))/2 + (15 if agree else 0)))
-    return {'symbol': symbol, 'direction': s['direction'] if agree else 'WAIT', 'status': 'CONFIRMED' if agree and s['status'] == 'CONFIRMED' else 'WAIT', 'score': score, 'agreement': agree, 'smc': s, 'trendline': t}
+        return {'error':s.get('error') or t.get('error'),'smc':s,'trendline':t}
+    agree=s.get('direction') in ('BUY','SELL') and s.get('direction')==t.get('direction')
+    score=min(100,int((s.get('score',0)+t.get('strength',0))/2+(15 if agree else 0)))
+    return {'symbol':symbol,'direction':s['direction'] if agree else 'WAIT','status':'CONFIRMED' if agree and s['status']=='CONFIRMED' else 'WAIT','score':score,'agreement':agree,'smc':s,'trendline':t}
 
 
 def format_hybrid_report(h):
     if h.get('error'):
-        return '🔀 HYBRID ANALYSIS\n\n❌ ' + h['error']
-    s, t = h['smc'], h['trendline']; sw = s.get('sweep'); o = s.get('order_block')
+        return '🔀 HYBRID ANALYSIS\n\n❌ '+h['error']
+    s,t=h['smc'],h['trendline']; sw=s.get('sweep'); o=s.get('order_block'); f=s.get('fvg'); tr=t.get('trendline_retest') or {}
     return '\n'.join([
-        f"🔀 HYBRID ANALYSIS — {h['symbol']} M30", '',
+        f"🔀 HYBRID ANALYSIS — {h['symbol']} M30",'',
         f"SMC: {s.get('direction')} | {s.get('status')} | {s.get('score')}/100",
         f"Setup: {s.get('setup_type','—')}",
         f"Trendline: {t.get('direction','—')} | {t.get('strength',0)}/100",
-        f"Liquidity sweep: {sw['event'] if sw else '—'}", f"Inducement: {_p(s['inducement']['price']) if s.get('inducement') else '—'}",
-        f"Order Block: {o['type'] if o else '—'}", '', '━━━━━━━━━━━━━━━━', '🎯 DECISION',
-        f"SMC: {s.get('direction')}", f"Trendline: {t.get('direction')}", f"CONFLUENCE: {'AGREE' if h['agreement'] else 'CONFLICT'}",
-        f"BIAS: {h['direction']}", f"STATUS: {h['status']}", f"HYBRID SCORE: {h['score']}/100", '',
+        f"Trendline retest: {tr.get('status','INTACT')}",
+        f"Liquidity sweep: {sw['event'] if sw else '—'}",f"Inducement: {_p(s['inducement']['price']) if s.get('inducement') else '—'}",
+        f"Order Block: {o['type'] if o else '—'} | {'FRESH' if o and o.get('fresh') else 'MITIGATED' if o else '—'}",
+        f"FVG: {'FRESH' if f and f.get('fresh') else 'MITIGATED' if f else '—'}",'',
+        '━━━━━━━━━━━━━━━━','🎯 DECISION',f"SMC: {s.get('direction')}",f"Trendline: {t.get('direction')}",f"CONFLUENCE: {'AGREE' if h['agreement'] else 'CONFLICT'}",
+        f"BIAS: {h['direction']}",f"STATUS: {h['status']}",f"HYBRID SCORE: {h['score']}/100",'',
         'SMC and Trendline remain independent; conflict = WAIT.'
     ])
