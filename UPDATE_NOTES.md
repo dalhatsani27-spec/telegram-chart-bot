@@ -15,3 +15,8 @@
 - 4H key S/R is exposed to both Trendline and OTE reports and drawn lightly on both charts.
 - Compact 4H/1H swing anchors are mapped by timestamp onto the 30M Trendline chart without changing the existing 30M trendline engine.
 - Deriv legacy fallback URLs now include the documented test app_id fallback (1089) while the current public endpoint remains the first choice. A production DERIV_APP_ID can be supplied in Render.
+
+- SMC sequence engine now enforces liquidity sweep -> inducement -> CHoCH/MSS where required -> BOS -> displacement -> OB/FVG confirmation, with incomplete structures kept at WAIT.
+- SMC distinguishes REVERSAL from CONTINUATION and exposes the sequence checklist in the Telegram report.
+- Hybrid keeps SMC and Trendline as independent engines; disagreement remains WAIT.
+- CI validation compiles the bot and analysis modules and runs pytest when a test suite is present.
