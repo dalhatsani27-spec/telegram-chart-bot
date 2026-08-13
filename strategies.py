@@ -26,7 +26,6 @@ import market_data
 from market_analysis import (
     zigzag_swings, find_swings, compute_volume_profile, detect_confirmation_candle,
     analyse_structure, detect_order_blocks, scan_all_patterns, detect_market_sequence,
-    live_closed_candles, live_analysis_meta,
 )
 from topdown_engine import get_topdown_bias, format_topdown_summary
 
@@ -2181,8 +2180,6 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
         f"TP2: {pos.get('tp2'):.5f}",
         f"R:R: 1:{float(pos.get('rr') or 0):.1f}",
     ]
-    if (family.get("live_analysis") or {}).get("lookahead_safe"):
-        lines.insert(0, "🕒 LIVE MODE: CLOSED CANDLE ONLY — no future candles used")
     return "\n".join(lines)
 
 
@@ -2338,12 +2335,11 @@ def _evaluate_ote(df,impulse,topdown=None):
 
 def run_ote_analysis(symbol: str, df: pd.DataFrame = None) -> Dict[str, Any]:
     topdown=get_topdown_bias(symbol);df=market_data.fetch_candles(symbol,"30min",count=240) if df is None else df
-    df=live_closed_candles(df,"30min")
     if df is None or df.empty or len(df)<60:return {"error":"Insufficient 30M data for OTE analysis","direction":"NEUTRAL","score":0,"valid":False,"symbol":symbol,"topdown":topdown}
     df=_ensure_atr(df);impulse=_find_ote_impulse(df,topdown)
     if impulse is None:return {"error":"No valid structural impulse for OTE (waiting for meaningful BOS/displacement leg).","direction":"NEUTRAL","score":0,"valid":False,"df":df,"timeframe":"30min","symbol":symbol,"topdown":topdown}
     ev=_evaluate_ote(df,impulse,topdown)
-    return {"strategy":"OTE","direction":impulse["direction"],"live_analysis":live_analysis_meta(df,"30min"),"score":ev["score"],"reasons":ev["reasons"],"valid":ev["valid"],"status":ev["status"],"impulse":impulse,"zone":ev["zone"],"zone_state":ev["zone_state"],"poi":ev["poi"],"confirmation":ev["confirmation"],"position":ev["ticket"],"ticket":ev["ticket"],"entry":ev["entry"],"sl":ev["sl"],"tp1":ev["tp1"],"tp2":ev["tp2"],"rr":ev["rr"],"df":df,"timeframe":"30min","symbol":symbol,"topdown":topdown}
+    return {"strategy":"OTE","direction":impulse["direction"],"score":ev["score"],"reasons":ev["reasons"],"valid":ev["valid"],"status":ev["status"],"impulse":impulse,"zone":ev["zone"],"zone_state":ev["zone_state"],"poi":ev["poi"],"confirmation":ev["confirmation"],"position":ev["ticket"],"ticket":ev["ticket"],"entry":ev["entry"],"sl":ev["sl"],"tp1":ev["tp1"],"tp2":ev["tp2"],"rr":ev["rr"],"df":df,"timeframe":"30min","symbol":symbol,"topdown":topdown}
 
 def format_ote_report(analysis: Dict[str, Any]) -> str:
     symbol=analysis.get("symbol","")
@@ -2365,8 +2361,6 @@ def format_ote_report(analysis: Dict[str, Any]) -> str:
         lines += ["","WAIT FOR:",wait1,"2. Directional POI reaction/alignment","3. Displacement confirmation","4. Structure to remain valid","","No trade yet."]
     else:
         t=analysis.get("ticket") or {};lines += ["","🔥 OTE CONFIRMED","",f"Direction: {d}","Structure: CONFIRMED","Displacement: CONFIRMED",f"Entry: {t.get('entry',0):.5f}",f"SL: {t.get('sl',0):.5f}",f"TP1: {t.get('tp1',0):.5f}",f"TP2: {t.get('tp2',0):.5f}",f"R:R: 1:{t.get('rr',0):.2f}"]
-    if (result.get("live_analysis") or {}).get("lookahead_safe"):
-        lines.insert(0, "🕒 LIVE MODE: CLOSED CANDLE ONLY — no future candles used")
     return "\n".join(lines)
 
 def build_ote_ticket(analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2382,7 +2376,6 @@ def build_ote_ticket(analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     topdown = get_topdown_bias(symbol)
     df_30m = market_data.fetch_candles(symbol, "30min", count=250)
-    df_30m = live_closed_candles(df_30m, "30min")
     if df_30m is None or df_30m.empty or len(df_30m) < 30:
         return {
             "error": "Insufficient 30M data for Trendline analysis",
@@ -2393,7 +2386,6 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     family["symbol"] = symbol
     family["timeframe"] = "30min"
     family["topdown"] = topdown
-    family["live_analysis"] = live_analysis_meta(df_30m, "30min")
     family["htf_key_levels_4h"] = topdown.get("key_levels_4h") or []
     family["htf_swings_4h"] = topdown.get("swings_4h") or []
     family["htf_swings_1h"] = topdown.get("swings_1h") or []

@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from market_analysis import zigzag_swings, live_closed_candles, live_analysis_meta
+from market_analysis import zigzag_swings
 
 
 # -------------------------------
@@ -253,10 +253,7 @@ def analyse_smc(df: pd.DataFrame, htf_df: Optional[pd.DataFrame] = None) -> Dict
     if df is None or len(df) < 60:
         return {"error": "insufficient_data", "strategy": "SMC", "signal": "WAIT"}
 
-    work = live_closed_candles(df.copy().sort_index(), "30min")
-    if work is None or len(work) < 60:
-        return {"error": "insufficient_closed_data", "strategy": "SMC", "signal": "WAIT",
-                "live_analysis": live_analysis_meta(work, "30min")}
+    work = df.copy().sort_index()
     swings = zigzag_swings(work, depth=SWING_DEPTH, deviation_atr=0.35)
     structure_bias = _direction_from_structure(swings)
     events = detect_bos_choch(work, swings)
@@ -265,12 +262,7 @@ def analyse_smc(df: pd.DataFrame, htf_df: Optional[pd.DataFrame] = None) -> Dict
     liquidity = _swing_liquidity(swings, work)
 
     price = float(work["Close"].iloc[-1])
-    # A sweep is only actionable while it is recent. A week-old sweep must
-    # never turn an otherwise neutral live chart into a new entry.
-    fresh_window = max(6, min(12, SWING_DEPTH * 2))
-    fresh_start = max(0, len(work) - fresh_window)
-    recent_sweeps = [x for x in sweeps if int(x.get("index", -1)) >= fresh_start]
-    last_sweep = recent_sweeps[-1] if recent_sweeps else None
+    last_sweep = sweeps[-1] if sweeps else None
     directional_hint = "BUY" if last_sweep and last_sweep["type"] == "SELL_SIDE_SWEEP" else "SELL" if last_sweep and last_sweep["type"] == "BUY_SIDE_SWEEP" else ("BUY" if structure_bias == "BULLISH" else "SELL" if structure_bias == "BEARISH" else None)
 
     recent_breaks = [e for e in events if e["index"] >= len(work) - 30]
@@ -317,12 +309,6 @@ def analyse_smc(df: pd.DataFrame, htf_df: Optional[pd.DataFrame] = None) -> Dict
         confluence -= 15; reasons.append("Higher timeframe conflicts")
 
     entry_zone = unmitigated_ob or fvg
-    # Do not resurrect an old zone as a new entry. The actionable zone must
-    # be tied to the current sweep/displacement sequence.
-    if entry_zone and last_sweep:
-        zone_idx = int(entry_zone.get("formed_index", entry_zone.get("index", -1)))
-        if zone_idx >= 0 and zone_idx < int(last_sweep.get("index", -1)):
-            entry_zone = None
     entry = price
     if entry_zone:
         entry = (float(entry_zone["low"]) + float(entry_zone["high"])) / 2
@@ -342,16 +328,11 @@ def analyse_smc(df: pd.DataFrame, htf_df: Optional[pd.DataFrame] = None) -> Dict
         target = None
 
     signal = "WAIT"
-    fresh_break = bool(matching and any(int(e.get("index", -1)) >= int(last_sweep.get("index", -1)) for e in matching)) if last_sweep else False
-    displacement_after_sweep = bool(displacement and last_sweep and int(displacement.get("index", -1)) >= int(last_sweep.get("index", -1)))
-    # LIVE ENTRY GATE: the complete chain must have happened recently and in
-    # chronological order. Historical completed setups are analysis only.
-    if directional_hint and displacement_after_sweep and last_sweep and entry_zone and fresh_break and confluence >= 65:
+    if directional_hint and displacement and last_sweep and entry_zone and confluence >= 65:
         signal = directional_hint
 
     return {
         "strategy": "SMC",
-        "live_analysis": live_analysis_meta(work, "30min"),
         "signal": signal,
         "direction": directional_hint,
         "confidence": int(max(0, min(100, confluence))),
