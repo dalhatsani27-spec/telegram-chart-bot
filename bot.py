@@ -22,6 +22,8 @@ import market_data
 from market_analysis import direction_banner
 from chart_engine import generate_trendline_educational_map, generate_ote_map
 import strategies
+import smc_strategy
+import market_phases
 import execution_engine as engine
 from execution_engine import state as ts_state
 
@@ -150,7 +152,9 @@ def get_home_menu():
     strat_label = ts_state.strategy_label()
     keyboard = [
         [InlineKeyboardButton(f"🧠 STRATEGY: {strat_label}", callback_data="menu_strategy")],
-        [InlineKeyboardButton("📐  Trendline (4H→1H→30M)", callback_data="menu_trendline")],
+        [InlineKeyboardButton("🧠  SMC — Smart Money Concepts", callback_data="menu_smc")],
+        [InlineKeyboardButton("📊  Market Phase & Sentiment", callback_data="menu_phase")],
+        [InlineKeyboardButton("📐  Trendline V2 (4H→1H→30M)", callback_data="menu_trendline")],
         [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],
         [InlineKeyboardButton("👁  Watch Price Level", callback_data="menu_price_watch"),
          InlineKeyboardButton("📋  My Watch Levels", callback_data="show_price_watches")],
@@ -170,6 +174,7 @@ def get_strategy_menu():
         [InlineKeyboardButton(
             f"{'✅' if selected == engine.STRATEGY_OTE else '⚪'} OTE (62–79%)",
             callback_data="set_strategy|OTE")],
+        [InlineKeyboardButton("🧠 SMC", callback_data="set_strategy|SMC")],
         [InlineKeyboardButton("« Back", callback_data="menu_home")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -330,6 +335,32 @@ async def background_watchlist_scanner():
         await asyncio.sleep(WATCHLIST_SCAN_INTERVAL_SECONDS)
 
 
+async def send_smc_analysis(context, chat_id, symbol):
+    try:
+        family = await asyncio.to_thread(strategies.run_trendline_analysis, symbol)
+        df = family.get("df") if isinstance(family, dict) else None
+        if df is None or df.empty:
+            raise RuntimeError("No OHLC data available for SMC analysis")
+        result = await asyncio.to_thread(smc_strategy.analyse_smc, df, None)
+        phase = await asyncio.to_thread(market_phases.analyze_market_phase, df)
+        text = smc_strategy.format_smc_report(result, symbol, "30M") + "\n\n" + market_phases.format_phase_report(phase)
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=get_home_menu())
+    except Exception as exc:
+        await context.bot.send_message(chat_id=chat_id, text=f"SMC analysis failed for '{symbol}': {exc}", reply_markup=get_home_menu())
+
+
+async def send_phase_analysis(context, chat_id, symbol):
+    try:
+        family = await asyncio.to_thread(strategies.run_trendline_analysis, symbol)
+        df = family.get("df") if isinstance(family, dict) else None
+        if df is None or df.empty:
+            raise RuntimeError("No OHLC data available")
+        result = await asyncio.to_thread(market_phases.analyze_market_phase, df)
+        await context.bot.send_message(chat_id=chat_id, text=f"📊 {symbol}\n\n{market_phases.format_phase_report(result)}", reply_markup=get_home_menu())
+    except Exception as exc:
+        await context.bot.send_message(chat_id=chat_id, text=f"Market phase analysis failed for '{symbol}': {exc}", reply_markup=get_home_menu())
+
+
 async def send_trendline_analysis(context, chat_id, symbol):
     """Trendline strategy: full 4H -> 1H -> 30M top-down cascade."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -465,11 +496,42 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(f"Running {ts_state.strategy_label()} analysis for {symbol}...")
     if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:
         await send_ote_analysis(context, chat_id, symbol)
+    elif ts_state.get_selected_strategy() == "SMC":
+        await send_smc_analysis(context, chat_id, symbol)
     else:
         await send_trendline_analysis(context, chat_id, symbol)
 
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if data == "menu_smc":
+        await query.edit_message_text("🧠 SMC — SMART MONEY CONCEPTS\n\nLiquidity → Sweep → Displacement → BOS/CHOCH → OB/FVG → Premium/Discount\n\nChoose an asset:", reply_markup=get_category_keyboard("cat_smc", "menu_home"))
+        return
+    elif data == "menu_phase":
+        await query.edit_message_text("📊 MARKET PHASE & SENTIMENT\n\nAccumulation • Markup • Distribution • Markdown • Transitions\n\nChoose an asset:", reply_markup=get_category_keyboard("cat_phase", "menu_home"))
+        return
+    elif data.startswith("cat_smc|"):
+        cat = data.split("|", 1)[1]
+        await query.edit_message_text(f"🧠 SMC — {cat}", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_smc", "menu_smc"))
+        return
+    elif data.startswith("run_smc|"):
+        symbol = data.split("|", 1)[1]
+        ts_state.set_selected_strategy("SMC")
+        await query.edit_message_text(f"Running SMC + phase analysis for {symbol}...")
+        await send_smc_analysis(context, chat_id, symbol)
+        return
+    elif data.startswith("cat_phase|"):
+        cat = data.split("|", 1)[1]
+        await query.edit_message_text(f"📊 Phase Engine — {cat}", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_phase", "menu_phase"))
+        return
+    elif data.startswith("run_phase|"):
+        symbol = data.split("|", 1)[1]
+        await query.edit_message_text(f"Mapping market phase for {symbol}...")
+        await send_phase_analysis(context, chat_id, symbol)
+        return
+    elif data == "set_strategy|SMC":
+        ts_state.set_selected_strategy("SMC")
+        await query.edit_message_text("Strategy set → 🧠 SMC", reply_markup=get_strategy_menu())
+        return
     global primary_chat_id
     query = update.callback_query
     await query.answer()
