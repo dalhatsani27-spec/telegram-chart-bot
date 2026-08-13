@@ -48,7 +48,8 @@ VALID_MODES = {MODE_OFF, MODE_AUTO, MODE_APPROVAL, MODE_COPY_TRADE}
 
 STRATEGY_TRENDLINE = "TRENDLINE"
 STRATEGY_OTE = "OTE"
-VALID_STRATEGIES = {STRATEGY_TRENDLINE, STRATEGY_OTE}
+STRATEGY_SMC = "SMC"
+VALID_STRATEGIES = {STRATEGY_TRENDLINE, STRATEGY_OTE, STRATEGY_SMC}
 
 APPROVAL_EXPIRY_SECONDS = 180
 
@@ -177,6 +178,8 @@ class TradeStateManager:
         return self.selected_strategy
 
     def strategy_label(self):
+        if self.selected_strategy == STRATEGY_SMC:
+            return "SMC"
         return self.selected_strategy.title().replace("_", " ")
 
     # ---------------- EA command queue ----------------
