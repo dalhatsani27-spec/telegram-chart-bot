@@ -169,11 +169,51 @@ def deriv_fetch_candles(symbol, tf_code="30min", count=250):
 
 
 def fetch_watch_price(symbol):
-    """Unified latest price for personal watch-level alerts."""
+    """
+    Unified current price for watch-level alerts.
+
+    Priority:
+      1. Deriv live tick for Deriv symbols.
+      2. MT5 live bid/ask when available.
+      3. The same market-data pipeline used by chart analysis.
+      4. Latest available M1 candle close as final fallback.
+
+    Watch Price deliberately uses live/current quote data where available,
+    while SMC analysis continues to use closed candles for stable structure.
+    """
+    symbol = str(symbol or "").strip().upper()
+
+    # Deriv live quote
     if is_deriv_symbol(symbol):
-        return deriv_fetch_tick(symbol)
-    bid, ask, _ = fetch_tick(symbol)
-    return (bid + ask) / 2.0 if bid is not None and ask is not None else None
+        try:
+            price = deriv_fetch_tick(symbol)
+            if price is not None:
+                return float(price)
+        except Exception:
+            pass
+
+    # MT5 live quote
+    try:
+        bid, ask, _ = fetch_tick(symbol)
+        if bid is not None and ask is not None:
+            return (float(bid) + float(ask)) / 2.0
+        if bid is not None:
+            return float(bid)
+        if ask is not None:
+            return float(ask)
+    except Exception:
+        pass
+
+    # IMPORTANT: use the exact same fallback market-data path as analysis.
+    # This works on Render where MT5 is unavailable.
+    try:
+        df = fetch_candles(symbol, "1min", 3)
+        if df is not None and not df.empty:
+            return float(df["Close"].iloc[-1])
+    except Exception:
+        pass
+
+    return None
 
 
 _TF_TWELVE_INTERVAL = {"1min": "1min", "3min": "1min", "5min": "5min", "15min": "15min", "30min": "30min", "1h": "1h", "4h": "4h"}

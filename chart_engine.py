@@ -48,6 +48,47 @@ SESSION_UTC = {
 }
 
 
+def _draw_current_price(ax, price, chart_len, label="CURRENT PRICE"):
+    """Draw a highly visible current-price marker on dark charts."""
+    if price is None:
+        return
+
+    try:
+        price = float(price)
+    except (TypeError, ValueError):
+        return
+
+    # Current price gets a dedicated visual layer so it remains visible
+    # above zones, trendlines and other annotations.
+    ax.axhline(
+        price,
+        color="#ffd54f",
+        linestyle="--",
+        linewidth=1.8,
+        alpha=0.95,
+        zorder=25,
+    )
+
+    ax.text(
+        chart_len - 1,
+        price,
+        f" {label}  {price:.5f} ",
+        fontsize=8.5,
+        fontweight="bold",
+        color="#111111",
+        ha="right",
+        va="center",
+        zorder=30,
+        bbox=dict(
+            boxstyle="round,pad=0.28",
+            facecolor="#ffd54f",
+            edgecolor="#ffffff",
+            linewidth=0.8,
+            alpha=0.98,
+        ),
+    )
+
+
 def _to_naive_utc(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
     """Ensure datetime index is timezone-naive UTC for plotting."""
     if idx.tz is not None:
