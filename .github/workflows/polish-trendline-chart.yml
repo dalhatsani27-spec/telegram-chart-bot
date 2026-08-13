@@ -1,0 +1,73 @@
+name: Polish Trendline Chart
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  polish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Patch trendline orchestration and chart renderer
+        shell: python
+        run: |
+          from pathlib import Path
+
+          # --- strategies.py: preserve regime state through orchestration ---
+          p = Path("strategies.py")
+          s = p.read_text(encoding="utf-8")
+          needle = '    family["continuation_state"] = _classify_trendline_state(family)\n'
+          if needle not in s:
+              raise SystemExit("Expected Trendline continuation-state assignment not found")
+          replacement = '''    if family.get("market_regime") and family["market_regime"].get("trade_permission") != "TRENDLINE":\n        _rg = family["market_regime"]\n        family["continuation_state"] = {\n            "state": _rg.get("state", "WAIT"),\n            "reason": _rg.get("reason", "Wait for directional expansion."),\n        }\n    else:\n        family["continuation_state"] = _classify_trendline_state(family)\n'''
+          # The last occurrence is the orchestration call; the first is inside the builder.\n          idx = s.rfind(needle)
+          s = s[:idx] + replacement + s[idx + len(needle):]
+          p.write_text(s, encoding="utf-8")
+
+          # --- chart_engine.py: current price + forward drawing space + regime badge ---
+          p = Path("chart_engine.py")
+          s = p.read_text(encoding="utf-8")
+
+          helper_anchor = '\n\ndef _prepare_ohlc(df: pd.DataFrame, max_bars: int = 120) -> Tuple[pd.DataFrame, int]:\n'
+          helper = r'''\n\ndef _draw_current_price_marker(ax, price: float, chart_len: int, right_space: int = 24, label: str = "CURRENT"):\n    """Clear current-price line/label with room for forward trendline projection."""\n    try:\n        price = float(price)\n    except (TypeError, ValueError):\n        return\n    x_right = chart_len + max(6, right_space)\n    ax.axhline(price, color="#ffd54f", linestyle="--", linewidth=1.8, alpha=0.95, zorder=25)\n    ax.text(\n        x_right - 1, price, f" {label}  {price:.5f} ",\n        fontsize=8.5, fontweight="bold", color="#111111",\n        ha="right", va="center", zorder=30, clip_on=False,\n        bbox=dict(boxstyle="round,pad=0.28", facecolor="#ffd54f", edgecolor="#ffffff", linewidth=0.8, alpha=0.98),\n    )\n\n\ndef _draw_market_state_badge(ax, family: Dict[str, Any]):\n    """Compact regime badge; prevents forced micro-structure in non-trending states."""\n    regime = family.get("market_regime") or family.get("regime") or {}\n    state = str(regime.get("state") or family.get("continuation_state") or "UNKNOWN").upper()\n    confidence = int(regime.get("confidence") or 0)\n    permission = str(regime.get("trade_permission") or "").upper()\n    if state == "TREND_UP":\n        label = f"MARKET STATE  ·  TREND UP  ·  {confidence}%"\n        face = "#0b6b45"\n    elif state == "TREND_DOWN":\n        label = f"MARKET STATE  ·  TREND DOWN  ·  {confidence}%"\n        face = "#8f1d2c"\n    elif state == "ACCUMULATION":\n        label = f"MARKET STATE  ·  ACCUMULATION  ·  {confidence}%  ·  WAIT EXPANSION"\n        face = "#6d4c00"\n    elif state == "DISTRIBUTION":\n        label = f"MARKET STATE  ·  DISTRIBUTION  ·  {confidence}%  ·  WAIT EXPANSION"\n        face = "#6d1b45"\n    elif state == "RANGE":\n        label = f"MARKET STATE  ·  RANGE  ·  {confidence}%  ·  NO TRENDLINE"\n        face = "#374151"\n    else:\n        label = f"MARKET STATE  ·  {state}  ·  {confidence}%  ·  WAIT"\n        face = "#374151"\n    ax.text(0.015, 0.965, label, transform=ax.transAxes, fontsize=9, fontweight="bold",\n            color="#ffffff", va="top", ha="left", zorder=35,\n            bbox=dict(boxstyle="round,pad=0.42", facecolor=face, edgecolor="#ffffff", linewidth=0.6, alpha=0.96))\n\n'''
+          if "def _draw_current_price_marker(" not in s:
+              if helper_anchor not in s:
+                  raise SystemExit("Chart helper insertion point not found")
+              s = s.replace(helper_anchor, helper + helper_anchor, 1)
+
+          # Full trendline map: add 18% forward space and current price.\n          plot_anchor = '    mpf.plot(chart_df, **mpf_kwargs)\n    ax.set_ylim(price_min - padding, price_max + padding)\n'
+          plot_replace = '''    mpf.plot(chart_df, **mpf_kwargs)\n    right_space = max(18, int(chart_len * 0.18))\n    ax.set_xlim(-1, chart_len + right_space)\n    ax.set_ylim(price_min - padding, price_max + padding)\n    _draw_current_price_marker(ax, float(chart_df["Close"].iloc[-1]), chart_len, right_space)\n    _draw_market_state_badge(ax, family)\n'''
+          if plot_anchor not in s:
+              raise SystemExit("Trendline map plot anchor not found")
+          s = s.replace(plot_anchor, plot_replace, 1)
+
+          # Educational map: same forward space and current-price marker.\n          edu_anchor = '    ax = axes[0]\n\n    # Higher-timeframe context: 4H key support/resistance is the structural\n'
+          edu_replace = '''    ax = axes[0]\n    right_space = max(18, int(chart_len * 0.18))\n    ax.set_xlim(-1, chart_len + right_space)\n    _draw_current_price_marker(ax, float(chart_df["Close"].iloc[-1]), chart_len, right_space)\n    _draw_market_state_badge(ax, family)\n\n    # Higher-timeframe context: 4H key support/resistance is the structural\n'''
+          if edu_anchor not in s:
+              raise SystemExit("Educational trendline anchor not found")
+          s = s.replace(edu_anchor, edu_replace, 1)
+
+          p.write_text(s, encoding="utf-8")
+          print("Trendline chart polish integrated")
+
+      - name: Validate
+        run: python -m py_compile strategies.py market_regime.py chart_engine.py
+
+      - name: Commit and remove one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/workflows/polish-trendline-chart.yml
+          git add strategies.py chart_engine.py .github/workflows/polish-trendline-chart.yml
+          git diff --cached --check
+          git diff --cached --stat
+          git commit -m "feat: make trendline charts regime-aware and current-price focused"
+          git push origin main
