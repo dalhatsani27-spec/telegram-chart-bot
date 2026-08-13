@@ -22,11 +22,6 @@ jobs:
           import re
           p = Path('bot.py')
           s = p.read_text(encoding='utf-8')
-
-          # Previous automation accidentally created two callback-handler
-          # definitions. The second one contained the SMC branches but lost
-          # query/data/chat_id initialization. Collapse the duplicate into one
-          # handler while retaining the complete existing handler body.
           pattern = re.compile(
               r'(async def button_callback_handler\(update: Update, context: ContextTypes\.DEFAULT_TYPE\):\n'
               r'    global primary_chat_id\n'
@@ -36,33 +31,65 @@ jobs:
               r'    chat_id = query\.message\.chat_id\n'
               r'    primary_chat_id = chat_id\n)'
               r'async def button_callback_handler\(update: Update, context: ContextTypes\.DEFAULT_TYPE\):\n'
-              r'(?=    if data == "menu_smc":)',
-              re.MULTILINE,
-          )
-          replacement_count = len(pattern.findall(s))
+              r'(?=    if data == "menu_smc":)', re.MULTILINE)
           s, count = pattern.subn(r'\1', s, count=1)
-
-          if replacement_count == 0:
-              # Already repaired is acceptable; otherwise fail clearly.
+          if count == 0:
               h = s.find('async def button_callback_handler(')
               if h < 0 or s.find('    if data == "menu_smc":', h) < 0:
                   raise SystemExit('Could not locate callback handler/SMC branch')
 
-          # Make sure SMC remains a valid selected strategy for typed tickers.
           old_route = '''    if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:\n        await send_ote_analysis(context, chat_id, symbol)\n    else:\n        await send_trendline_analysis(context, chat_id, symbol)\n'''
           new_route = '''    if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:\n        await send_ote_analysis(context, chat_id, symbol)\n    elif ts_state.get_selected_strategy() == "SMC":\n        await send_smc_analysis(context, chat_id, symbol)\n    else:\n        await send_trendline_analysis(context, chat_id, symbol)\n'''
           if old_route in s:
               s = s.replace(old_route, new_route, 1)
-
           h = s.find('async def button_callback_handler(')
           second = s.find('async def button_callback_handler(', h + 1)
           d = s.find('    data = query.data', h)
           smc = s.find('    if data == "menu_smc":', h)
           if second != -1 or d < 0 or smc < 0 or d > smc:
               raise SystemExit('Callback handler is still malformed')
-
           p.write_text(s, encoding='utf-8')
-          print('Repaired callback handler ordering')
+
+      - name: Make SMC data path independent of Trendline strategy
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('bot.py')
+          s = p.read_text(encoding='utf-8')
+          start = s.find('async def send_smc_analysis(context, chat_id, symbol):')
+          end = s.find('\n\nasync def send_phase_analysis', start)
+          if start < 0 or end < 0:
+              raise SystemExit('send_smc_analysis block not found')
+          new_block = '''async def send_smc_analysis(context, chat_id, symbol):
+    """Run SMC directly from the unified market-data feed.
+
+    SMC must not depend on Trendline's strategy family object: a failure in
+    Trendline analysis should never prevent the independent SMC engine from
+    receiving OHLC data.
+    """
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=f"⏳ Loading 30M + 4H market data for {symbol}...")
+        df = await asyncio.to_thread(market_data.fetch_candles, symbol, "30min", 300)
+        htf = await asyncio.to_thread(market_data.fetch_candles, symbol, "4h", 200)
+        if df is None or df.empty or len(df) < 60:
+            raise RuntimeError(f"30M market data unavailable or insufficient ({0 if df is None else len(df)} candles)")
+        if htf is None or htf.empty:
+            htf = None
+        result = await asyncio.to_thread(smc_strategy.analyse_smc, df, htf)
+        phase = await asyncio.to_thread(market_phases.analyze_market_phase, df)
+        text = smc_strategy.format_smc_report(result, symbol, "30M") + "\\n\\n" + market_phases.format_phase_report(phase)
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=get_home_menu())
+    except Exception as exc:
+        traceback.print_exc()
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ SMC analysis failed for '{symbol}'.\\n\\nError: {exc}\\n\\nCheck the Render logs for the traceback.",
+            reply_markup=get_home_menu(),
+        )
+'''
+          s = s[:start] + new_block + s[end:]
+          p.write_text(s, encoding='utf-8')
+          print('SMC now uses direct market_data.fetch_candles')
 
       - name: Syntax check
         run: python -m py_compile bot.py smc_strategy.py market_phases.py
@@ -73,5 +100,5 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add bot.py
           if git diff --cached --quiet; then exit 0; fi
-          git commit -m 'fix: repair Telegram callback initialization for SMC'
+          git commit -m 'fix: make SMC analysis use direct market data path'
           git push
