@@ -1,0 +1,67 @@
+name: Integrate Trendline Regime
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Integrate regime gate
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path("strategies.py")
+          s = p.read_text(encoding="utf-8")
+
+          import_anchor = "from topdown_engine import get_topdown_bias, format_topdown_summary\n"
+          import_line = "from market_regime import detect_market_regime\n"
+          if import_line not in s:
+              if import_anchor not in s:
+                  raise SystemExit("Import anchor not found; aborting without changes")
+              s = s.replace(import_anchor, import_anchor + import_line, 1)
+
+          fn_anchor = "    if df is None or len(df) < 30:\n        return {\"error\": \"Insufficient data for trendline family\", \"direction\": \"NEUTRAL\", \"pivots\": []}\n\n    n = len(df)\n"
+          fn_insert = '''    if df is None or len(df) < 30:\n        return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}\n\n    # Market-state gate: identify the character of the market BEFORE\n    # generating a forest of micro HH/HL/LH/LL trendlines.  Trendline\n    # geometry is only allowed to drive the analysis when the regime engine\n    # says the market is directional. Range/accumulation/distribution are\n    # mapped as states and deliberately kept neutral until expansion confirms.\n    regime = detect_market_regime(df)\n    n = len(df)\n\n    if regime.get("trade_permission") != "TRENDLINE":\n        d = df.tail(32)\n        range_high = float(d["High"].max()) if not d.empty else float(df["High"].max())\n        range_low = float(d["Low"].min()) if not d.empty else float(df["Low"].min())\n        close_now = float(df["Close"].iloc[-1])\n        return {\n            "direction": "NEUTRAL",\n            "strength": int(regime.get("confidence", 0)),\n            "reasons": [regime.get("reason", "Market regime does not permit trendline entries.")],\n            "family_kind": "none",\n            "family_lines": [],\n            "uptrends": [],\n            "downtrends": [],\n            "channel": None,\n            "wedge": None,\n            "horizontal_levels": [{\n                "price": range_high, "touches": 0, "side": "resistance",\n                "quality": "regime_range", "score": 0,\n            }, {\n                "price": range_low, "touches": 0, "side": "support",\n                "quality": "regime_range", "score": 0,\n            }],\n            "range_zone": {\n                "high": range_high, "low": range_low,\n                "location": round((close_now - range_low) / max(range_high - range_low, 1e-12), 3),\n            },\n            "projections": [],\n            "mw_pattern": None,\n            "market_sequence": None,\n            "pivots": [],\n            "volume_profile": compute_volume_profile(df.iloc[:-1]),\n            "upper_line": np.full(n, np.nan),\n            "lower_line": np.full(n, np.nan),\n            "middle_line": np.full(n, np.nan),\n            "df": df,\n            "mode": "regime",\n            "breakout_grade": None,\n            "trendline_retest": {"status": "INACTIVE", "note": regime.get("reason", "")},\n            "trendline_annotations": [],\n            "trendline_status": "INACTIVE",\n            "continuation_state": {\n                "state": "WAIT",\n                "reason": regime.get("reason", "Wait for directional expansion."),\n            },\n            "state_reason": regime.get("reason", ""),\n            "market_regime": regime,\n            "regime": regime,\n            "htf_key_levels_4h": [],\n            "htf_swings_4h": [],\n            "htf_swings_1h": [],\n            "primary_quality": None,\n            "primary_touches": 0,\n            "active_pattern": "none",\n            "pattern_confidence": int(regime.get("confidence", 0)),\n            "bias_touch_points": [],\n            "order_blocks": [],\n            "active_order_block": None,\n        }\n'''
+          if fn_anchor not in s:
+              raise SystemExit("Trendline function anchor not found; aborting without changes")
+          if 'regime = detect_market_regime(df)' not in s:
+              s = s.replace(fn_anchor, fn_insert, 1)
+
+          # Persist the regime on normal directional builds too.
+          marker = '    return {\n        "direction": direction,\n'
+          if marker not in s:
+              raise SystemExit("Trendline return marker not found; aborting without changes")
+          normal_regime_marker = '        "market_regime": regime,\n        "regime": regime,\n'
+          if normal_regime_marker not in s:
+              s = s.replace(marker, '    # Persist regime metadata on directional builds as well.\n' + marker, 1)
+              # Insert after the direction field in the returned dictionary.
+              s = s.replace(marker + '        "strength": strength,\n', marker + normal_regime_marker + '        "strength": strength,\n', 1)
+
+          p.write_text(s, encoding="utf-8")
+          print("Trendline regime gate integrated")
+
+      - name: Validate Python syntax
+        run: |
+          python -m py_compile strategies.py market_regime.py
+
+      - name: Commit integration and remove one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/workflows/integrate-trendline-regime.yml
+          git add strategies.py market_regime.py .github/workflows/integrate-trendline-regime.yml
+          git diff --cached --check
+          git diff --cached --stat
+          git commit -m "feat: gate trendline analysis by market regime"
+          git push origin main
