@@ -49,7 +49,26 @@ TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 # -----------------------------------------------------------------------------
 # Deriv Synthetic Indices (public market-data API; no account token required)
 # -----------------------------------------------------------------------------
-DERIV_WS_URL = os.environ.get("DERIV_WS_URL", "wss://ws.binaryws.com/websockets/v3")
+# Public Deriv market-data WebSockets.  The legacy endpoint is still documented
+# for public data, while api.derivws.com is the current public endpoint.  We
+# try the configured URL first, then the two public endpoints; no account
+# token/App-ID is required for market-data reads.
+_configured_deriv_url = os.environ.get("DERIV_WS_URL", "").strip()
+DERIV_WS_URLS = []
+if _configured_deriv_url:
+    # Never let an authenticated demo/real OTP URL accidentally become the
+    # market-data endpoint. Those endpoints require authentication and are the
+    # source of the InvalidAppID/401 errors seen in the bot logs.
+    low = _configured_deriv_url.lower()
+    if "/ws/demo" not in low and "/ws/real" not in low and "otp=" not in low:
+        DERIV_WS_URLS.append(_configured_deriv_url)
+for _u in (
+    "wss://api.derivws.com/trading/v1/options/ws/public",
+    "wss://ws.binaryws.com/websockets/v3",
+):
+    if _u not in DERIV_WS_URLS:
+        DERIV_WS_URLS.append(_u)
+DERIV_WS_URL = DERIV_WS_URLS[0]
 DERIV_SYMBOL_ALIASES = {
     "V10_1S": "1HZ10V", "V25_1S": "1HZ25V", "V50_1S": "1HZ50V",
     "V75_1S": "1HZ75V", "V100_1S": "1HZ100V",
@@ -75,20 +94,42 @@ def deriv_symbol(symbol):
 
 
 def _deriv_request(payload, timeout=8):
+    """One-shot public Deriv request with endpoint fallback.
+
+    This bot only needs public market data.  A bad Render environment value
+    such as an authenticated /demo or /real WebSocket URL must not break the
+    analyzer, so every request falls back to Deriv's public endpoints.
+    """
     if not WEBSOCKET_AVAILABLE:
         raise RuntimeError("Deriv support requires the websocket-client package.")
-    ws = websocket.create_connection(DERIV_WS_URL, timeout=timeout)
-    try:
-        ws.send(json.dumps(payload))
-        while True:
-            raw = ws.recv()
-            data = json.loads(raw)
-            if data.get("error"):
-                raise RuntimeError(data["error"].get("message", "Deriv API error"))
-            return data
-    finally:
-        try: ws.close()
-        except Exception: pass
+
+    errors = []
+    for url in DERIV_WS_URLS:
+        ws = None
+        try:
+            ws = websocket.create_connection(url, timeout=timeout)
+            ws.send(json.dumps(payload))
+            while True:
+                raw = ws.recv()
+                if not raw:
+                    raise RuntimeError("Deriv returned an empty WebSocket message")
+                data = json.loads(raw)
+                if data.get("error"):
+                    err = data["error"]
+                    msg = err.get("message", "Deriv API error")
+                    code = err.get("code", "")
+                    raise RuntimeError(f"{code}: {msg}" if code else msg)
+                return data
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+    raise RuntimeError("Deriv public market-data connection failed. " + " | ".join(errors))
 
 
 def deriv_active_symbols():

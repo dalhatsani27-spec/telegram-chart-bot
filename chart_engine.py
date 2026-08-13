@@ -1069,6 +1069,7 @@ def generate_trendline_educational_map(
             ax.plot(xs, ys, linestyle="--", linewidth=1.8,
                     color="#f59e0b", alpha=0.9, zorder=7)
     seen_pattern_points = set()
+    pattern_label_counts = {}
     for kp in (sp.get("key_points") or []):
         try:
             raw_x, py, label = kp[0], kp[1], kp[2]
@@ -1080,9 +1081,25 @@ def generate_trendline_educational_map(
             if 0 <= px < chart_len:
                 ax.scatter([px], [float(py)], s=34, color="#f59e0b",
                            edgecolors="#ffffff", linewidths=0.8, zorder=10)
-                ax.annotate(str(label), (px, float(py)), xytext=(0, 9),
+                label_text = str(label)
+                upper_label = label_text.upper()
+                # Stagger repeated pattern labels (Top 1/2/3, Bottom 1/2/3,
+                # etc.) so the educational map remains readable when points
+                # are clustered tightly together.
+                base_key = ("TOP" if "TOP" in upper_label else
+                            "BOTTOM" if "BOTTOM" in upper_label else
+                            "HEAD" if "HEAD" in upper_label else "OTHER")
+                n_seen = pattern_label_counts.get(base_key, 0)
+                pattern_label_counts[base_key] = n_seen + 1
+                yoff = 10 + min(n_seen, 3) * 11
+                if "BOTTOM" in upper_label:
+                    yoff = -(10 + min(n_seen, 3) * 11)
+                ax.annotate(label_text, (px, float(py)), xytext=(0, yoff),
                             textcoords="offset points", ha="center",
-                            fontsize=7.5, color="#fbbf24", fontweight="bold", zorder=11)
+                            fontsize=7.5, color="#fef3c7", fontweight="bold",
+                            bbox=dict(boxstyle="round,pad=0.12",facecolor="#0b0f14",
+                                      edgecolor="#f59e0b",alpha=0.78,linewidth=0.6),
+                            zorder=11)
         except (TypeError, ValueError, IndexError):
             continue
     if sp.get("trigger_price") is not None:
@@ -1145,14 +1162,35 @@ def generate_ote_map(df: pd.DataFrame, symbol: str, analysis: Dict[str, Any], ti
     ax=axlist[0]
     imp=analysis.get("impulse") or {}; zone=analysis.get("zone") or {}
     start=imp.get("start"); end=imp.get("end")
+    # Anchor labels are deliberately high-contrast.  The previous default
+    # Matplotlib text color rendered these labels almost black on the dark
+    # educational chart, making the two most important OTE anchors hard to see.
     if start:
         x=start["index"]-offset
         if 0<=x<chart_len:
-            ax.scatter([x],[start["price"]],s=45,zorder=8,marker="o"); ax.text(x,start["price"],"  Swing origin",fontsize=7,va="bottom")
+            start_color = "#38bdf8"  # structural origin / cool anchor
+            ax.scatter([x],[start["price"]],s=58,zorder=10,marker="o",
+                       color=start_color,edgecolors="#ffffff",linewidths=1.0)
+            ax.annotate("SWING ORIGIN", (x,start["price"]),
+                        xytext=(7, 10 if start.get("type") == "low" else -22),
+                        textcoords="offset points",fontsize=7.5,fontweight="bold",
+                        color="#e0f2fe",va="bottom" if start.get("type") == "low" else "top",
+                        bbox=dict(boxstyle="round,pad=0.22",facecolor="#0b0f14",
+                                  edgecolor=start_color,alpha=0.88,linewidth=0.8),
+                        zorder=12)
     if end:
         x=end["index"]-offset
         if 0<=x<chart_len:
-            ax.scatter([x],[end["price"]],s=45,zorder=8,marker="o"); ax.text(x,end["price"],"  Impulse extreme",fontsize=7,va="bottom")
+            end_color = "#f59e0b"  # impulse / expansion anchor
+            ax.scatter([x],[end["price"]],s=58,zorder=10,marker="o",
+                       color=end_color,edgecolors="#ffffff",linewidths=1.0)
+            ax.annotate("IMPULSE EXTREME", (x,end["price"]),
+                        xytext=(7, -22 if end.get("type") == "high" else 10),
+                        textcoords="offset points",fontsize=7.5,fontweight="bold",
+                        color="#fef3c7",va="top" if end.get("type") == "high" else "bottom",
+                        bbox=dict(boxstyle="round,pad=0.22",facecolor="#0b0f14",
+                                  edgecolor=end_color,alpha=0.88,linewidth=0.8),
+                        zorder=12)
     if zone:
         lo,hi=zone.get("low"),zone.get("high")
         if lo is not None and hi is not None:
