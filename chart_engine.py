@@ -405,6 +405,9 @@ def generate_trendline_map(
     """
     # Prefer family payload if present
     family = setup.get("family") or setup.get("analysis") or setup
+    # Visual contract: this chart is a live closed-candle map. Never imply a
+    # historical entry was available before its confirmation.
+    live_meta = family.get("live_analysis") or setup.get("live_analysis") or {}
     if family.get("df") is not None:
         df = family["df"]
     chart_df, chart_len = _prepare_ohlc(df, max_bars=160)
@@ -439,6 +442,12 @@ def generate_trendline_map(
             price_min = min(price_min, float(setup[key]))
             price_max = max(price_max, float(setup[key]))
     pos = setup.get("position") or family.get("position")
+    # Only reserve chart space for a real live-confirmed setup. WAIT/transition
+    # states should leave the candle map unobstructed instead of looking like a
+    # trade that was visible in hindsight.
+    pos_is_live = bool(pos and (pos.get("confirmed") or setup.get("signal") in ("BUY", "SELL") or family.get("entry_rules", {}).get("confirmed")))
+    if pos and not pos_is_live:
+        pos = None
     if pos:
         for key in ("entry", "sl", "tp1", "tp2"):
             if pos.get(key) is not None:
@@ -887,14 +896,13 @@ def generate_trendline_map(
         ax.text(chart_len * 0.55, vp["poc_price"], "POC", fontsize=6, color=COLORS["poc"],
                 va="bottom", alpha=0.6)
 
-    # Position: thin reference lines on the chart, full readout in the side panel
+    # Position: only render a trade map when the CURRENT closed candle has a
+    # confirmed entry. A historical/geometry-only price level must remain a
+    # WAIT state, never a hindsight entry box.
     pos = setup.get("position") or family.get("position")
-    if not pos and setup.get("entry") is not None:
-        pos = {
-            "entry": setup.get("entry"), "sl": setup.get("sl"),
-            "tp1": setup.get("tp1"), "tp2": setup.get("tp2"),
-            "side": setup.get("direction", ""),
-        }
+    pos_is_live = bool(pos and (pos.get("confirmed") or setup.get("signal") in ("BUY", "SELL") or family.get("entry_rules", {}).get("confirmed")))
+    if not pos_is_live:
+        pos = None
     _draw_price_reference_lines(ax, pos, chart_len)
     _draw_position_panel(fig, panel_ax, pos, family.get("reasons"))
 
