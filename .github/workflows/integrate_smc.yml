@@ -1,0 +1,90 @@
+name: Integrate SMC Hybrid Dashboard
+on:
+  push:
+    branches: [upgrade-smc-hybrid-dashboard]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch dashboard and analysis routing
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('bot.py'); s=p.read_text()
+          if 'import smc_engine' not in s:
+              s=s.replace('import strategies\n', 'import strategies\nimport smc_engine\n')
+          s=s.replace('primary_chat_id = None  # this is a personal single-user bot; captured on first contact\n', 'primary_chat_id = None  # this is a personal single-user bot; captured on first contact\n_analysis_mode = {}  # per-chat: TRENDLINE / OTE / SMC / HYBRID\n')
+          old='''        [InlineKeyboardButton("📐  Trendline (4H→1H→30M)", callback_data="menu_trendline")],\n        [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],'''
+          new='''        [InlineKeyboardButton("📐  Trendline (4H→1H→30M)", callback_data="menu_trendline")],\n        [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],\n        [InlineKeyboardButton("🏦  SMC Strategy", callback_data="menu_smc")],\n        [InlineKeyboardButton("🔀  Hybrid (SMC + Trendline)", callback_data="menu_hybrid")],'''
+          if old in s:s=s.replace(old,new)
+          s=s.replace('''    kb = [\n        [InlineKeyboardButton("💱 Forex Majors"''','''    kb = [\n        [InlineKeyboardButton("🏠 Dashboard", callback_data="menu_home")],\n        [InlineKeyboardButton("💱 Forex Majors"''')
+          s=s.replace('''    kb, row = [], []\n    for pair in pairs:''','''    kb, row = [[InlineKeyboardButton("🏠 Dashboard", callback_data="menu_home")]], []\n    for pair in pairs:''')
+          marker='''async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):'''
+          if 'async def send_smc_analysis(' not in s:
+              funcs=r'''
+async def send_smc_analysis(context, chat_id, symbol):
+    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        analysis = smc_engine.run_smc_analysis(symbol)
+        if analysis.get("error"):
+            await context.bot.send_message(chat_id=chat_id, text=smc_engine.format_smc_report(analysis), reply_markup=get_home_menu())
+            return
+        try:
+            chart = smc_engine.generate_smc_chart(analysis)
+            await context.bot.send_photo(chat_id=chat_id, photo=chart, caption=f"{symbol} SMC (M30) | {ts_str}")
+        except Exception:
+            traceback.print_exc()
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ SMC chart failed; sending the structured report.")
+        await context.bot.send_message(chat_id=chat_id, text=smc_engine.format_smc_report(analysis), reply_markup=get_home_menu())
+    except Exception as e:
+        await context.bot.send_message(chat_id=chat_id, text=f"SMC analysis failed for '{symbol}': {e}", reply_markup=get_home_menu())
+
+
+async def send_hybrid_analysis(context, chat_id, symbol):
+    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        analysis = smc_engine.run_hybrid_analysis(symbol)
+        await context.bot.send_message(chat_id=chat_id, text=smc_engine.format_hybrid_report(analysis), reply_markup=get_home_menu())
+        if not analysis.get("error"):
+            # Hybrid intentionally uses the existing Trendline renderer; SMC remains a separate engine.
+            tl = analysis.get("trendline", {})
+            df = tl.get("df")
+            if df is not None and not getattr(df, "empty", True):
+                try:
+                    payload=dict(tl); payload["position"]=strategies.build_position_container(tl)
+                    chart=generate_trendline_educational_map(df, symbol, payload, title_suffix=f"HYBRID {ts_str}")
+                    await context.bot.send_photo(chat_id=chat_id, photo=chart, caption=f"{symbol} Hybrid | {ts_str}")
+                except Exception:
+                    traceback.print_exc()
+    except Exception as e:
+        await context.bot.send_message(chat_id=chat_id, text=f"Hybrid analysis failed for '{symbol}': {e}", reply_markup=get_home_menu())
+
+
+'''
+              s=s.replace(marker,funcs+marker)
+          old='''    symbol = raw_text.upper()\n    await update.message.reply_text(f"Running {ts_state.strategy_label()} analysis for {symbol}...")\n    if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:\n        await send_ote_analysis(context, chat_id, symbol)\n    else:\n        await send_trendline_analysis(context, chat_id, symbol)'''
+          new='''    symbol = raw_text.upper()\n    mode = _analysis_mode.get(chat_id)\n    if mode == "SMC":\n        await update.message.reply_text(f"Running SMC analysis for {symbol}...")\n        await send_smc_analysis(context, chat_id, symbol)\n        return\n    if mode == "HYBRID":\n        await update.message.reply_text(f"Running Hybrid analysis for {symbol}...")\n        await send_hybrid_analysis(context, chat_id, symbol)\n        return\n    await update.message.reply_text(f"Running {ts_state.strategy_label()} analysis for {symbol}...")\n    if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:\n        await send_ote_analysis(context, chat_id, symbol)\n    else:\n        await send_trendline_analysis(context, chat_id, symbol)'''
+          if old in s:s=s.replace(old,new)
+          marker='''    # ---------------- Trendline ----------------\n'''
+          if 'elif data == "menu_smc":' not in s:
+              block='''    # ---------------- SMC / Hybrid ----------------\n    elif data == "menu_smc":\n        _analysis_mode[chat_id] = "SMC"\n        await query.edit_message_text("🏦 SMC STRATEGY — 4H → 1H → 30M\\n\\nLiquidity → Sweep → Displacement → BOS/MSS → OB/FVG → Mitigation → Liquidity targets", reply_markup=get_category_keyboard("cat_smc", "menu_home"))\n    elif data.startswith("cat_smc|"):\n        _, cat = data.split("|", 1)\n        await query.edit_message_text(f"🏦 SMC — {cat}", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_smc", "menu_smc"))\n    elif data.startswith("run_smc|"):\n        _, symbol = data.split("|", 1)\n        _analysis_mode[chat_id] = "SMC"\n        await query.edit_message_text(f"Running SMC analysis for {symbol}...")\n        await send_smc_analysis(context, chat_id, symbol)\n    elif data == "menu_hybrid":\n        _analysis_mode[chat_id] = "HYBRID"\n        await query.edit_message_text("🔀 HYBRID — SMC + Trendline\\n\\nTwo independent engines. Agreement can confirm; conflict always means WAIT.", reply_markup=get_category_keyboard("cat_hybrid", "menu_home"))\n    elif data.startswith("cat_hybrid|"):\n        _, cat = data.split("|", 1)\n        await query.edit_message_text(f"🔀 HYBRID — {cat}", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_hybrid", "menu_hybrid"))\n    elif data.startswith("run_hybrid|"):\n        _, symbol = data.split("|", 1)\n        _analysis_mode[chat_id] = "HYBRID"\n        await query.edit_message_text(f"Running Hybrid analysis for {symbol}...")\n        await send_hybrid_analysis(context, chat_id, symbol)\n\n'''
+              s=s.replace(marker,block+marker)
+          s=s.replace('''    app_bot.add_handler(CommandHandler("start", start_command))\n''','''    app_bot.add_handler(CommandHandler("start", start_command))\n    loop.run_until_complete(app_bot.bot.set_my_commands([\n        ("start", "Open Dashboard"), ("trendline", "Trendline analysis"),\n        ("ote", "OTE analysis"), ("smc", "SMC analysis"),\n        ("hybrid", "SMC + Trendline"), ("watch", "Watch a price level")\n    ]))\n''')
+          # Add simple command handlers without disturbing existing text routing.
+          insert='''\n\nasync def smc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):\n    global primary_chat_id\n    primary_chat_id=update.effective_chat.id; _analysis_mode[primary_chat_id]="SMC"\n    await update.message.reply_text("🏦 SMC mode selected. Send a symbol or tap Dashboard.", reply_markup=get_home_menu())\n\nasync def hybrid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):\n    global primary_chat_id\n    primary_chat_id=update.effective_chat.id; _analysis_mode[primary_chat_id]="HYBRID"\n    await update.message.reply_text("🔀 Hybrid mode selected. Send a symbol or tap Dashboard.", reply_markup=get_home_menu())\n'''
+          if 'async def smc_command(' not in s:s=s.replace('\n# ==========================================\n# 4. NOTIFIER CALLBACKS',insert+'\n# ==========================================\n# 4. NOTIFIER CALLBACKS')
+          s=s.replace('''    app_bot.add_handler(CommandHandler("start", start_command))\n    loop.run_until_complete(app_bot.bot.set_my_commands([''','''    app_bot.add_handler(CommandHandler("start", start_command))\n    app_bot.add_handler(CommandHandler("smc", smc_command))\n    app_bot.add_handler(CommandHandler("hybrid", hybrid_command))\n    loop.run_until_complete(app_bot.bot.set_my_commands([''')
+          p.write_text(s)
+          PY
+          python -m py_compile bot.py smc_engine.py strategies.py chart_engine.py market_data.py execution_engine.py
+      - name: Commit integration
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add bot.py smc_engine.py
+          git diff --cached --quiet || git commit -m "Integrate SMC Hybrid modes and professional dashboard"
+          git push
