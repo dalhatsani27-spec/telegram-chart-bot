@@ -20,9 +20,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 
 import market_data
 from market_analysis import direction_banner
-from chart_engine import generate_trendline_educational_map, generate_ote_map, generate_smc_map
-import smc_engine
-import hybrid_engine
+from chart_engine import generate_trendline_educational_map, generate_ote_map
 import strategies
 import execution_engine as engine
 from execution_engine import state as ts_state
@@ -152,11 +150,13 @@ def get_home_menu():
     strat_label = ts_state.strategy_label()
     keyboard = [
         [InlineKeyboardButton(f"🧠 STRATEGY: {strat_label}", callback_data="menu_strategy")],
-        [InlineKeyboardButton("📐  Trendline", callback_data="menu_trendline"), InlineKeyboardButton("🎯  OTE", callback_data="menu_ote")],
-        [InlineKeyboardButton("🏦  SMC", callback_data="menu_smc"), InlineKeyboardButton("🔀  Hybrid", callback_data="menu_hybrid")],
-        [InlineKeyboardButton("⚡  Deriv", callback_data="menu_deriv"), InlineKeyboardButton("👁  Price Watch", callback_data="menu_price_watch")],
-        [InlineKeyboardButton("📋  My Watch Levels", callback_data="show_price_watches"), InlineKeyboardButton("🔎  Custom Ticker", callback_data="prompt_custom_ticker")],
-        [InlineKeyboardButton("⚙️  Settings", callback_data="menu_mobile_panel"), InlineKeyboardButton("📖  Guide", callback_data="menu_help")],
+        [InlineKeyboardButton("📐  Trendline (4H→1H→30M)", callback_data="menu_trendline")],
+        [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],
+        [InlineKeyboardButton("👁  Watch Price Level", callback_data="menu_price_watch"),
+         InlineKeyboardButton("📋  My Watch Levels", callback_data="show_price_watches")],
+        [InlineKeyboardButton("🔎  Custom Ticker", callback_data="prompt_custom_ticker")],
+        [InlineKeyboardButton("📱  CONTROL PANEL", callback_data="menu_mobile_panel")],
+        [InlineKeyboardButton("ℹ️  HELP & GUIDE", callback_data="menu_help")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -170,12 +170,6 @@ def get_strategy_menu():
         [InlineKeyboardButton(
             f"{'✅' if selected == engine.STRATEGY_OTE else '⚪'} OTE (62–79%)",
             callback_data="set_strategy|OTE")],
-        [InlineKeyboardButton(
-            f"{'✅' if selected == engine.STRATEGY_SMC else '⚪'} SMC",
-            callback_data="set_strategy|SMC"),
-         InlineKeyboardButton(
-            f"{'✅' if selected == engine.STRATEGY_HYBRID else '⚪'} Hybrid",
-            callback_data="set_strategy|HYBRID")],
         [InlineKeyboardButton("« Back", callback_data="menu_home")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -243,12 +237,6 @@ def get_pairs_keyboard(pairs, prefix, back_callback):
     return InlineKeyboardMarkup(kb)
 
 
-async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global primary_chat_id
-    primary_chat_id = update.effective_chat.id
-    await update.message.reply_text("🏠 DASHBOARD\n\nSelect an analysis or tool:", reply_markup=get_home_menu())
-
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global primary_chat_id
     primary_chat_id = update.effective_chat.id
@@ -256,8 +244,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "══════════════════════════════════\n"
         "  TOP-DOWN PRICE-ACTION ENGINE\n"
         "══════════════════════════════════\n\n"
-        "Trendline Structure  •  OTE 62–79% Retracement  •  SMC  •  Hybrid\n"
-        "4H → 1H → 30M Top-Down Context  •  Market-State Filtering\n"
+        "Trendline Structure  •  OTE 62–79% Retracement\n"
+        "4H → 1H → 30M Top-Down Bias  •  200 EMA Regime\n"
         "Structure Permission  •  MT5 Execution\n\n"
         "──────────────────────────────\n"
         "Master switch is OFF by default.\n"
@@ -448,40 +436,6 @@ async def send_ote_analysis(context, chat_id, symbol):
         )
 
 
-async def send_smc_analysis(context, chat_id, symbol):
-    try:
-        analysis=smc_engine.run_smc_analysis(symbol)
-        await context.bot.send_message(chat_id=chat_id,text=smc_engine.format_smc_report(analysis))
-        if analysis.get("df") is not None and not analysis.get("error"):
-            try:
-                img=generate_smc_map(analysis["df"],symbol,analysis,title_suffix=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                await context.bot.send_photo(chat_id=chat_id,photo=img,caption=f"{symbol} SMC (4H → 1H → 30M)")
-            except Exception:
-                traceback.print_exc()
-        await context.bot.send_message(chat_id=chat_id,text="Choose next action:",reply_markup=get_home_menu())
-    except Exception as e:
-        await context.bot.send_message(chat_id=chat_id,text=f"SMC analysis failed for '{symbol}': {e}",reply_markup=get_home_menu())
-
-
-async def send_hybrid_analysis(context, chat_id, symbol):
-    try:
-        analysis=hybrid_engine.run_hybrid_analysis(symbol)
-        await context.bot.send_message(chat_id=chat_id,text=hybrid_engine.format_hybrid_report(analysis))
-        if analysis.get("df") is not None and not analysis.get("error"):
-            try:
-                chart_payload=dict(analysis.get("smc") or {})
-                chart_payload["ticket"]=analysis.get("ticket")
-                chart_payload["direction"]=analysis.get("direction")
-                chart_payload["confirmed"]=analysis.get("confirmed")
-                img=generate_smc_map(analysis["df"],symbol,chart_payload,title_suffix=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                await context.bot.send_photo(chat_id=chat_id,photo=img,caption=f"{symbol} Hybrid (SMC + Trendline)")
-            except Exception:
-                traceback.print_exc()
-        await context.bot.send_message(chat_id=chat_id,text="Choose next action:",reply_markup=get_home_menu())
-    except Exception as e:
-        await context.bot.send_message(chat_id=chat_id,text=f"Hybrid analysis failed for '{symbol}': {e}",reply_markup=get_home_menu())
-
-
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A typed symbol is routed to whichever strategy is currently selected."""
     global primary_chat_id
@@ -509,13 +463,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     symbol = raw_text.upper()
     await update.message.reply_text(f"Running {ts_state.strategy_label()} analysis for {symbol}...")
-    selected = ts_state.get_selected_strategy()
-    if selected == engine.STRATEGY_OTE:
+    if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:
         await send_ote_analysis(context, chat_id, symbol)
-    elif selected == engine.STRATEGY_SMC:
-        await send_smc_analysis(context, chat_id, symbol)
-    elif selected == engine.STRATEGY_HYBRID:
-        await send_hybrid_analysis(context, chat_id, symbol)
     else:
         await send_trendline_analysis(context, chat_id, symbol)
 
@@ -542,7 +491,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "menu_strategy":
         await query.edit_message_text(
             "🧠 STRATEGY SELECTOR\n\n"
-            "Trendline and OTE retain their existing logic. SMC adds a fresh 4H → 1H → 30M market-structure engine, while Hybrid requires Trendline + SMC agreement. "
+            "Both strategies run the same 4H → 1H top-down bias read, "
             "then execute on the 30M chart.\n\n"
             f"Current: {ts_state.strategy_label()}",
             reply_markup=get_strategy_menu(),
@@ -550,17 +499,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data.startswith("set_strategy|"):
         name = data.split("|", 1)[1]
-        mapping = {"TRENDLINE": engine.STRATEGY_TRENDLINE, "OTE": engine.STRATEGY_OTE, "SMC": engine.STRATEGY_SMC, "HYBRID": engine.STRATEGY_HYBRID}
+        mapping = {"TRENDLINE": engine.STRATEGY_TRENDLINE, "OTE": engine.STRATEGY_OTE}
         if name in mapping:
             ts_state.set_selected_strategy(mapping[name])
         await query.edit_message_text(
             f"Strategy set → {ts_state.strategy_label()}",
             reply_markup=get_strategy_menu(),
         )
-
-    # ---------------- Dashboard shortcuts ----------------
-    elif data == "menu_deriv":
-        await query.edit_message_text("⚡ DERIV / SYNTHETIC MARKETS:", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get("Deriv Synthetic", []), "run_tl", "menu_home"))
 
     # ---------------- Trendline ----------------
     elif data == "menu_trendline":
@@ -605,28 +550,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             "Type any ticker for OTE analysis.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_ote")]])
         )
-
-    # ---------------- SMC ----------------
-    elif data == "menu_smc":
-        extra=[InlineKeyboardButton("🔎 Custom Ticker",callback_data="prompt_custom_ticker_smc")]
-        await query.edit_message_text("🏦 SMC (4H → 1H → 30M):",reply_markup=get_category_keyboard("cat_smc","menu_home",extra_row=extra))
-    elif data.startswith("cat_smc|"):
-        _,cat=data.split("|",1); await query.edit_message_text(f"{cat}:",reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat,[]),"run_smc","menu_smc"))
-    elif data.startswith("run_smc|"):
-        _,symbol=data.split("|",1); ts_state.set_selected_strategy(engine.STRATEGY_SMC); await query.edit_message_text(f"Running SMC analysis for {symbol}..."); await send_smc_analysis(context,chat_id,symbol)
-    elif data == "prompt_custom_ticker_smc":
-        ts_state.set_selected_strategy(engine.STRATEGY_SMC); await query.edit_message_text("Type any ticker for SMC analysis.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back",callback_data="menu_smc")]]))
-
-    # ---------------- Hybrid ----------------
-    elif data == "menu_hybrid":
-        extra=[InlineKeyboardButton("🔎 Custom Ticker",callback_data="prompt_custom_ticker_hybrid")]
-        await query.edit_message_text("🔀 HYBRID — SMC + Trendline consensus:",reply_markup=get_category_keyboard("cat_hybrid","menu_home",extra_row=extra))
-    elif data.startswith("cat_hybrid|"):
-        _,cat=data.split("|",1); await query.edit_message_text(f"{cat}:",reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat,[]),"run_hybrid","menu_hybrid"))
-    elif data.startswith("run_hybrid|"):
-        _,symbol=data.split("|",1); ts_state.set_selected_strategy(engine.STRATEGY_HYBRID); await query.edit_message_text(f"Running Hybrid analysis for {symbol}..."); await send_hybrid_analysis(context,chat_id,symbol)
-    elif data == "prompt_custom_ticker_hybrid":
-        ts_state.set_selected_strategy(engine.STRATEGY_HYBRID); await query.edit_message_text("Type any ticker for Hybrid analysis.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back",callback_data="menu_hybrid")]]))
 
     # ---------------- Personal price-watch levels ----------------
     elif data == "menu_price_watch":
@@ -895,7 +818,6 @@ def run_telegram_bot():
     app_bot = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     TELEGRAM_APP = app_bot
     app_bot.add_handler(CommandHandler("start", start_command))
-    app_bot.add_handler(CommandHandler("dashboard", dashboard_command))
     app_bot.add_handler(CallbackQueryHandler(button_callback_handler))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 

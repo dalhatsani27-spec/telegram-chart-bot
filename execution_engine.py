@@ -48,9 +48,7 @@ VALID_MODES = {MODE_OFF, MODE_AUTO, MODE_APPROVAL, MODE_COPY_TRADE}
 
 STRATEGY_TRENDLINE = "TRENDLINE"
 STRATEGY_OTE = "OTE"
-STRATEGY_SMC = "SMC"
-STRATEGY_HYBRID = "HYBRID"
-VALID_STRATEGIES = {STRATEGY_TRENDLINE, STRATEGY_OTE, STRATEGY_SMC, STRATEGY_HYBRID}
+VALID_STRATEGIES = {STRATEGY_TRENDLINE, STRATEGY_OTE}
 
 APPROVAL_EXPIRY_SECONDS = 180
 
@@ -73,7 +71,8 @@ class TradeStateManager:
         # Personal price-watch levels are analysis alerts, not trade orders.
         self.watch_levels = {}
 
-        # Strategy selection includes the original Trendline/OTE plus the new SMC and Hybrid analysis modes.
+        # Strategy selection -- only Trendline and OTE remain, so this is
+        # a straight either/or choice (no Hybrid/confluence mode).
         self.selected_strategy = STRATEGY_TRENDLINE
 
         self._commands = {}
