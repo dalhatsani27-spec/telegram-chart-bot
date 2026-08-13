@@ -13,6 +13,7 @@ import bot as legacy
 import market_data
 import smc_strategy
 import market_phases
+from chart_engine import generate_smc_map
 
 
 SMC_SELECTED = False
@@ -58,6 +59,18 @@ async def send_smc_analysis(context, chat_id: int, symbol: str):
         phase = await asyncio.to_thread(market_phases.analyze_market_phase, df)
         report = smc_strategy.format_smc_report(result, symbol, "30M")
         phase_report = market_phases.format_phase_report(phase)
+
+        ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            if not result.get("error"):
+                chart_img = await asyncio.to_thread(generate_smc_map, df, symbol, result, ts_str)
+                await context.bot.send_photo(
+                    chat_id=chat_id, photo=chart_img,
+                    caption=f"{symbol} SMC (30M) | {ts_str}",
+                )
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Chart failed to render for {symbol} (sending text analysis only).")
+
         await context.bot.send_message(chat_id=chat_id, text=report)
         await context.bot.send_message(
             chat_id=chat_id,

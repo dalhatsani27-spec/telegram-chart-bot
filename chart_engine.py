@@ -1183,6 +1183,126 @@ def generate_trendline_educational_map(
 # OTE CHART -- 30M Fibonacci Fan + Expansion chart
 # ============================================================
 # OTE CHART -- clean structural OTE map
+def generate_smc_map(df: pd.DataFrame, symbol: str, result: Dict[str, Any], title_suffix: str = "") -> io.BytesIO:
+    """SMC educational chart: candles + liquidity sweep + order block / FVG
+    zones + premium/discount range + trade map (entry/SL/TP) when a signal
+    is confirmed.
+    """
+    chart_df, chart_len = _prepare_ohlc(df, max_bars=160)
+    offset = len(df) - chart_len
+
+    mc = mpf.make_marketcolors(up=COLORS["bull"], down=COLORS["bear"], edge="inherit", wick="inherit")
+    style = mpf.make_mpf_style(marketcolors=mc, gridstyle=":", gridcolor=COLORS["grid"], y_on_right=True,
+        facecolor=COLORS["bg"], figcolor=COLORS["bg"],
+        rc={"axes.labelcolor": COLORS["text"], "xtick.color": COLORS["text"], "ytick.color": COLORS["text"]})
+    fig, axlist = mpf.plot(chart_df, type="candle", style=style, volume=False, returnfig=True,
+        figsize=(12, 6.8), warn_too_much_data=10000)
+    ax = axlist[0]
+
+    prices = list(chart_df["High"]) + list(chart_df["Low"])
+
+    # Premium / discount dealing range (equilibrium line + range high/low)
+    pdz = result.get("premium_discount") or {}
+    rng_hi, rng_lo, eq = pdz.get("range_high"), pdz.get("range_low"), pdz.get("equilibrium")
+    if rng_hi is not None and rng_lo is not None:
+        ax.axhspan(eq, rng_hi, color="#f23645", alpha=0.05, zorder=0)
+        ax.axhspan(rng_lo, eq, color="#089981", alpha=0.05, zorder=0)
+        ax.axhline(eq, linestyle=":", linewidth=1.0, color="#9ca3af", alpha=0.6, zorder=2)
+        ax.text(2, eq, " EQ (50%)", fontsize=6.8, color="#9ca3af", va="bottom", ha="left", zorder=8)
+        prices += [rng_hi, rng_lo]
+
+    # Liquidity sweep marker
+    sweep = result.get("last_sweep")
+    if sweep:
+        try:
+            x = sweep["index"] - offset
+            level = float(sweep["level"])
+            color = "#ea80fc"
+            if 0 <= x < chart_len:
+                ax.scatter([x], [level], s=64, marker="x", color=color, linewidths=2.2, zorder=11)
+            ax.axhline(level, linestyle="--", linewidth=1.0, color=color, alpha=0.55, zorder=2)
+            ax.text(chart_len - 2, level, f" SWEEP {sweep['type'].replace('_', ' ')}", fontsize=6.8,
+                    color=color, fontweight="bold", ha="right",
+                    va="bottom" if "SELL_SIDE" in sweep["type"] else "top", zorder=8,
+                    bbox=dict(boxstyle="round,pad=0.10", facecolor="#0b0f14", edgecolor=color, alpha=0.7, linewidth=0.45))
+            prices.append(level)
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    # Order block zone
+    ob = result.get("order_block")
+    if ob:
+        try:
+            lo, hi = float(ob["low"]), float(ob["high"])
+            x0 = max(0, ob.get("index", 0) - offset)
+            ax.axhspan(lo, hi, xmin=x0 / max(chart_len, 1), xmax=1.0, color="#3b82f6", alpha=0.18, zorder=1)
+            ax.text(chart_len - 2, hi, " ORDER BLOCK", fontsize=6.8, color="#93c5fd", fontweight="bold",
+                    ha="right", va="bottom", zorder=8)
+            prices += [lo, hi]
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    # Fair value gap zone
+    fvg = result.get("fvg")
+    if fvg:
+        try:
+            lo, hi = float(fvg["low"]), float(fvg["high"])
+            x0 = max(0, fvg.get("index", 0) - offset)
+            ax.axhspan(lo, hi, xmin=x0 / max(chart_len, 1), xmax=1.0, color="#f59e0b", alpha=0.18, zorder=1)
+            ax.text(chart_len - 2, lo, " FVG", fontsize=6.8, color="#fcd34d", fontweight="bold",
+                    ha="right", va="top", zorder=8)
+            prices += [lo, hi]
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    # BOS / CHoCH structure events
+    for ev in (result.get("events") or [])[-4:]:
+        try:
+            x = ev["index"] - offset
+            if 0 <= x < chart_len:
+                bullish = "BULLISH" in ev["type"]
+                color = "#089981" if bullish else "#f23645"
+                ax.axvline(x, linestyle=":", linewidth=0.8, color=color, alpha=0.35, zorder=1)
+                ax.annotate(ev["type"].replace("_", " "), (x, ev.get("price", chart_df["Close"].iloc[x])),
+                            xytext=(4, 10 if bullish else -14), textcoords="offset points",
+                            fontsize=6.2, color=color, fontweight="bold", zorder=9)
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+
+    # Trade map: entry / SL / TP1 / TP2 (only when a signal is confirmed)
+    if result.get("signal") in ("BUY", "SELL"):
+        entry, sl, tp1, tp2 = result.get("entry"), result.get("sl"), result.get("tp1"), result.get("tp2")
+        for val, label, color in (
+            (entry, "ENTRY", COLORS["entry"]), (sl, "SL", COLORS["sl"]),
+            (tp1, "TP1", COLORS["tp"]), (tp2, "TP2", COLORS["tp"]),
+        ):
+            if val is None:
+                continue
+            ax.axhline(val, linestyle="-", linewidth=1.1, color=color, alpha=0.85, zorder=6)
+            ax.text(2, val, f" {label} {val:.5f}", fontsize=6.8, color=color, fontweight="bold",
+                    va="bottom", ha="left", zorder=9,
+                    bbox=dict(boxstyle="round,pad=0.10", facecolor="#0b0f14", edgecolor=color, alpha=0.75, linewidth=0.45))
+            prices.append(val)
+
+    direction = result.get("direction") or "NEUTRAL"
+    signal = result.get("signal", "WAIT")
+    ax.set_title(
+        f"{symbol}  SMC | {result.get('structure_bias', 'NEUTRAL')} structure | {signal}"
+        + (f" | {title_suffix}" if title_suffix else ""),
+        color=COLORS["text"], fontsize=10, fontweight="bold", pad=10,
+    )
+    if prices:
+        pmin, pmax = min(prices), max(prices)
+        pad = (pmax - pmin) * 0.05 if pmax > pmin else 1
+        ax.set_ylim(pmin - pad, pmax + pad)
+
+    img_buf = io.BytesIO()
+    fig.savefig(img_buf, dpi=180, bbox_inches="tight", facecolor=fig.get_facecolor())
+    img_buf.seek(0)
+    plt.close(fig)
+    return img_buf
+
+
 def generate_ote_map(df: pd.DataFrame, symbol: str, analysis: Dict[str, Any], title_suffix: str = "") -> io.BytesIO:
     """Educational OTE chart: candles + impulse anchors + 62-79% zone.
     No fan rays, expansion clutter, or unconfirmed trade box.

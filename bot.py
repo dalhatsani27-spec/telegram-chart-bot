@@ -20,7 +20,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 
 import market_data
 from market_analysis import direction_banner
-from chart_engine import generate_trendline_educational_map, generate_ote_map
+from chart_engine import generate_trendline_educational_map, generate_ote_map, generate_smc_map
 import strategies
 import smc_strategy
 import market_phases
@@ -353,6 +353,20 @@ async def send_smc_analysis(context, chat_id, symbol):
         result = await asyncio.to_thread(smc_strategy.analyse_smc, df, htf)
         phase = await asyncio.to_thread(market_phases.analyze_market_phase, df)
         text = smc_strategy.format_smc_report(result, symbol, "30M") + "\n\n" + market_phases.format_phase_report(phase)
+
+        ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            if not result.get("error"):
+                chart_img = await asyncio.to_thread(generate_smc_map, df, symbol, result, ts_str)
+                await context.bot.send_photo(
+                    chat_id=chat_id, photo=chart_img,
+                    caption=f"{symbol} SMC (30M) | {ts_str}",
+                )
+        except Exception:
+            print(f"[send_smc_analysis] chart generation failed for {symbol}:")
+            traceback.print_exc()
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Chart failed to render for {symbol} (sending text analysis only).")
+
         await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=get_home_menu())
     except Exception as exc:
         traceback.print_exc()
