@@ -1179,6 +1179,12 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         elif trendline_retest.get("status") in ("BREAK_CONFIRMED", "BREAK_DEVELOPING"):
             reasons.append("⏳ Trendline broken — wait for a clean retest before chasing.")
 
+    continuation_state = _classify_trendline_state({"trendline_retest": trendline_retest, "family_kind": family_kind, "trendline_annotations": _trendline_swing_annotations(recent_pivots)})
+    topdown_context = None
+    # The orchestration adds topdown after this function, but accepting a pre-existing
+    # context keeps this builder reusable.
+    topdown_context = {}
+    
     trendline_annotations = _trendline_swing_annotations(recent_pivots)
 
     # Converging wedge/triangle (independent-slope rails) and full-history
@@ -1376,6 +1382,11 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         "trendline_retest": trendline_retest,
         "trendline_annotations": trendline_annotations,
         "trendline_status": trendline_retest.get("status", "INTACT"),
+        "continuation_state": continuation_state.get("state", "CONTINUATION"),
+        "state_reason": continuation_state.get("reason", ""),
+        "htf_key_levels_4h": [],
+        "htf_swings_4h": [],
+        "htf_swings_1h": [],
         "primary_quality": primary.get("quality") if primary else None,
         "primary_touches": primary.get("touches") if primary else 0,
         # Single "which pattern wins the chart" decision, so the renderer
@@ -1934,6 +1945,34 @@ def _trendline_structure_sequence(family: Dict[str, Any], limit: int = 4) -> str
     return " → ".join(labels) if labels else "—"
 
 
+def _classify_trendline_state(family: Dict[str, Any]) -> Dict[str, str]:
+    """Separate continuation, transition and confirmed reversal.
+
+    A trendline rejection is continuation evidence, not a reversal signal.
+    A break is only a transition until the underlying swing structure also
+    confirms the opposite side.
+    """
+    tr=family.get("trendline_retest") or {}
+    status=str(tr.get("status") or "INTACT")
+    kind=str(family.get("family_kind") or "none").lower()
+    anns=[a for a in (family.get("trendline_annotations") or []) if a.get("label") in {"HH","HL","LH","LL"}]
+    labels=[str(a.get("label")) for a in anns[-6:]]
+    if status in ("INTACT","FAKEOUT"):
+        if status=="FAKEOUT":
+            return {"state":"CONTINUATION","reason":"Trendline was reclaimed; treat the rejection as continuation, not reversal."}
+        return {"state":"CONTINUATION","reason":"Trendline respected and structure remains intact; look for continuation entry."}
+    # After a break, require a structural opposite extreme before calling reversal.
+    if kind=="ascending":
+        confirmed = bool(labels and labels[-1]=="LL") or ("LL" in labels[-2:] and "LH" in labels[-3:])
+        if confirmed:
+            return {"state":"REVERSAL_CONFIRMED","reason":"Ascending trendline break is supported by bearish swing structure (LH/LL)."}
+    elif kind=="descending":
+        confirmed = bool(labels and labels[-1]=="HH") or ("HH" in labels[-2:] and "HL" in labels[-3:])
+        if confirmed:
+            return {"state":"REVERSAL_CONFIRMED","reason":"Descending trendline break is supported by bullish swing structure (HL/HH)."}
+    return {"state":"TRANSITION","reason":"Trendline is broken, but reversal is not structurally confirmed; wait for retest and structural confirmation."}
+
+
 def _trendline_status_text(family: Dict[str, Any]) -> Dict[str, str]:
     """Translate the raw lifecycle state into the short trader-facing state."""
     tr = family.get("trendline_retest") or {}
@@ -2037,6 +2076,18 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
         f"1H: {bias_1h}",
         f"30M: {bias_30}",
         "",
+        "HIGHER-TIMEFRAME STRUCTURE",
+        f"4H swings: {str(family.get('htf_structure_4h') or 'NEUTRAL')}",
+        f"1H swings: {str(family.get('htf_structure_1h') or 'NEUTRAL')}",
+    ]
+    htf_levels=family.get("htf_key_levels_4h") or []
+    if htf_levels:
+        for lvl in htf_levels[:3]:
+            lines.append(f"4H {str(lvl.get('side','level')).upper()}: {float(lvl.get('price',0)):.5f} ({int(lvl.get('touches',0))} touches)")
+    else:
+        lines.append("4H key S/R: —")
+    lines += [
+        "",
         "TRENDLINE",
         f"Type: {primary_kind if primary_kind != 'NONE' else 'NONE'}",
         f"Touches: {touches}",
@@ -2077,12 +2128,21 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
         "",
         "🎯 DECISION",
         f"BIAS: {bias_30}",
+        f"MARKET STATE: {str((family.get('continuation_state') or {}).get('state') if isinstance(family.get('continuation_state'), dict) else family.get('continuation_state') or 'CONTINUATION')}",
         f"STATUS: {decision_status}",
         f"ENTRY: {decision_entry}",
     ]
 
     if not confirmed_entry:
         waits = []
+        state_obj=family.get("continuation_state") or {}
+        state_name=state_obj.get("state") if isinstance(state_obj,dict) else str(state_obj)
+        if state_name=="CONTINUATION":
+            waits.append("continuation entry confirmation from trendline reaction")
+        elif state_name=="TRANSITION":
+            waits.append("retest + structural confirmation before reversal")
+        elif state_name=="REVERSAL_CONFIRMED":
+            waits.append("entry confirmation in the new direction")
         if lifecycle["status"] == "INTACT":
             waits.append("trendline confirmation")
         elif lifecycle["status"] in ("BREAK_CONFIRMED", "BREAK_DEVELOPING"):
@@ -2287,7 +2347,11 @@ def format_ote_report(analysis: Dict[str, Any]) -> str:
         return f"🎯 OTE ANALYSIS — {symbol} M30\n\n{analysis['error']}"
     imp=analysis.get("impulse") or {};z=analysis.get("zone") or {};poi=analysis.get("poi");conf=analysis.get("confirmation") or {};td=analysis.get("topdown") or {};d=analysis.get("direction","NEUTRAL");valid=analysis.get("valid",False);state=analysis.get("status","WAIT")
     td_dir=td.get("direction","NEUTRAL")
-    lines=[f"🎯 OTE ANALYSIS — {symbol} M30","","BIAS",f"4H: {td_dir}",f"1H: {td_dir}",f"30M: {d}","","IMPULSE",f"{imp.get('start',{}).get('type','?').upper()} → {imp.get('end',{}).get('type','?').upper()}",f"Leg: {imp.get('leg_size',0):.5f} ({imp.get('atr_multiple',0):.1f} ATR)",f"Structure: {imp.get('structure_bias','NEUTRAL')}",f"Event: {imp.get('structure_event') or 'PENDING'}","","OTE ZONE",f"62%: {z.get('62',0):.5f}",f"70.5%: {z.get('70.5',0):.5f}",f"79%: {z.get('79',0):.5f}",f"Status: {analysis.get('zone_state','WAITING')}","","CONFLUENCE",f"Directional OB: {'✅' if poi else '❌'}",f"OB overlaps OTE: {'✅' if poi and poi.get('overlap',0)>0 else '❌'}",f"Displacement: {'✅' if conf.get('confirmed') else '❌'}","","━━━━━━━━━━━━━━━━","","🎯 DECISION",f"BIAS: {d}",f"STATUS: {'CONFIRMED' if valid else ('ACTIVE — WAIT' if state=='ACTIVE' else 'WAIT')}",f"ENTRY: {'CONFIRMED' if valid else 'NOT CONFIRMED'}"]
+    bias4=str(td.get("bias_4h") or td_dir).upper(); s4=str(td.get("swing_context_4h",{}).get("structure_bias") or "NEUTRAL").upper(); s1=str(td.get("swing_context_1h",{}).get("structure_bias") or "NEUTRAL").upper()
+    lines=[f"🎯 OTE ANALYSIS — {symbol} M30","","BIAS",f"4H: {bias4}",f"1H: {td_dir}",f"30M: {d}","","HIGHER-TIMEFRAME STRUCTURE",f"4H swings: {s4}",f"1H swings: {s1}"]
+    for lvl in (td.get("key_levels_4h") or [])[:3]:
+        lines.append(f"4H {str(lvl.get('side','level')).upper()}: {float(lvl.get('price',0)):.5f} ({int(lvl.get('touches',0))} touches)")
+    lines += ["","IMPULSE",f"{imp.get('start',{}).get('type','?').upper()} → {imp.get('end',{}).get('type','?').upper()}",f"Leg: {imp.get('leg_size',0):.5f} ({imp.get('atr_multiple',0):.1f} ATR)",f"Structure: {imp.get('structure_bias','NEUTRAL')}",f"Event: {imp.get('structure_event') or 'PENDING'}","","OTE ZONE",f"62%: {z.get('62',0):.5f}",f"70.5%: {z.get('70.5',0):.5f}",f"79%: {z.get('79',0):.5f}",f"Status: {analysis.get('zone_state','WAITING')}","","CONFLUENCE",f"Directional OB: {'✅' if poi else '❌'}",f"OB overlaps OTE: {'✅' if poi and poi.get('overlap',0)>0 else '❌'}",f"Displacement: {'✅' if conf.get('confirmed') else '❌'}","","━━━━━━━━━━━━━━━━","","🎯 DECISION",f"BIAS: {d}",f"STATUS: {'CONFIRMED' if valid else ('ACTIVE — WAIT' if state=='ACTIVE' else 'WAIT')}",f"ENTRY: {'CONFIRMED' if valid else 'NOT CONFIRMED'}"]
     if not valid:
         wait1 = {
             "ACTIVE": "1. OTE reaction",
@@ -2322,6 +2386,12 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     family["symbol"] = symbol
     family["timeframe"] = "30min"
     family["topdown"] = topdown
+    family["htf_key_levels_4h"] = topdown.get("key_levels_4h") or []
+    family["htf_swings_4h"] = topdown.get("swings_4h") or []
+    family["htf_swings_1h"] = topdown.get("swings_1h") or []
+    family["htf_structure_4h"] = (topdown.get("swing_context_4h") or {}).get("structure_bias", "NEUTRAL")
+    family["htf_structure_1h"] = (topdown.get("swing_context_1h") or {}).get("structure_bias", "NEUTRAL")
+    family["continuation_state"] = _classify_trendline_state(family)
     if family.get("error"):
         return family
 
@@ -2518,6 +2588,9 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
             reasons.append(f"✅ {sp_name} ({sp_conf:.0f}%) aligns with current bias — conviction +")
 
     family["direction"] = direction
+    # Re-evaluate lifecycle state after all pattern/structure processing.
+    family["continuation_state"] = _classify_trendline_state(family)
+    
     family["strength"] = max(0, min(100, int(strength)))
     family["reasons"] = reasons
 

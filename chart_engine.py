@@ -968,6 +968,42 @@ def generate_trendline_educational_map(
     )
     ax = axes[0]
 
+    # Higher-timeframe context: 4H key support/resistance is the structural
+    # map underneath the 30M trendline. Only the strongest few levels are
+    # drawn so the candle field stays readable.
+    htf_levels = family.get("htf_key_levels_4h") or []
+    for lvl in htf_levels[:3]:
+        try:
+            price=float(lvl.get("price")); side=str(lvl.get("side","level")).lower()
+            line_color="#60a5fa" if side=="support" else "#f59e0b"
+            ax.axhline(price, linestyle="--", linewidth=1.15, color=line_color, alpha=0.55, zorder=3)
+            ax.text(chart_len-2, price, f" 4H {side.upper()}", fontsize=7.2, color=line_color,
+                    fontweight="bold", va="bottom" if side=="support" else "top", ha="right", zorder=8,
+                    bbox=dict(boxstyle="round,pad=0.12", facecolor="#0b0f14", edgecolor=line_color, alpha=0.72, linewidth=0.5))
+        except (TypeError, ValueError):
+            continue
+
+    # Compact hierarchical swing markers.  The detection is done on the
+    # higher-timeframe line chart, then each point is mapped onto the 30M
+    # candle field by timestamp. Only the latest few anchors are shown.
+    def _plot_htf_swings(swings, label_prefix, marker_color, max_points=3):
+        for sw in (swings or [])[-max_points:]:
+            try:
+                ts=pd.Timestamp(sw.get("time"))
+                px=chart_df.index.get_indexer([ts], method="nearest")[0]
+                if px < 0 or px >= chart_len:
+                    continue
+                py=float(sw.get("price")); lab=f"{label_prefix} {sw.get('label','')}"
+                is_high=sw.get("type")=="high"
+                ax.scatter([px],[py],s=26,color=marker_color,edgecolors="#0b0f14",linewidths=0.8,zorder=8,alpha=0.9)
+                ax.annotate(lab,(px,py),xytext=(0,8 if is_high else -10),textcoords="offset points",
+                            ha="center",fontsize=6.8,color=marker_color,fontweight="bold",zorder=9,
+                            bbox=dict(boxstyle="round,pad=0.10",facecolor="#0b0f14",edgecolor=marker_color,alpha=0.62,linewidth=0.45))
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
+    _plot_htf_swings(family.get("htf_swings_4h"), "4H", "#a78bfa", 3)
+    _plot_htf_swings(family.get("htf_swings_1h"), "1H", "#38bdf8", 3)
+
     # Educational trendlines: maximum two meaningful rails.
     lines = []
     for tl in (family.get("uptrends") or []):
@@ -1160,6 +1196,19 @@ def generate_ote_map(df: pd.DataFrame, symbol: str, analysis: Dict[str, Any], ti
     fig, axlist = mpf.plot(chart_df, type="candle", style=style, volume=False, returnfig=True,
         figsize=(12,6.8), warn_too_much_data=10000)
     ax=axlist[0]
+    # Keep the 4H structural map visible behind the OTE zone, but only use
+    # the strongest levels so the retracement remains the focal point.
+    td=analysis.get("topdown") or {}
+    for lvl in (td.get("key_levels_4h") or [])[:3]:
+        try:
+            price=float(lvl.get("price")); side=str(lvl.get("side","level")).lower()
+            lc="#60a5fa" if side=="support" else "#f59e0b"
+            ax.axhline(price, linestyle="--", linewidth=1.0, color=lc, alpha=0.42, zorder=2)
+            ax.text(chart_len-2, price, f" 4H {side.upper()}", fontsize=6.8, color=lc, fontweight="bold",
+                    va="bottom" if side=="support" else "top", ha="right", zorder=8,
+                    bbox=dict(boxstyle="round,pad=0.10",facecolor="#0b0f14",edgecolor=lc,alpha=0.68,linewidth=0.45))
+        except (TypeError, ValueError):
+            continue
     imp=analysis.get("impulse") or {}; zone=analysis.get("zone") or {}
     start=imp.get("start"); end=imp.get("end")
     # Anchor labels are deliberately high-contrast.  The previous default

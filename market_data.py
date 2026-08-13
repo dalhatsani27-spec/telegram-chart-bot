@@ -62,9 +62,14 @@ if _configured_deriv_url:
     low = _configured_deriv_url.lower()
     if "/ws/demo" not in low and "/ws/real" not in low and "otp=" not in low:
         DERIV_WS_URLS.append(_configured_deriv_url)
+# Current public endpoint requires no auth.  Legacy-compatible WebSocket
+# endpoints are also kept as fallbacks; Deriv's legacy examples use an app_id
+# in the URL, and some hosting networks return InvalidAppID without it.
+DERIV_APP_ID = os.environ.get("DERIV_APP_ID", "1089").strip()
 for _u in (
     "wss://api.derivws.com/trading/v1/options/ws/public",
-    "wss://ws.binaryws.com/websockets/v3",
+    f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}",
+    f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID}",
 ):
     if _u not in DERIV_WS_URLS:
         DERIV_WS_URLS.append(_u)
