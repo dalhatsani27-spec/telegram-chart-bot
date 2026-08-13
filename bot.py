@@ -509,7 +509,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     data = query.data
     chat_id = query.message.chat_id
     primary_chat_id = chat_id
-async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "menu_smc":
         await query.edit_message_text("🧠 SMC — SMART MONEY CONCEPTS\n\nLiquidity → Sweep → Displacement → BOS/CHOCH → OB/FVG → Premium/Discount\n\nChoose an asset:", reply_markup=get_category_keyboard("cat_smc", "menu_home"))
         return
