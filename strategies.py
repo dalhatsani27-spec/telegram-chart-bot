@@ -28,6 +28,7 @@ from market_analysis import (
     analyse_structure, detect_order_blocks, scan_all_patterns, detect_market_sequence,
 )
 from topdown_engine import get_topdown_bias, format_topdown_summary
+from market_regime import detect_market_regime
 
 
 # ============================================================
@@ -959,7 +960,44 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     if df is None or len(df) < 30:
         return {"error": "Insufficient data for trendline family", "direction": "NEUTRAL", "pivots": []}
 
+    # Market-state gate: identify the character of the market BEFORE
+    # generating a forest of micro HH/HL/LH/LL trendlines. Trendline
+    # geometry is only allowed to drive the analysis when the regime engine
+    # says the market is directional. Range/accumulation/distribution are
+    # mapped as states and deliberately kept neutral until expansion confirms.
+    regime = detect_market_regime(df)
     n = len(df)
+
+    if regime.get("trade_permission") != "TRENDLINE":
+        d = df.tail(32)
+        range_high = float(d["High"].max()) if not d.empty else float(df["High"].max())
+        range_low = float(d["Low"].min()) if not d.empty else float(df["Low"].min())
+        close_now = float(df["Close"].iloc[-1])
+        return {
+            "direction": "NEUTRAL",
+            "strength": int(regime.get("confidence", 0)),
+            "reasons": [regime.get("reason", "Market regime does not permit trendline entries.")],
+            "family_kind": "none", "family_lines": [], "uptrends": [], "downtrends": [],
+            "channel": None, "wedge": None,
+            "horizontal_levels": [
+                {"price": range_high, "touches": 0, "side": "resistance", "quality": "regime_range", "score": 0},
+                {"price": range_low, "touches": 0, "side": "support", "quality": "regime_range", "score": 0},
+            ],
+            "range_zone": {"high": range_high, "low": range_low,
+                           "location": round((close_now - range_low) / max(range_high - range_low, 1e-12), 3)},
+            "projections": [], "mw_pattern": None, "market_sequence": None, "pivots": [],
+            "volume_profile": compute_volume_profile(df.iloc[:-1]),
+            "upper_line": np.full(n, np.nan), "lower_line": np.full(n, np.nan), "middle_line": np.full(n, np.nan),
+            "df": df, "mode": "regime", "breakout_grade": None,
+            "trendline_retest": {"status": "INACTIVE", "note": regime.get("reason", "")},
+            "trendline_annotations": [], "trendline_status": "INACTIVE",
+            "continuation_state": {"state": "WAIT", "reason": regime.get("reason", "Wait for directional expansion.")},
+            "state_reason": regime.get("reason", ""), "market_regime": regime, "regime": regime,
+            "htf_key_levels_4h": [], "htf_swings_4h": [], "htf_swings_1h": [],
+            "primary_quality": None, "primary_touches": 0, "active_pattern": "none",
+            "pattern_confidence": int(regime.get("confidence", 0)), "bias_touch_points": [],
+            "order_blocks": [], "active_order_block": None,
+        }
 
     # --- Simple fractal pivots (NO ZigZag) ---
     pivots = find_structural_pivots(df, left=4, right=4, min_gap=5, min_leg_atr=0.80)
