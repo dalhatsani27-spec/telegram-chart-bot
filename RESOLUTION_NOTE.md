@@ -1,1 +1,0 @@
-Conflict-resolution staging branch for PR #4. This file documents that the branch was created from main and the PR's six changed files were applied for validation before retargeting/merging.
