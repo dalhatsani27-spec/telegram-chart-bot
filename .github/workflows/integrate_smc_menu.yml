@@ -1,4 +1,4 @@
-name: Integrate SMC menu into production bot
+name: Repair SMC Telegram integration
 
 on:
   push:
@@ -8,54 +8,67 @@ permissions:
   contents: write
 
 jobs:
-  patch:
+  repair:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Patch bot.py
+      - name: Repair callback handler ordering
         shell: python
         run: |
           from pathlib import Path
           p = Path('bot.py')
           s = p.read_text(encoding='utf-8')
-          if 'import smc_strategy' not in s:
-              s = s.replace('import strategies\n', 'import strategies\nimport smc_strategy\nimport market_phases\n', 1)
-          home_old = '''        [InlineKeyboardButton("📐  Trendline (4H→1H→30M)", callback_data="menu_trendline")],\n        [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],'''
-          home_new = '''        [InlineKeyboardButton("🧠  SMC — Smart Money Concepts", callback_data="menu_smc")],\n        [InlineKeyboardButton("📊  Market Phase & Sentiment", callback_data="menu_phase")],\n        [InlineKeyboardButton("📐  Trendline V2 (4H→1H→30M)", callback_data="menu_trendline")],\n        [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],'''
-          if 'callback_data="menu_smc"' not in s and home_old in s:
-              s = s.replace(home_old, home_new, 1)
-          strategy_old = '''        [InlineKeyboardButton(\n            f"{'✅' if selected == engine.STRATEGY_OTE else '⚪'} OTE (62–79%)",\n            callback_data="set_strategy|OTE")],'''
-          strategy_new = strategy_old + '''\n        [InlineKeyboardButton("🧠 SMC", callback_data="set_strategy|SMC")],'''
-          if 'callback_data="set_strategy|SMC"' not in s and strategy_old in s:
-              s = s.replace(strategy_old, strategy_new, 1)
-          marker = 'async def send_trendline_analysis(context, chat_id, symbol):\n'
-          if 'async def send_smc_analysis(context, chat_id, symbol):' not in s and marker in s:
-              block = '''async def send_smc_analysis(context, chat_id, symbol):\n    try:\n        family = await asyncio.to_thread(strategies.run_trendline_analysis, symbol)\n        df = family.get("df") if isinstance(family, dict) else None\n        if df is None or df.empty:\n            raise RuntimeError("No OHLC data available for SMC analysis")\n        result = await asyncio.to_thread(smc_strategy.analyse_smc, df, None)\n        phase = await asyncio.to_thread(market_phases.analyze_market_phase, df)\n        text = smc_strategy.format_smc_report(result, symbol, "30M") + "\\n\\n" + market_phases.format_phase_report(phase)\n        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=get_home_menu())\n    except Exception as exc:\n        await context.bot.send_message(chat_id=chat_id, text=f"SMC analysis failed for '{symbol}': {exc}", reply_markup=get_home_menu())\n\n\nasync def send_phase_analysis(context, chat_id, symbol):\n    try:\n        family = await asyncio.to_thread(strategies.run_trendline_analysis, symbol)\n        df = family.get("df") if isinstance(family, dict) else None\n        if df is None or df.empty:\n            raise RuntimeError("No OHLC data available")\n        result = await asyncio.to_thread(market_phases.analyze_market_phase, df)\n        await context.bot.send_message(chat_id=chat_id, text=f"📊 {symbol}\\n\\n{market_phases.format_phase_report(result)}", reply_markup=get_home_menu())\n    except Exception as exc:\n        await context.bot.send_message(chat_id=chat_id, text=f"Market phase analysis failed for '{symbol}': {exc}", reply_markup=get_home_menu())\n\n\n'''
-              s = s.replace(marker, block + marker, 1)
-          handler = 'async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):\n'
-          if 'if data == "menu_smc":' not in s and handler in s:
-              branch = '''    if data == "menu_smc":\n        await query.edit_message_text("🧠 SMC — SMART MONEY CONCEPTS\\n\\nLiquidity → Sweep → Displacement → BOS/CHOCH → OB/FVG → Premium/Discount\\n\\nChoose an asset:", reply_markup=get_category_keyboard("cat_smc", "menu_home"))\n        return\n    elif data == "menu_phase":\n        await query.edit_message_text("📊 MARKET PHASE & SENTIMENT\\n\\nAccumulation • Markup • Distribution • Markdown • Transitions\\n\\nChoose an asset:", reply_markup=get_category_keyboard("cat_phase", "menu_home"))\n        return\n    elif data.startswith("cat_smc|"):\n        cat = data.split("|", 1)[1]\n        await query.edit_message_text(f"🧠 SMC — {cat}", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_smc", "menu_smc"))\n        return\n    elif data.startswith("run_smc|"):\n        symbol = data.split("|", 1)[1]\n        ts_state.set_selected_strategy("SMC")\n        await query.edit_message_text(f"Running SMC + phase analysis for {symbol}...")\n        await send_smc_analysis(context, chat_id, symbol)\n        return\n    elif data.startswith("cat_phase|"):\n        cat = data.split("|", 1)[1]\n        await query.edit_message_text(f"📊 Phase Engine — {cat}", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_phase", "menu_phase"))\n        return\n    elif data.startswith("run_phase|"):\n        symbol = data.split("|", 1)[1]\n        await query.edit_message_text(f"Mapping market phase for {symbol}...")\n        await send_phase_analysis(context, chat_id, symbol)\n        return\n    elif data == "set_strategy|SMC":\n        ts_state.set_selected_strategy("SMC")\n        await query.edit_message_text("Strategy set → 🧠 SMC", reply_markup=get_strategy_menu())\n        return\n'''
-              s = s.replace(handler, handler + branch, 1)
+          marker = 'async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):\n'
+          start = s.find(marker)
+          if start < 0:
+              raise SystemExit('button_callback_handler not found')
+
+          # The previous patch accidentally placed the SMC branches before
+          # query/data/chat_id were initialized. Move that branch block below
+          # initialization so every Telegram callback is valid again.
+          global_marker = '    global primary_chat_id\n'
+          g = s.find(global_marker, start)
+          if g < 0:
+              raise SystemExit('callback global initialization not found')
+          init_end_marker = '    primary_chat_id = chat_id\n'
+          ie = s.find(init_end_marker, g)
+          if ie < 0:
+              raise SystemExit('callback initialization end not found')
+          ie += len(init_end_marker)
+
+          prefix = s[g:start]  # preceding source, retained separately
+          branch_block = s[start:g]
+          init_block = s[g:ie]
+          if 'if data == "menu_smc":' in branch_block:
+              s = s[:start] + marker + init_block + branch_block + s[ie:]
+
+          # Ensure the selected-strategy route can dispatch SMC for typed tickers.
           old_route = '''    if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:\n        await send_ote_analysis(context, chat_id, symbol)\n    else:\n        await send_trendline_analysis(context, chat_id, symbol)\n'''
           new_route = '''    if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:\n        await send_ote_analysis(context, chat_id, symbol)\n    elif ts_state.get_selected_strategy() == "SMC":\n        await send_smc_analysis(context, chat_id, symbol)\n    else:\n        await send_trendline_analysis(context, chat_id, symbol)\n'''
           if old_route in s:
               s = s.replace(old_route, new_route, 1)
-          p.write_text(s, encoding='utf-8')
-          if 'callback_data="menu_smc"' not in s or 'if data == "menu_smc":' not in s:
-              raise SystemExit('SMC integration did not apply')
-          print('Patched bot.py successfully')
 
-      - name: Validate
+          # The repair is valid only if initialization appears before SMC branches.
+          h = s.find(marker)
+          d = s.find('    data = query.data', h)
+          smc = s.find('    if data == "menu_smc":', h)
+          if d < 0 or smc < 0 or d > smc:
+              raise SystemExit('SMC callback ordering is still invalid')
+
+          p.write_text(s, encoding='utf-8')
+          print('Repaired callback handler ordering')
+
+      - name: Syntax check
         run: python -m py_compile bot.py smc_strategy.py market_phases.py
 
-      - name: Commit
+      - name: Commit repair
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add bot.py
           if git diff --cached --quiet; then exit 0; fi
-          git commit -m 'feat: integrate SMC and market phase into main menu'
+          git commit -m 'fix: repair Telegram callback initialization for SMC'
           git push
