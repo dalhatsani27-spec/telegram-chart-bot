@@ -15,3 +15,5 @@
 - 4H key S/R is exposed to both Trendline and OTE reports and drawn lightly on both charts.
 - Compact 4H/1H swing anchors are mapped by timestamp onto the 30M Trendline chart without changing the existing 30M trendline engine.
 - Deriv legacy fallback URLs now include the documented test app_id fallback (1089) while the current public endpoint remains the first choice. A production DERIV_APP_ID can be supplied in Render.
+
+- CI trigger marker: validation workflow should run on this branch after this commit.
