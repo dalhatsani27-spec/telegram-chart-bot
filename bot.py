@@ -336,29 +336,53 @@ async def background_watchlist_scanner():
 
 
 async def send_smc_analysis(context, chat_id, symbol):
+    """Run SMC directly from the unified market-data feed.
+
+    SMC must not depend on Trendline's strategy family object: a failure in
+    Trendline analysis should never prevent the independent SMC engine from
+    receiving OHLC data.
+    """
     try:
-        family = await asyncio.to_thread(strategies.run_trendline_analysis, symbol)
-        df = family.get("df") if isinstance(family, dict) else None
-        if df is None or df.empty:
-            raise RuntimeError("No OHLC data available for SMC analysis")
-        result = await asyncio.to_thread(smc_strategy.analyse_smc, df, None)
+        await context.bot.send_message(chat_id=chat_id, text=f"⏳ Loading 30M + 4H market data for {symbol}...")
+        df = await asyncio.to_thread(market_data.fetch_candles, symbol, "30min", 300)
+        htf = await asyncio.to_thread(market_data.fetch_candles, symbol, "4h", 200)
+        if df is None or df.empty or len(df) < 60:
+            raise RuntimeError(f"30M market data unavailable or insufficient ({0 if df is None else len(df)} candles)")
+        if htf is None or htf.empty:
+            htf = None
+        result = await asyncio.to_thread(smc_strategy.analyse_smc, df, htf)
         phase = await asyncio.to_thread(market_phases.analyze_market_phase, df)
         text = smc_strategy.format_smc_report(result, symbol, "30M") + "\n\n" + market_phases.format_phase_report(phase)
         await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=get_home_menu())
     except Exception as exc:
-        await context.bot.send_message(chat_id=chat_id, text=f"SMC analysis failed for '{symbol}': {exc}", reply_markup=get_home_menu())
+        traceback.print_exc()
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ SMC analysis failed for '{symbol}'.\n\nError: {exc}\n\nCheck the Render logs for the traceback.",
+            reply_markup=get_home_menu(),
+        )
 
 
 async def send_phase_analysis(context, chat_id, symbol):
+    """Run market-phase analysis directly from market data (independent of Trendline)."""
     try:
-        family = await asyncio.to_thread(strategies.run_trendline_analysis, symbol)
-        df = family.get("df") if isinstance(family, dict) else None
-        if df is None or df.empty:
-            raise RuntimeError("No OHLC data available")
+        await context.bot.send_message(chat_id=chat_id, text=f"⏳ Loading 30M market data for {symbol}...")
+        df = await asyncio.to_thread(market_data.fetch_candles, symbol, "30min", 300)
+        if df is None or df.empty or len(df) < 60:
+            raise RuntimeError(f"30M market data unavailable or insufficient ({0 if df is None else len(df)} candles)")
         result = await asyncio.to_thread(market_phases.analyze_market_phase, df)
-        await context.bot.send_message(chat_id=chat_id, text=f"📊 {symbol}\n\n{market_phases.format_phase_report(result)}", reply_markup=get_home_menu())
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"📊 {symbol} — 30M\n\n{market_phases.format_phase_report(result)}",
+            reply_markup=get_home_menu(),
+        )
     except Exception as exc:
-        await context.bot.send_message(chat_id=chat_id, text=f"Market phase analysis failed for '{symbol}': {exc}", reply_markup=get_home_menu())
+        traceback.print_exc()
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Market phase analysis failed for '{symbol}'.\n\nError: {exc}\n\nCheck the Render logs for the traceback.",
+            reply_markup=get_home_menu(),
+        )
 
 
 async def send_trendline_analysis(context, chat_id, symbol):
