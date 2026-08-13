@@ -2,8 +2,7 @@ name: Integrate SMC menu into production bot
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: write
@@ -22,47 +21,35 @@ jobs:
           from pathlib import Path
           p = Path('bot.py')
           s = p.read_text(encoding='utf-8')
-
           if 'import smc_strategy' not in s:
               s = s.replace('import strategies\n', 'import strategies\nimport smc_strategy\nimport market_phases\n', 1)
-
           home_old = '''        [InlineKeyboardButton("📐  Trendline (4H→1H→30M)", callback_data="menu_trendline")],\n        [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],'''
           home_new = '''        [InlineKeyboardButton("🧠  SMC — Smart Money Concepts", callback_data="menu_smc")],\n        [InlineKeyboardButton("📊  Market Phase & Sentiment", callback_data="menu_phase")],\n        [InlineKeyboardButton("📐  Trendline V2 (4H→1H→30M)", callback_data="menu_trendline")],\n        [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],'''
-          if 'callback_data="menu_smc"' not in s:
-              if home_old not in s: raise SystemExit('home menu pattern not found')
+          if 'callback_data="menu_smc"' not in s and home_old in s:
               s = s.replace(home_old, home_new, 1)
-
           strategy_old = '''        [InlineKeyboardButton(\n            f"{'✅' if selected == engine.STRATEGY_OTE else '⚪'} OTE (62–79%)",\n            callback_data="set_strategy|OTE")],'''
-          strategy_new = '''        [InlineKeyboardButton(\n            f"{'✅' if selected == engine.STRATEGY_OTE else '⚪'} OTE (62–79%)",\n            callback_data="set_strategy|OTE")],\n        [InlineKeyboardButton("🧠 SMC", callback_data="set_strategy|SMC")],'''
-          if 'callback_data="set_strategy|SMC"' not in s:
-              if strategy_old not in s: raise SystemExit('strategy menu pattern not found')
+          strategy_new = strategy_old + '''\n        [InlineKeyboardButton("🧠 SMC", callback_data="set_strategy|SMC")],'''
+          if 'callback_data="set_strategy|SMC"' not in s and strategy_old in s:
               s = s.replace(strategy_old, strategy_new, 1)
-
-          # Insert analysis functions immediately before the existing Trendline function.
           marker = 'async def send_trendline_analysis(context, chat_id, symbol):\n'
-          if 'async def send_smc_analysis(context, chat_id, symbol):' not in s:
-              if marker not in s: raise SystemExit('analysis insertion marker not found')
-              block = '''async def send_smc_analysis(context, chat_id, symbol):\n    """Run SMC and market-phase analysis using the existing market-data pipeline."""\n    try:\n        family = await asyncio.to_thread(strategies.run_trendline_analysis, symbol)\n        df = family.get("df") if isinstance(family, dict) else None\n        if df is None or df.empty:\n            raise RuntimeError("No OHLC data available for SMC analysis")\n        result = await asyncio.to_thread(smc_strategy.analyse_smc, df, None)\n        phase = await asyncio.to_thread(market_phases.analyze_market_phase, df)\n        text = smc_strategy.format_smc_report(result, symbol, "30M")\n        text += "\\n\\n" + market_phases.format_phase_report(phase)\n        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=get_home_menu())\n    except Exception as exc:\n        await context.bot.send_message(chat_id=chat_id, text=f"SMC analysis failed for '{symbol}': {exc}", reply_markup=get_home_menu())\n\n\nasync def send_phase_analysis(context, chat_id, symbol):\n    try:\n        family = await asyncio.to_thread(strategies.run_trendline_analysis, symbol)\n        df = family.get("df") if isinstance(family, dict) else None\n        if df is None or df.empty:\n            raise RuntimeError("No OHLC data available")\n        result = await asyncio.to_thread(market_phases.analyze_market_phase, df)\n        await context.bot.send_message(chat_id=chat_id, text=f"📊 {symbol}\\n\\n{market_phases.format_phase_report(result)}", reply_markup=get_home_menu())\n    except Exception as exc:\n        await context.bot.send_message(chat_id=chat_id, text=f"Market phase analysis failed for '{symbol}': {exc}", reply_markup=get_home_menu())\n\n\n'''
+          if 'async def send_smc_analysis(context, chat_id, symbol):' not in s and marker in s:
+              block = '''async def send_smc_analysis(context, chat_id, symbol):\n    try:\n        family = await asyncio.to_thread(strategies.run_trendline_analysis, symbol)\n        df = family.get("df") if isinstance(family, dict) else None\n        if df is None or df.empty:\n            raise RuntimeError("No OHLC data available for SMC analysis")\n        result = await asyncio.to_thread(smc_strategy.analyse_smc, df, None)\n        phase = await asyncio.to_thread(market_phases.analyze_market_phase, df)\n        text = smc_strategy.format_smc_report(result, symbol, "30M") + "\\n\\n" + market_phases.format_phase_report(phase)\n        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=get_home_menu())\n    except Exception as exc:\n        await context.bot.send_message(chat_id=chat_id, text=f"SMC analysis failed for '{symbol}': {exc}", reply_markup=get_home_menu())\n\n\nasync def send_phase_analysis(context, chat_id, symbol):\n    try:\n        family = await asyncio.to_thread(strategies.run_trendline_analysis, symbol)\n        df = family.get("df") if isinstance(family, dict) else None\n        if df is None or df.empty:\n            raise RuntimeError("No OHLC data available")\n        result = await asyncio.to_thread(market_phases.analyze_market_phase, df)\n        await context.bot.send_message(chat_id=chat_id, text=f"📊 {symbol}\\n\\n{market_phases.format_phase_report(result)}", reply_markup=get_home_menu())\n    except Exception as exc:\n        await context.bot.send_message(chat_id=chat_id, text=f"Market phase analysis failed for '{symbol}': {exc}", reply_markup=get_home_menu())\n\n\n'''
               s = s.replace(marker, block + marker, 1)
-
-          # Insert callback branches at the top of the existing callback handler.
           handler = 'async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):\n'
-          if 'if data == "menu_smc":' not in s:
-              if handler not in s: raise SystemExit('callback handler not found')
+          if 'if data == "menu_smc":' not in s and handler in s:
               branch = '''    if data == "menu_smc":\n        await query.edit_message_text("🧠 SMC — SMART MONEY CONCEPTS\\n\\nLiquidity → Sweep → Displacement → BOS/CHOCH → OB/FVG → Premium/Discount\\n\\nChoose an asset:", reply_markup=get_category_keyboard("cat_smc", "menu_home"))\n        return\n    elif data == "menu_phase":\n        await query.edit_message_text("📊 MARKET PHASE & SENTIMENT\\n\\nAccumulation • Markup • Distribution • Markdown • Transitions\\n\\nChoose an asset:", reply_markup=get_category_keyboard("cat_phase", "menu_home"))\n        return\n    elif data.startswith("cat_smc|"):\n        cat = data.split("|", 1)[1]\n        await query.edit_message_text(f"🧠 SMC — {cat}", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_smc", "menu_smc"))\n        return\n    elif data.startswith("run_smc|"):\n        symbol = data.split("|", 1)[1]\n        ts_state.set_selected_strategy("SMC")\n        await query.edit_message_text(f"Running SMC + phase analysis for {symbol}...")\n        await send_smc_analysis(context, chat_id, symbol)\n        return\n    elif data.startswith("cat_phase|"):\n        cat = data.split("|", 1)[1]\n        await query.edit_message_text(f"📊 Phase Engine — {cat}", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_phase", "menu_phase"))\n        return\n    elif data.startswith("run_phase|"):\n        symbol = data.split("|", 1)[1]\n        await query.edit_message_text(f"Mapping market phase for {symbol}...")\n        await send_phase_analysis(context, chat_id, symbol)\n        return\n    elif data == "set_strategy|SMC":\n        ts_state.set_selected_strategy("SMC")\n        await query.edit_message_text("Strategy set → 🧠 SMC", reply_markup=get_strategy_menu())\n        return\n'''
               s = s.replace(handler, handler + branch, 1)
-
-          # Route typed tickers to SMC when SMC is selected.
           old_route = '''    if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:\n        await send_ote_analysis(context, chat_id, symbol)\n    else:\n        await send_trendline_analysis(context, chat_id, symbol)\n'''
           new_route = '''    if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:\n        await send_ote_analysis(context, chat_id, symbol)\n    elif ts_state.get_selected_strategy() == "SMC":\n        await send_smc_analysis(context, chat_id, symbol)\n    else:\n        await send_trendline_analysis(context, chat_id, symbol)\n'''
           if old_route in s:
               s = s.replace(old_route, new_route, 1)
-
           p.write_text(s, encoding='utf-8')
-          print('Patched bot.py')
+          if 'callback_data="menu_smc"' not in s or 'if data == "menu_smc":' not in s:
+              raise SystemExit('SMC integration did not apply')
+          print('Patched bot.py successfully')
 
       - name: Validate
-        run: python -m py_compile bot.py smc_strategy.py market_phases.py trendline_v2.py
+        run: python -m py_compile bot.py smc_strategy.py market_phases.py
 
       - name: Commit
         run: |
