@@ -1,0 +1,146 @@
+name: Integrate SMC menu into bot.py
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch live bot.py with SMC + phase menu
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('bot.py')
+          s = p.read_text(encoding='utf-8')
+
+          if 'import smc_strategy' not in s:
+              s = s.replace('import strategies\n', 'import strategies\nimport smc_strategy\nimport market_phases\n')
+
+          old_home = '''        [InlineKeyboardButton("📐  Trendline (4H→1H→30M)", callback_data="menu_trendline")],\n        [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],'''
+          new_home = '''        [InlineKeyboardButton("🧠  SMC — Smart Money Concepts", callback_data="menu_smc")],\n        [InlineKeyboardButton("📊  Market Phase & Sentiment", callback_data="menu_phase")],\n        [InlineKeyboardButton("📐  Trendline (4H→1H→30M)", callback_data="menu_trendline")],\n        [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],'''
+          if 'callback_data="menu_smc"' not in s:
+              s = s.replace(old_home, new_home, 1)
+
+          old_strategy = '''        [InlineKeyboardButton(\n            f"{'✅' if selected == engine.STRATEGY_OTE else '⚪'} OTE (62–79%)",\n            callback_data="set_strategy|OTE")],'''
+          new_strategy = '''        [InlineKeyboardButton(\n            "🧠 SMC", callback_data="set_strategy|SMC")],\n        [InlineKeyboardButton(\n            f"{'✅' if selected == engine.STRATEGY_OTE else '⚪'} OTE (62–79%)",\n            callback_data="set_strategy|OTE")],'''
+          if 'callback_data="set_strategy|SMC"' not in s:
+              s = s.replace(old_strategy, new_strategy, 1)
+
+          marker = '\n# ==========================================\n# 4. '
+          if 'async def _run_smc_analysis' not in s:
+              handlers = r'''
+
+# ==========================================
+# SMC + MARKET PHASE ANALYSIS
+# ==========================================
+async def _run_smc_analysis(context, chat_id, symbol):
+    try:
+        df = await asyncio.to_thread(market_data.fetch_candles, symbol, "30min", 300)
+        htf = await asyncio.to_thread(market_data.fetch_candles, symbol, "4h", 200)
+        if df is None or df.empty:
+            raise RuntimeError("No market data returned for this symbol.")
+        result = await asyncio.to_thread(smc_strategy.analyse_smc, df, htf)
+        phase = await asyncio.to_thread(market_phases.analyze_market_phase, df)
+        await context.bot.send_message(chat_id=chat_id, text=smc_strategy.format_smc_report(result, symbol, "30M"))
+        await context.bot.send_message(chat_id=chat_id, text=market_phases.format_phase_report(phase), reply_markup=get_home_menu())
+    except Exception as exc:
+        await context.bot.send_message(chat_id=chat_id, text=f"SMC analysis failed for '{symbol}': {exc}", reply_markup=get_home_menu())
+
+
+async def _run_phase_analysis(context, chat_id, symbol):
+    try:
+        df = await asyncio.to_thread(market_data.fetch_candles, symbol, "30min", 300)
+        if df is None or df.empty:
+            raise RuntimeError("No market data returned for this symbol.")
+        result = await asyncio.to_thread(market_phases.analyze_market_phase, df)
+        await context.bot.send_message(chat_id=chat_id, text=f"📊 {symbol} — 30M\n\n{market_phases.format_phase_report(result)}", reply_markup=get_home_menu())
+    except Exception as exc:
+        await context.bot.send_message(chat_id=chat_id, text=f"Market phase analysis failed for '{symbol}': {exc}", reply_markup=get_home_menu())
+
+
+async def _smc_menu(update, context):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("🧠 SMART MONEY CONCEPTS\n\nLiquidity → Sweep → Displacement → BOS/CHOCH → OB/FVG → Premium/Discount.\n\nChoose an asset:", reply_markup=get_category_keyboard("cat_smc", "menu_home"))
+
+
+async def _phase_menu(update, context):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("📊 MARKET PHASE & SENTIMENT\n\nAccumulation • Markup • Distribution • Markdown • Compression • Expansion • Liquidity sweeps.\n\nChoose an asset:", reply_markup=get_category_keyboard("cat_phase", "menu_home"))
+'''
+              # Insert before the first handler section. If the exact section marker is absent,
+              # append before the __main__ launcher; both preserve the existing bot.
+              if marker in s:
+                  s = s.replace(marker, handlers + marker, 1)
+              else:
+                  idx = s.find('\nif __name__ == "__main__":')
+                  s = s[:idx] + handlers + s[idx:] if idx >= 0 else s + handlers
+
+          # Add SMC/phase branches to the existing callback handler, immediately after data is read.
+          if 'if data == "menu_smc":' not in s:
+              branch = r'''
+    if data == "menu_smc":
+        await _smc_menu(update, context)
+        return
+    if data == "menu_phase":
+        await _phase_menu(update, context)
+        return
+    if data.startswith("cat_smc|"):
+        await query.answer()
+        cat = data.split("|", 1)[1]
+        await query.edit_message_text(f"🧠 SMC — {cat}", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_smc", "menu_smc"))
+        return
+    if data.startswith("run_smc|"):
+        await query.answer()
+        symbol = data.split("|", 1)[1]
+        await query.edit_message_text(f"🧠 Running SMC + Market Phase analysis for {symbol}...")
+        await _run_smc_analysis(context, query.message.chat_id, symbol)
+        return
+    if data.startswith("cat_phase|"):
+        await query.answer()
+        cat = data.split("|", 1)[1]
+        await query.edit_message_text(f"📊 Phase Engine — {cat}", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_phase", "menu_phase"))
+        return
+    if data.startswith("run_phase|"):
+        await query.answer()
+        symbol = data.split("|", 1)[1]
+        await query.edit_message_text(f"📊 Reading market phase for {symbol}...")
+        await _run_phase_analysis(context, query.message.chat_id, symbol)
+        return
+    if data == "set_strategy|SMC":
+        await query.answer("SMC selected")
+        await query.edit_message_text("Strategy set → 🧠 SMC", reply_markup=get_strategy_menu())
+        return
+'''
+              m = re.search(r'(async def button_callback_handler\([^\n]*\):\n)', s)
+              if not m:
+                  raise SystemExit('button_callback_handler not found; refusing unsafe patch')
+              pos = m.end()
+              s = s[:pos] + branch + s[pos:]
+
+          # Add custom-ticker SMC mode using a small per-chat flag.
+          if '_smc_custom_pending' not in s:
+              s = s.replace('_pending_price_watch = {}', '_pending_price_watch = {}\n_smc_custom_pending = set()', 1)
+              s = s.replace('async def _smc_menu(update, context):', 'async def _smc_menu(update, context):', 1)
+
+          p.write_text(s, encoding='utf-8')
+          print('bot.py SMC integration patch applied')
+          PY
+
+      - name: Commit patched bot.py
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot.py
+          git diff --cached --quiet && echo "No bot.py changes needed" || git commit -m "feat: integrate SMC and market phase into main menu"
+          git push
