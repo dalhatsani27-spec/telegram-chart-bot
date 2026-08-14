@@ -6,12 +6,32 @@ def _install():
     try:
         import market_data
         import strategies
+        import execution_engine as engine
         import single_tf_sma_engine as stf
+
+        # The Telegram control-panel timeframe button already exists. Expand
+        # its selectable analysis universe to exactly H4 -> M1. This is a
+        # presentation/state patch so the live execution engine itself is not
+        # rewritten here.
+        engine.WATCH_TIMEFRAMES = ["4h", "1h", "30min", "15min", "5min", "1min"]
+        engine.WATCH_TIMEFRAME_LABELS = {
+            "4h": "H4",
+            "1h": "H1",
+            "30min": "M30",
+            "15min": "M15",
+            "5min": "M5",
+            "1min": "M1",
+        }
+        # M30 is the safest default because it is the timeframe we have been
+        # visually validating. The user can switch it from the control panel.
+        if getattr(engine.state, "watch_timeframe", None) not in engine.WATCH_TIMEFRAMES:
+            engine.state.watch_timeframe = "30min"
 
         def _selected_tf():
             try:
                 from execution_engine import state
-                return state.get_watch_timeframe() or "30min"
+                tf = state.get_watch_timeframe()
+                return tf if tf in engine.WATCH_TIMEFRAMES else "30min"
             except Exception:
                 return "30min"
 
@@ -72,6 +92,7 @@ def _install():
             print(f"[single_tf] visual renderer hook skipped: {exc!r}")
 
         print("[single_tf] 20-SMA selected-timeframe geometry engine ACTIVE")
+        print("[single_tf] timeframe selector: H4/H1/M30/M15/M5/M1")
     except Exception as exc:
         # Never prevent the bot from starting because the experimental hook fails.
         print(f"[single_tf] activation failed; legacy strategy retained: {exc!r}")
