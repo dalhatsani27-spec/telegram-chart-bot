@@ -21,6 +21,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import market_data
 from market_analysis import direction_banner
 from chart_engine import generate_trendline_educational_map, generate_ote_map, generate_smc_map
+from visual_pattern_engine import render_trendline_map as render_visual_trendline_map
 import strategies
 import smc_strategy
 import market_phases
@@ -417,7 +418,7 @@ async def send_trendline_analysis(context, chat_id, symbol):
                 pos = strategies.build_position_container(family)
                 chart_payload = dict(family)
                 chart_payload["position"] = pos
-                chart_img = generate_trendline_educational_map(df_tl, symbol, chart_payload, title_suffix=ts_str)
+                chart_img = render_visual_trendline_map(df_tl, symbol, chart_payload, title_suffix=ts_str)
                 await context.bot.send_photo(
                     chat_id=chat_id, photo=chart_img,
                     caption=f"{symbol} Trendline (30M) | {ts_str}",
