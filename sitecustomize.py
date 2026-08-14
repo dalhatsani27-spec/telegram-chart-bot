@@ -1,4 +1,4 @@
-"""Activate the isolated single-timeframe 30-SMA geometry engine."""
+"""Activate the isolated single-timeframe 20-SMA geometry engine."""
 from __future__ import annotations
 
 
@@ -22,11 +22,11 @@ def _install():
             r = stf.analyze(df, symbol, tf)
             if r.get("error"):
                 return r
-            r["strategy_name"] = "SINGLE-TF 30 SMA GEOMETRY"
+            r["strategy_name"] = "SINGLE-TF 20 SMA GEOMETRY"
             r["strength"] = 90 if r["strong"] else 65 if r["trendline"] else 50
             r["gating_notes"] = [
                 f"Single timeframe: {r['timeframe_label']}",
-                "30 SMA applied to Median Price",
+                "20 SMA applied to Median Price",
                 "SMA + trendline near/touching" if r["near"] else "SMA + trendline separated",
             ]
             r["entry_rules"] = {"confirmed": bool(r["entry_confirmed"]), "confirmation_count": 1 if r["entry_confirmed"] else 0}
@@ -45,7 +45,7 @@ def _install():
                 sl=entry+atr; tp1=entry-atr*1.5; tp2=entry-atr*2.5; tp3=entry-atr*3.5
             else:
                 return None
-            return {"side":"LONG" if direction=="BUY" else "SHORT","direction":direction,"entry":entry,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"rr":2.5,"confirmed":True,"order_type":"MARKET","entry_note":"30 SMA directional rail is near/touching; engine gate confirmed."}
+            return {"side":"LONG" if direction=="BUY" else "SHORT","direction":direction,"entry":entry,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"rr":2.5,"confirmed":True,"order_type":"MARKET","entry_note":"20 SMA directional rail is near/touching; engine gate confirmed."}
 
         strategies.run_trendline_analysis = run_single
         strategies.format_trendline_report = format_single
@@ -53,7 +53,7 @@ def _install():
 
         import visual_pattern_engine
         visual_pattern_engine.render_trendline_map = lambda df, symbol, payload, title_suffix="": stf.render(payload)
-        print("[single_tf] 30-SMA geometry engine ACTIVE")
+        print("[single_tf] 20-SMA geometry engine ACTIVE")
     except Exception as exc:
         print(f"[single_tf] activation failed: {exc!r}")
 
