@@ -1,82 +1,58 @@
-"""Mandatory Trendline V4 runtime hook.
-
-This file is intentionally small and defensive. It loads the V4 decision layer
-at interpreter startup and patches the existing Trendline entry/report path so
-Render cannot keep using the old report/entry gate while the bot is running.
-"""
+"""Activate the isolated single-timeframe 30-SMA geometry engine."""
 from __future__ import annotations
-
-import os
-import sys
-import importlib
 
 
 def _install():
     try:
-        root = os.path.dirname(os.path.abspath(__file__))
-        if root not in sys.path:
-            sys.path.insert(0, root)
-        importlib.invalidate_caches()
         import strategies
-        from trendline_confidence import calculate_confidence, evaluate_final_decision, format_v4_report
+        import single_tf_sma_engine as stf
 
-        if getattr(strategies.run_trendline_analysis, "_trendline_v4", False):
-            print("[trendline_v4] already installed")
-            return
-
-        original_run = strategies.run_trendline_analysis
-        original_build = strategies.build_position_container
-
-        def run_v4(symbol, *args, **kwargs):
-            family = original_run(symbol, *args, **kwargs)
-            if isinstance(family, dict) and not family.get("error"):
-                try:
-                    confidence = calculate_confidence(family)
-                    family["confidence_breakdown"] = confidence
-                    family["confidence"] = confidence["score"]
-                    family["confidence_grade"] = confidence["grade"]
-                    decision = evaluate_final_decision(family)
-                    family["final_decision"] = decision
-                    family["entry_confirmed_v4"] = bool(decision["confirmed"])
-                except Exception as exc:
-                    print(f"[trendline_v4] evaluation failed for {symbol}: {exc!r}")
-            return family
-
-        def format_v4(family, symbol, *args, **kwargs):
+        def _selected_tf():
             try:
-                if isinstance(family, dict) and not family.get("error"):
-                    return format_v4_report(family, symbol)
-            except Exception as exc:
-                print(f"[trendline_v4] report failed for {symbol}: {exc!r}")
-            return strategies.format_trendline_report.__wrapped__(family, symbol, *args, **kwargs) if hasattr(strategies.format_trendline_report, "__wrapped__") else "Trendline V4 report unavailable."
+                from execution_engine import state
+                return state.get_watch_timeframe() or "30min"
+            except Exception:
+                return "30min"
 
-        def build_v4(family, *args, **kwargs):
-            if isinstance(family, dict) and not family.get("error"):
-                decision = family.get("final_decision")
-                if decision is None:
-                    confidence = family.get("confidence_breakdown") or calculate_confidence(family)
-                    decision = evaluate_final_decision({**family, "confidence_breakdown": confidence})
-                if not decision.get("confirmed"):
-                    return None
-            return original_build(family, *args, **kwargs)
+        def run_single(symbol, *args, **kwargs):
+            tf = _selected_tf()
+            df = strategies.market_data.fetch_candles(symbol, tf, 300)
+            if df is None or df.empty:
+                return {"error": f"{symbol} {stf.TF_LABELS.get(tf, tf)} data unavailable", "timeframe": tf}
+            r = stf.analyze(df, symbol, tf)
+            if r.get("error"):
+                return r
+            r["strength"] = 90 if r["strong"] else 65 if r["trendline"] else 50
+            r["gating_notes"] = [
+                f"Single timeframe: {r['timeframe_label']}",
+                "30 SMA applied to Median Price",
+                "SMA + trendline near/touching" if r["near"] else "SMA + trendline separated",
+            ]
+            r["entry_rules"] = {"confirmed": bool(r["strong"]), "confirmation_count": 1 if r["strong"] else 0}
+            return r
 
-        run_v4._trendline_v4 = True
-        format_v4.__wrapped__ = getattr(strategies, "format_trendline_report", None)
-        strategies.run_trendline_analysis = run_v4
-        strategies.format_trendline_report = format_v4
-        strategies.build_position_container = build_v4
-        print("[trendline_v4] INSTALLED — final confidence + mandatory entry gate active")
+        def format_single(family, symbol, *args, **kwargs):
+            return stf.report(family)
+
+        def build_single(family, *args, **kwargs):
+            if not family or family.get("error") or not family.get("strong"):
+                return None
+            atr=float(family["atr"]); entry=float(family["price"]); direction=family["direction"]
+            if direction == "BUY":
+                sl=entry-atr; tp1=entry+atr*1.5; tp2=entry+atr*2.5
+            else:
+                sl=entry+atr; tp1=entry-atr*1.5; tp2=entry-atr*2.5
+            return {"side":"LONG" if direction=="BUY" else "SHORT","direction":direction,"entry":entry,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp2,"rr":2.5,"confirmed":True,"order_type":"MARKET","entry_note":"30 SMA and directional trendline are near/touching."}
+
+        strategies.run_trendline_analysis = run_single
+        strategies.format_trendline_report = format_single
+        strategies.build_position_container = build_single
+
+        import visual_pattern_engine
+        visual_pattern_engine.render_trendline_map = lambda df, symbol, payload, title_suffix="": stf.render(payload)
+        print("[single_tf] 30-SMA geometry engine ACTIVE")
     except Exception as exc:
-        print(f"[trendline_v4] startup hook FAILED: {exc!r}")
+        print(f"[single_tf] activation failed: {exc!r}")
 
 
 _install()
-
-# Visual Pattern Engine: pattern names are derived from fitted chart geometry
-# and the chart renderer draws those rails directly. It deliberately does not
-# replace the V4 entry gate; it replaces the old pattern-drawing path.
-try:
-    from visual_pattern_runtime import install_visual_pattern_engine
-    install_visual_pattern_engine()
-except Exception as exc:
-    print(f"[visual_pattern] activation failed: {exc!r}")
