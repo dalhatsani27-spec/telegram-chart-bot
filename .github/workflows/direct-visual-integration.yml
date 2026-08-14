@@ -24,19 +24,29 @@ jobs:
           from pathlib import Path
           p = Path("bot.py")
           s = p.read_text(encoding="utf-8")
-          old_import = "from chart_engine import generate_trendline_map, generate_ote_map"
-          new_import = "from chart_engine import generate_trendline_map, generate_ote_map\nfrom visual_pattern_engine import render_trendline_map as render_visual_trendline_map"
-          if "render_visual_trendline_map" not in s:
-              if old_import not in s:
-                  raise SystemExit("Expected chart_engine import not found")
-              s = s.replace(old_import, new_import, 1)
-          old_call = "chart_img = generate_trendline_map(df_tl, symbol, chart_payload, title_suffix=ts_str)"
-          new_call = "chart_img = render_visual_trendline_map(df_tl, symbol, chart_payload, title_suffix=ts_str)"
-          if old_call in s:
-              s = s.replace(old_call, new_call, 1)
-          elif "chart_img = render_visual_trendline_map(df_tl, symbol, chart_payload" not in s:
-              raise SystemExit("Expected Trendline chart call not found")
+          if "from visual_pattern_engine import render_trendline_map as render_visual_trendline_map" not in s:
+              marker = "import strategies"
+              if marker not in s:
+                  raise SystemExit("Cannot locate strategies import in bot.py")
+              s = s.replace(marker, "from visual_pattern_engine import render_trendline_map as render_visual_trendline_map\n" + marker, 1)
+          replacements = [
+              "chart_img = generate_trendline_map(df_tl, symbol, chart_payload, title_suffix=ts_str)",
+              "chart_img = generate_trendline_educational_map(df_tl, symbol, chart_payload, title_suffix=ts_str)",
+          ]
+          visual_call = "chart_img = render_visual_trendline_map(df_tl, symbol, chart_payload, title_suffix=ts_str)"
+          if visual_call not in s:
+              for old in replacements:
+                  if old in s:
+                      s = s.replace(old, visual_call, 1)
+                      break
+              else:
+                  raise SystemExit("Cannot locate actual Trendline chart call in bot.py")
           p.write_text(s, encoding="utf-8")
+
+      - name: Verify direct integration
+        run: |
+          grep -n "render_visual_trendline_map" bot.py
+          python -m py_compile bot.py visual_pattern_engine.py
 
       - name: Commit direct integration
         run: |
@@ -44,5 +54,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bot.py
           git diff --cached --quiet && exit 0
-          git commit -m "Wire visual pattern renderer into Trendline Telegram path"
+          git commit -m "Wire visual pattern renderer into actual Trendline path"
           git push origin HEAD:main
