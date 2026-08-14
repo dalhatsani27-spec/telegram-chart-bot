@@ -1,55 +1,78 @@
-"""
-Project startup hook.
+"""Mandatory Trendline V4 runtime hook.
 
-The existing Trendline engine already contains geometry, classic pattern
-scanning, breakout grading, entry confirmation, order blocks and the 4H/1H
-cascade. This hook adds the independent final confidence layer without
-rewriting those mature components or changing execution rules.
+This file is intentionally small and defensive. It loads the V4 decision layer
+at interpreter startup and patches the existing Trendline entry/report path so
+Render cannot keep using the old report/entry gate while the bot is running.
 """
+from __future__ import annotations
+
+import os
+import sys
+import importlib
 
 
 def _install():
     try:
+        root = os.path.dirname(os.path.abspath(__file__))
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        importlib.invalidate_caches()
         import strategies
-        from trendline_confidence import calculate_confidence, format_confidence_block
+        from trendline_confidence import calculate_confidence, evaluate_final_decision, format_v4_report
 
-        original_run = strategies.run_trendline_analysis
-        original_format = strategies.format_trendline_report
-
-        if getattr(original_run, "_confidence_v3", False):
+        if getattr(strategies.run_trendline_analysis, "_trendline_v4", False):
+            print("[trendline_v4] already installed")
             return
 
-        def run_with_confidence(symbol, *args, **kwargs):
+        original_run = strategies.run_trendline_analysis
+        original_build = strategies.build_position_container
+
+        def run_v4(symbol, *args, **kwargs):
             family = original_run(symbol, *args, **kwargs)
             if isinstance(family, dict) and not family.get("error"):
                 try:
-                    result = calculate_confidence(family)
-                    family["confidence"] = result["score"]
-                    family["confidence_grade"] = result["grade"]
-                    family["confidence_breakdown"] = result
-                    # Keep the existing 'strength' untouched. It remains the
-                    # strategy/execution score; confidence is an independent
-                    # evidence-weighted quality score for the final readout.
+                    confidence = calculate_confidence(family)
+                    family["confidence_breakdown"] = confidence
+                    family["confidence"] = confidence["score"]
+                    family["confidence_grade"] = confidence["grade"]
+                    decision = evaluate_final_decision(family)
+                    family["final_decision"] = decision
+                    family["entry_confirmed_v4"] = bool(decision["confirmed"])
                 except Exception as exc:
-                    print(f"[confidence_v3] calculation failed for {symbol}: {exc!r}")
+                    print(f"[trendline_v4] evaluation failed for {symbol}: {exc!r}")
             return family
 
-        run_with_confidence._confidence_v3 = True
+        def format_v4(family, symbol, *args, **kwargs):
+            try:
+                if isinstance(family, dict) and not family.get("error"):
+                    return format_v4_report(family, symbol)
+            except Exception as exc:
+                print(f"[trendline_v4] report failed for {symbol}: {exc!r}")
+            # Keep the bot alive if an unexpected formatting issue occurs.
+            return strategies.format_trendline_report.__wrapped__(family, symbol, *args, **kwargs) if hasattr(strategies.format_trendline_report, "__wrapped__") else "Trendline V4 report unavailable."
 
-        def format_with_confidence(family, symbol, *args, **kwargs):
-            report = original_format(family, symbol, *args, **kwargs)
-            result = family.get("confidence_breakdown") if isinstance(family, dict) else None
-            if result:
-                report = report.rstrip() + "\n\n" + format_confidence_block(result)
-            return report
+        def build_v4(family, *args, **kwargs):
+            # One source of truth for tickets/position containers: if the V4
+            # mandatory gate is not confirmed, no executable position is
+            # returned. This prevents the old Copy Trade path from emitting
+            # a ticket just because direction=BUY/SELL exists.
+            if isinstance(family, dict) and not family.get("error"):
+                decision = family.get("final_decision")
+                if decision is None:
+                    confidence = family.get("confidence_breakdown") or calculate_confidence(family)
+                    decision = evaluate_final_decision({**family, "confidence_breakdown": confidence})
+                if not decision.get("confirmed"):
+                    return None
+            return original_build(family, *args, **kwargs)
 
-        strategies.run_trendline_analysis = run_with_confidence
-        strategies.format_trendline_report = format_with_confidence
-        print("[confidence_v3] Trendline confidence layer installed.")
+        run_v4._trendline_v4 = True
+        format_v4.__wrapped__ = getattr(strategies, "format_trendline_report", None)
+        strategies.run_trendline_analysis = run_v4
+        strategies.format_trendline_report = format_v4
+        strategies.build_position_container = build_v4
+        print("[trendline_v4] INSTALLED — final confidence + mandatory entry gate active")
     except Exception as exc:
-        # Never prevent the existing bot from starting if the optional layer
-        # cannot load.
-        print(f"[confidence_v3] startup hook skipped: {exc!r}")
+        print(f"[trendline_v4] startup hook FAILED: {exc!r}")
 
 
 _install()
