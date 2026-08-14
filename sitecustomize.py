@@ -48,14 +48,9 @@ def _install():
                     return format_v4_report(family, symbol)
             except Exception as exc:
                 print(f"[trendline_v4] report failed for {symbol}: {exc!r}")
-            # Keep the bot alive if an unexpected formatting issue occurs.
             return strategies.format_trendline_report.__wrapped__(family, symbol, *args, **kwargs) if hasattr(strategies.format_trendline_report, "__wrapped__") else "Trendline V4 report unavailable."
 
         def build_v4(family, *args, **kwargs):
-            # One source of truth for tickets/position containers: if the V4
-            # mandatory gate is not confirmed, no executable position is
-            # returned. This prevents the old Copy Trade path from emitting
-            # a ticket just because direction=BUY/SELL exists.
             if isinstance(family, dict) and not family.get("error"):
                 decision = family.get("final_decision")
                 if decision is None:
@@ -76,3 +71,12 @@ def _install():
 
 
 _install()
+
+# Visual Pattern Engine: pattern names are derived from fitted chart geometry
+# and the chart renderer draws those rails directly. It deliberately does not
+# replace the V4 entry gate; it replaces the old pattern-drawing path.
+try:
+    from visual_pattern_runtime import install_visual_pattern_engine
+    install_visual_pattern_engine()
+except Exception as exc:
+    print(f"[visual_pattern] activation failed: {exc!r}")
