@@ -1,1 +1,1 @@
-trigger direct visual trendline integration v3
+trigger direct visual trendline integration v4
