@@ -1,0 +1,68 @@
+name: Fix dual-rail breakout and axis contrast
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch breakout detection and axis labels
+        shell: python
+        run: |
+          from pathlib import Path
+
+          # -------------------------
+          # strategies.py
+          # -------------------------
+          p = Path("strategies.py")
+          s = p.read_text(encoding="utf-8")
+
+          anchor = '''    # Trendline lifecycle: intact -> break -> retest (or fakeout).\n'''
+          if anchor not in s:
+              raise SystemExit("strategies.py lifecycle anchor not found")
+
+          insert = '''    # When BOTH rails exist, a breakout must be detected from the rail\n    # that price actually closed beyond. The old logic only graded a break\n    # inside the single-rail branches. That meant a dual-rail structure\n    # could visibly break its rising support while the report still said\n    # NOT BROKEN.\n    if support and resistance:\n        close_now = float(df["Close"].iloc[-1])\n        support_now = float(support["y_end"])\n        resistance_now = float(resistance["y_end"])\n\n        if close_now < support_now:\n            primary = support\n            family_kind = "ascending"\n            breakout_grade = _grade_breakout(df, support, "support_break_down", n)\n            direction = "SELL"\n            reasons.append(\n                f"BREAK below rising support — {breakout_grade['penetration_atr']} ATR, "\n                f"{breakout_grade['consecutive_closes']} close(s), body {breakout_grade['body_ratio']}"\n            )\n        elif close_now > resistance_now:\n            primary = resistance\n            family_kind = "descending"\n            breakout_grade = _grade_breakout(df, resistance, "resistance_break_up", n)\n            direction = "BUY"\n            reasons.append(\n                f"BREAK above falling resistance — {breakout_grade['penetration_atr']} ATR, "\n                f"{breakout_grade['consecutive_closes']} close(s), body {breakout_grade['body_ratio']}"\n            )\n\n'''
+          s = s.replace(anchor, insert + anchor, 1)
+          p.write_text(s, encoding="utf-8")
+
+          # -------------------------
+          # chart_engine.py
+          # -------------------------
+          p = Path("chart_engine.py")
+          s = p.read_text(encoding="utf-8")
+
+          # The educational renderer uses mplfinance's returned axis. Force\n          # both tick labels AND axis labels to the chart text colour after\n          # mplfinance has configured the axis. This is visual-only; no price\n          # or date values are changed.\n          anchor = '''    ax = axes[0]\n\n    # --- Label collision avoidance -----------------------------------\n'''
+          if anchor not in s:
+              raise SystemExit("chart_engine.py educational axis anchor not found")
+          insert = '''    ax = axes[0]\n\n    # Force the actual rendered tick text to the dark-chart foreground.\n    # mplfinance can re-apply its own tick styling after the style is built,\n    # so rc/tick_params alone are not sufficient on this renderer.\n    ax.tick_params(axis="x", colors=COLORS["text"], labelcolor=COLORS["text"])\n    ax.tick_params(axis="y", colors=COLORS["text"], labelcolor=COLORS["text"])\n    ax.xaxis.label.set_color(COLORS["text"])\n    ax.yaxis.label.set_color(COLORS["text"])\n    for label in ax.get_xticklabels():\n        label.set_color(COLORS["text"])\n    for label in ax.get_yticklabels():\n        label.set_color(COLORS["text"])\n\n    # --- Label collision avoidance -----------------------------------\n'''
+          s = s.replace(anchor, insert, 1)
+
+          # Also force the older Trendline renderer's labels at the end,\n          # after every annotation and mplfinance operation has completed.\n          anchor = '''    img_buf = io.BytesIO()\n    fig.savefig(img_buf, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())\n'''
+          if anchor not in s:
+              raise SystemExit("chart_engine.py trendline save anchor not found")
+          insert = '''    # Final axis contrast pass: apply after all chart artists are drawn so\n    # mplfinance cannot leave black tick/date text on the dark background.\n    ax.tick_params(axis="x", colors=COLORS["text"], labelcolor=COLORS["text"])\n    ax.tick_params(axis="y", colors=COLORS["text"], labelcolor=COLORS["text"])\n    ax.xaxis.label.set_color(COLORS["text"])\n    ax.yaxis.label.set_color(COLORS["text"])\n    for label in ax.get_xticklabels():\n        label.set_color(COLORS["text"])\n    for label in ax.get_yticklabels():\n        label.set_color(COLORS["text"])\n\n    img_buf = io.BytesIO()\n    fig.savefig(img_buf, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())\n'''
+          s = s.replace(anchor, insert, 1)
+
+          p.write_text(s, encoding="utf-8")
+
+      - name: Validate Python syntax
+        run: |
+          python -m py_compile strategies.py chart_engine.py
+
+      - name: Commit and remove workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/workflows/fix-breakout-axis.yml
+          git add strategies.py chart_engine.py .github/workflows/fix-breakout-axis.yml
+          git commit -m "Fix dual-rail breakout detection and axis labels"
+          git push
