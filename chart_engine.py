@@ -1346,7 +1346,8 @@ def generate_trendline_educational_map(
         or family.get("short_term_direction")
         or "NEUTRAL"
     ).upper()
-    title = f"{symbol}  |  M30  |  {direction} BIAS  |  {status.replace('_', ' ')}"
+    tf_label = str(family.get("timeframe_label") or family.get("timeframe") or "").strip().upper() or "TF"
+    title = f"{symbol}  |  {tf_label}  |  {direction} BIAS  |  {status.replace('_', ' ')}"
     if pattern_name:
         title += f"  |  {pattern_name}"
     ax.set_title(title, color="#f8fafc", fontsize=12.5, fontweight="bold", pad=10)
