@@ -481,6 +481,92 @@ def _find_sma_reclaim_anchor(pivots: List[Dict], sma: Optional[pd.Series], df: p
 
 
 
+def _find_early_directional_anchor(pivots: List[Dict], sma: Optional[pd.Series], df: pd.DataFrame,
+                                    kind: str, atr_now: Optional[float],
+                                    min_move_atr: float = 0.35, confirm_bars: int = 3,
+                                    lookahead: int = 25) -> Optional[Dict]:
+    """
+    Draw the trendline as soon as direction is PROVEN, without waiting for a
+    second confirming pivot (HH/HL sequence) to exist yet.
+
+    "Proven" here means: the SMA-reclaim swing (the pivot where price broke
+    away and closed back through the 20 SMA -- the same anchor
+    _find_sma_reclaim_anchor locates) has since seen price move a meaningful
+    distance beyond it AND stay on the confirmed side of the SMA for several
+    bars in a row (filters out a single fakeout candle flipping the SMA
+    momentarily).
+
+    This is what lets a fresh reversal leg get a trendline immediately --
+    anchored at the reversal point, sloped along the SMA's realized path to
+    the current bar -- so a pullback touching it is a genuine continuation
+    entry instead of waiting for a second swing to fully form first (by
+    which point much of the move is already over).
+
+    Returns a synthetic (anchor, endpoint) pair shaped like the pivot dicts
+    _fit_primary expects, with endpoint pinned to the current bar and priced
+    off the live SMA value (not a raw candle wick) so the line tracks the
+    SMA's slope the way a trader's hand-drawn reversal line does.
+    """
+    anchor = _find_sma_reclaim_anchor(pivots, sma, df, kind, lookahead=lookahead)
+    if anchor is None or sma is None or sma.dropna().empty:
+        return None
+
+    # Guard against a genuine range: a local dip/spike can push a few closes
+    # to the "wrong" side of an otherwise FLAT SMA without the market
+    # actually having reversed. Require the SMA itself to be sloping in the
+    # matching direction, not just price sitting on one side of it.
+    want_dir = "RISING" if kind == "support" else "FALLING"
+    if _sma_direction(sma, atr_now=atr_now) != want_dir:
+        return None
+
+    close = pd.to_numeric(df["Close"], errors="coerce").to_numpy(float)
+    sma_vals = sma.to_numpy(float)
+    n = len(close)
+    a_idx = anchor["index"]
+    last_idx = n - 1
+    if last_idx - a_idx < confirm_bars + 1:
+        return None  # too fresh -- give it a few bars to prove itself
+
+    # Require the last `confirm_bars` closes to stay on the confirmed side
+    # of the SMA (support: above it; resistance: below it) -- one wick back
+    # through doesn't count.
+    tail = range(last_idx - confirm_bars + 1, last_idx + 1)
+    for j in tail:
+        if not (np.isfinite(close[j]) and np.isfinite(sma_vals[j])):
+            return None
+        if kind == "support" and close[j] <= sma_vals[j]:
+            return None
+        if kind == "resistance" and close[j] >= sma_vals[j]:
+            return None
+
+    move = abs(float(close[last_idx]) - float(anchor["price"]))
+    if atr_now and atr_now > 0 and move < min_move_atr * atr_now:
+        return None  # hasn't moved far enough yet to call it proven
+
+    # Reject a range: a local dip/rally inside an established box can pass
+    # every check above (real ATR-sized move, several closes on one side of
+    # a momentarily-sloping SMA) without the market actually having broken
+    # anything -- it's just another swing inside the same range. Require an
+    # actual break of structure: price must have closed beyond the most
+    # recent OPPOSITE-type pivot before the anchor (for a resistance/down
+    # reversal, that's the last swing low that was propping up the prior
+    # uptrend -- breaking it is the real tell, not just retracing partway
+    # back into ground the range already covers).
+    opp_type = "low" if kind == "resistance" else "high"
+    prior_opposite = [p for p in pivots if p["type"] == opp_type and p["index"] < a_idx]
+    if prior_opposite:
+        last_opp = max(prior_opposite, key=lambda p: p["index"])
+        if kind == "resistance" and float(close[last_idx]) >= float(last_opp["price"]):
+            return None
+        if kind == "support" and float(close[last_idx]) <= float(last_opp["price"]):
+            return None
+
+    if not np.isfinite(sma_vals[last_idx]):
+        return None
+    endpoint = {"index": last_idx, "price": float(sma_vals[last_idx]), "type": anchor["type"], "source": "sma_slope"}
+    return {"anchor": anchor, "endpoint": endpoint}
+
+
 def _find_impulse_anchor_pair(pivots: List[Dict], df: pd.DataFrame, kind: str) -> Optional[Tuple[Dict, Dict]]:
     """Select the hand-drawn structural trendline anchors.
 
@@ -565,26 +651,33 @@ def _find_impulse_anchor_pair(pivots: List[Dict], df: pd.DataFrame, kind: str) -
     return None
 
 def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame,
-                  sma: Optional[pd.Series] = None) -> Optional[Dict]:
+                  sma: Optional[pd.Series] = None, atr_now: Optional[float] = None) -> Optional[Dict]:
     """
     Classic trendline: connect sequential Higher Lows (support) or
     Lower Highs (resistance). Filters are kept light so the line is
     almost always drawn when structure exists — matching MT5 hand-drawn style.
     """
     pts = _get_sequential_pivots(pivots, kind, min_bars=3)
+    too_few_pivots = False
     if len(pts) < 2:
         # Fallback: any two pivots of the correct type
         want = "low" if kind == "support" else "high"
-        pts = [p for p in pivots if p["type"] == want]
-        if len(pts) < 2:
-            return None
-        pts = pts[-2:]
+        raw_pts = [p for p in pivots if p["type"] == want]
+        if len(raw_pts) < 2:
+            # Not enough raw pivots of this type to even attempt a classic
+            # fit -- don't bail out yet though, the early SMA-slope anchor
+            # below only needs ONE pivot (the reversal swing itself) plus
+            # the current bar, so it can still fire here.
+            too_few_pivots = True
+            pts = raw_pts
+        else:
+            pts = raw_pts[-2:]
 
     # Hand-drawn structural rule: anchor at the last HL/HH that launched
     # the current impulse, then connect it to the latest same-side pivot.
     # The older SMA-reclaim method remains only as a fallback when the
     # structural sequence is not mature enough.
-    impulse_pair = _find_impulse_anchor_pair(pivots, df, kind)
+    impulse_pair = None if too_few_pivots else _find_impulse_anchor_pair(pivots, df, kind)
     if impulse_pair is not None:
         a, b = impulse_pair
         sma_anchor = None
@@ -592,13 +685,29 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame,
         sma_anchor = _find_sma_reclaim_anchor(pivots, sma, df, kind)
         if sma_anchor is not None:
             later_pts = [p for p in pts if p["index"] > sma_anchor["index"]]
-            b = later_pts[-1] if later_pts else pts[-1]
-            if b["index"] > sma_anchor["index"]:
+            b = later_pts[-1] if later_pts else (pts[-1] if pts else None)
+            if b is not None and b["index"] > sma_anchor["index"]:
                 a = sma_anchor
             else:
                 a = None
         else:
             a = None
+
+    early_anchor = None
+    if a is None:
+        # Direction just reversed and no second confirming pivot exists yet
+        # (e.g. price just made a fresh LL but there's only one lower high
+        # so far) -- rather than falling straight to a same-old-direction
+        # fallback pair that gets rejected by the slope check below, check
+        # whether the SMA-reclaim swing has since PROVEN the new direction
+        # (meaningful move + several bars holding the new side of the SMA).
+        # If so, draw the line now -- anchored at the reversal, sloped along
+        # the SMA to the current bar -- instead of waiting for a slower
+        # second-pivot confirmation that costs most of the pullback move.
+        early = _find_early_directional_anchor(pivots, sma, df, kind, atr_now)
+        if early is not None:
+            a, b = early["anchor"], early["endpoint"]
+            early_anchor = early["anchor"]
 
     if a is None:
         # Prefer the longest clean span in the current structural sequence.
@@ -617,8 +726,13 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame,
                 span_candidates.append((span, a0, b0))
         if span_candidates:
             _, a, b = max(span_candidates, key=lambda z: (z[0], z[2]["index"]))
-        else:
+        elif len(pts) >= 2:
             a, b = pts[-2], pts[-1]
+        else:
+            # Too few pivots for any classic fit, and the early SMA-slope
+            # anchor above didn't clear its bar either (not proven yet) --
+            # genuinely nothing to draw here, let S/R handle it instead.
+            return None
 
     if b["index"] <= a["index"]:
         return None
@@ -628,29 +742,38 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame,
     slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
     y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
 
-    # Direction must match kind (light check only)
-    if kind == "support" and slope < -1e-12:
-        return None
-    if kind == "resistance" and slope > 1e-12:
-        return None
+    # Direction must match kind (light check only) -- skipped for the early
+    # SMA-slope anchor since its slope IS the proof of direction already.
+    if early_anchor is None:
+        if kind == "support" and slope < -1e-12:
+            return None
+        if kind == "resistance" and slope > 1e-12:
+            return None
 
-    touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.50)
-    violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.35)
-
-    quality = "unconfirmed" if touches < 2 else ("confirmed" if touches <= 4 else "crowded")
+    if early_anchor is not None:
+        touches = 1
+        violations = 0
+        quality = "unconfirmed"
+        method = "sma_slope_early"
+    else:
+        touches = _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.50)
+        violations = _count_violations(df, a["index"], a["price"], b["index"], b["price"], kind, tol_atr=0.35)
+        quality = "unconfirmed" if touches < 2 else ("confirmed" if touches <= 4 else "crowded")
+        touches = max(touches, 2)
+        method = "impulse_structural" if impulse_pair is not None else ("sma_reclaim" if (sma_anchor is not None and a is sma_anchor) else "classic_sequential")
 
     return {
         "x0": a["index"], "y0": float(a["price"]),
         "x1": b["index"], "y1": float(b["price"]),
         "y_end": float(y_end),
         "slope": float(slope),
-        "touches": max(touches, 2),
+        "touches": touches,
         "violations": violations,
         "confirmed": quality == "confirmed",
         "quality": quality,
         "kind": kind,
         "bars_since_last_touch": n - 1 - b["index"],
-        "method": "impulse_structural" if impulse_pair is not None else ("sma_reclaim" if (sma_anchor is not None and a is sma_anchor) else "classic_sequential"),
+        "method": method,
     }
 
 
@@ -1476,9 +1599,10 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # so the SMA-reclaim pivot can anchor the trendline itself -- see
     # _find_sma_reclaim_anchor.
     sma20_early = _sma20_series(df, period=20, applied_price="median")
+    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
 
-    support = _fit_primary(recent_pivots, "support", n, df, sma=sma20_early)
-    resistance = _fit_primary(recent_pivots, "resistance", n, df, sma=sma20_early)
+    support = _fit_primary(recent_pivots, "support", n, df, sma=sma20_early, atr_now=atr_now)
+    resistance = _fit_primary(recent_pivots, "resistance", n, df, sma=sma20_early, atr_now=atr_now)
 
     # Reject a candidate diagonal line whose actual price movement across
     # its own span is too shallow to be a meaningful trend -- e.g. two
@@ -1488,7 +1612,6 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # horizontal S/R clustering below (_detect_horizontal_levels) to pick
     # up instead, which is exactly what that layer is for.
     MIN_TREND_MOVE_ATR = 0.35
-    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
 
     def _has_meaningful_slope(line):
         if not line:

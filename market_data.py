@@ -165,7 +165,14 @@ def deriv_fetch_candles(symbol, tf_code="30min", count=250):
     df = pd.DataFrame(candles)
     df["datetime"] = pd.to_datetime(df["epoch"], unit="s", utc=True).dt.tz_convert(None)
     df = df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close"}).set_index("datetime")
-    return df[["Open","High","Low","Close"]].astype(float).sort_index()
+    df = df[["Open","High","Low","Close"]].astype(float).sort_index()
+    # Same normalization the MT5 path gets (ATR/RSI/EMA20/etc.) -- without
+    # this, every ATR-based calculation downstream (S/R proximity scoring,
+    # trendline slope-rejection, pivot leg-size filters...) silently falls
+    # back to a missing-ATR default instead of a real value. That's why S/R
+    # "distance from price" showed 999 ATR on a Deriv symbol like Volatility
+    # 100: atr_now was None because this column never existed.
+    return clean_and_normalize_data(df)
 
 
 def fetch_watch_price(symbol):
