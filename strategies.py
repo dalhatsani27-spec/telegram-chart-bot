@@ -1482,16 +1482,75 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     breakout_grade = None
 
     if primary and family_lines:
-        lower = family_lines[0]["y_end"]
-        upper = family_lines[-1]["y_end"]
+        # When BOTH rails exist, do not let the nearest rail decide the
+        # whole directional bias. A falling resistance + rising support is
+        # a converging structure. Use the combined geometry + 20-SMA state
+        # for directional bias; breakout/retest remains the confirmation gate.
+        lower = min(
+            float((support or {}).get("y_end", family_lines[0]["y_end"])),
+            float((resistance or {}).get("y_end", family_lines[-1]["y_end"])),
+        )
+        upper = max(
+            float((support or {}).get("y_end", family_lines[0]["y_end"])),
+            float((resistance or {}).get("y_end", family_lines[-1]["y_end"])),
+        )
         mid = (lower + upper) / 2.0
+
+        if support and resistance:
+            sma_dir_early = _sma_direction(sma20_early, atr_now=atr_now)
+            sma_valid = sma20_early.dropna()
+            sma_now_early = float(sma_valid.iloc[-1]) if not sma_valid.empty else None
+            support_now = float(support["y_end"])
+            resistance_now = float(resistance["y_end"])
+
+            bullish_context = (
+                support_now < close
+                and sma_dir_early == "RISING"
+                and (sma_now_early is None or close >= sma_now_early)
+            )
+            bearish_context = (
+                close < resistance_now
+                and sma_dir_early == "FALLING"
+                and (sma_now_early is None or close <= sma_now_early)
+            )
+
+            if bullish_context and not bearish_context:
+                direction = "BUY"
+                strength = 55
+                reasons.append("Converging rails · rising support + falling resistance")
+                reasons.append("Bullish structure: price above rising support and 20 SMA is rising")
+                if close > mid:
+                    strength += 10
+                    reasons.append("Price above pattern midpoint — bullish control")
+                else:
+                    reasons.append("Price above support but below resistance — bullish setup, wait for confirmation")
+                primary = support
+                family_kind = "ascending"
+            elif bearish_context and not bullish_context:
+                direction = "SELL"
+                strength = 55
+                reasons.append("Converging rails · rising support + falling resistance")
+                reasons.append("Bearish structure: price below falling resistance and 20 SMA is falling")
+                if close < mid:
+                    strength += 10
+                    reasons.append("Price below pattern midpoint — bearish control")
+                else:
+                    reasons.append("Price below resistance but above support — bearish setup, wait for confirmation")
+                primary = resistance
+                family_kind = "descending"
+            else:
+                reasons.append("Converging rails conflict — wait for directional breakout")
         touch_note = {
             "unconfirmed": "⚠️ only 2 touches -- unconfirmed, treat as tentative",
             "confirmed": f"{primary['touches']} touches -- validated structure",
             "crowded": f"{primary['touches']} touches -- crowded level, order flow may be depleted",
         }.get(primary.get("quality"), f"{primary['touches']} touches")
 
-        if family_kind == "ascending":
+        if support and resistance:
+            # Dual-rail direction was decided above; do not overwrite it
+            # using only whichever rail is closest to current price.
+            pass
+        elif family_kind == "ascending":
             # Price clearly above rising support → BUY bias.
             # But if price is only sitting ON / testing the line, stay cautious
             # (WAIT) instead of forcing a buy — the line can still break.
@@ -1831,7 +1890,11 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         # meaningful. Low-strength geometry (e.g. 43%) is noise — keep it
         # for context drawing but do not present it as a tradeable pattern.
         "active_pattern": (
-            "mw" if mw else
+            # When both rails exist, the converging geometry is the primary
+            # pattern. A merely-forming M/W must not hide it or manufacture
+            # a high-confidence reversal label.
+            "wedge" if (support and resistance and wedge and strength >= 55) else
+            "mw" if mw and not (support and resistance) else
             "wedge" if (wedge and strength >= 60) else
             "channel" if (channel and strength >= 55) else
             "none"
