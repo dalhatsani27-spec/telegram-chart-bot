@@ -1,0 +1,64 @@
+name: Upgrade educational Trendline map
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch chart and lifecycle
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('chart_engine.py'); s=p.read_text(encoding='utf-8')
+          old='''        y_on_right=True,\n        facecolor=COLORS["bg"],\n        figcolor=COLORS["bg"],\n    )'''
+          new='''        y_on_right=True,\n        facecolor=COLORS["bg"],\n        figcolor=COLORS["bg"],\n        rc={"axes.labelcolor": COLORS["text"], "xtick.color": COLORS["text"], "ytick.color": COLORS["text"]},\n    )'''
+          if old not in s: raise SystemExit('style anchor missing')
+          s=s.replace(old,new,1)
+          old='''    line1 = f"{symbol}  |  TF: 30m  |  {title_suffix}  |  {direction}  |  Str {strength:.0f}"'''
+          new='''    tf_disp = str(family.get("timeframe_label") or family.get("timeframe") or "").strip().upper()\n    tf_disp = {"30MIN":"M30", "15MIN":"M15", "5MIN":"M5"}.get(tf_disp, tf_disp or "TF")\n    line1 = f"{symbol}  |  {tf_disp}  |  {title_suffix}  |  {direction}  |  Str {strength:.0f}"'''
+          if old not in s: raise SystemExit('tf anchor missing')
+          s=s.replace(old,new,1)
+          old='''    for tl in (family.get("downtrends") or []):\n        _draw_one_tl(tl, color="#00e676", width=2.8)\n        drawn += 1'''
+          new='''    for tl in (family.get("downtrends") or []):\n        _draw_one_tl(tl, color="#ef4444", width=2.8)\n        drawn += 1'''
+          if old not in s: raise SystemExit('downtrend anchor missing')
+          s=s.replace(old,new,1)
+          anchor='''    # Fallback: if uptrends/downtrends empty, try family_lines\n'''
+          insert='''    # Educational rail names and lifecycle markers.\n    def _label_rail(tl,label,color):\n        if not tl: return\n        try:\n            x0=max(0,int(tl["x0"])-offset); x1=chart_len-1\n            y0=float(tl["y0"]); y1=float(tl.get("y_end",tl.get("y1",y0)))\n            lx=max(x0+4,int(x0+(x1-x0)*0.72)); ly=y0+(y1-y0)*((lx-x0)/max(x1-x0,1))\n            ax.text(lx,ly,f"{label} | {int(tl.get('touches') or 0)} TOUCHES",fontsize=7.2,color=color,fontweight="bold",ha="center",va="bottom" if "SUPPORT" in label else "top",zorder=14,bbox=dict(boxstyle="round,pad=0.18",facecolor="#0b0f14",edgecolor=color,alpha=.82,linewidth=.7))\n        except Exception: pass\n    for tl in (family.get("uptrends") or []): _label_rail(tl,"RISING SUPPORT","#00e676")\n    for tl in (family.get("downtrends") or []): _label_rail(tl,"FALLING RESISTANCE","#ef4444")\n\n    brk=family.get("breakout_grade") or {}\n    if brk and brk.get("strength") in ("confirmed","developing","weak"):\n        bx=chart_len-1; by=float(chart_df["Close"].iloc[-1]); bc="#22c55e" if brk.get("strength")=="confirmed" else "#f59e0b"\n        ax.scatter([bx],[by],s=88,marker="D",color=bc,edgecolors="#fff",linewidths=1.3,zorder=18)\n        ax.annotate("BREAK" if brk.get("strength")!="weak" else "BREAK?",(bx,by),xytext=(-8,18),textcoords="offset points",ha="right",va="bottom",fontsize=8,fontweight="bold",color=bc,zorder=19,bbox=dict(boxstyle="round,pad=.18",facecolor="#0b0f14",edgecolor=bc,alpha=.9,linewidth=.7))\n    ret=family.get("trendline_retest") or {}\n    if ret.get("index") is not None and ret.get("level") is not None:\n        rx=int(ret["index"])-offset\n        if 0<=rx<chart_len:\n            rc="#22c55e" if ret.get("status")=="CONFIRMED" else "#f59e0b"\n            ax.scatter([rx],[float(ret["level"])],s=82,marker="o",color=rc,edgecolors="#fff",linewidths=1.2,zorder=18)\n            ax.annotate("RETEST" if ret.get("status")=="CONFIRMED" else "RECLAIM",(rx,float(ret["level"])),xytext=(6,-15),textcoords="offset points",fontsize=7.5,fontweight="bold",color=rc,zorder=19,bbox=dict(boxstyle="round,pad=.15",facecolor="#0b0f14",edgecolor=rc,alpha=.88,linewidth=.7))\n    sp_map=family.get("scanned_pattern") or {}; pname=sp_map.get("name") or family.get("visual_pattern_name"); pconf=sp_map.get("confidence") or family.get("pattern_confidence")\n    if pname:\n        try:\n            pc=float(pconf or 0); tag="HIGH CONFIDENCE" if pc>=75 else "MODERATE CONFIDENCE" if pc>=60 else "LOW CONFIDENCE"; ptype="BULLISH" if str(sp_map.get("bias","")).upper()=="BUY" else "BEARISH" if str(sp_map.get("bias","")).upper()=="SELL" else "NEUTRAL"\n            box=f"PATTERN IDENTIFIED\\n{pname.upper()}\\n\\nCONFIDENCE: {pc:.0f}%\\nTYPE: {ptype}\\nSTRENGTH: {tag}"\n            ax.text(.015,.955,box,transform=ax.transAxes,ha="left",va="top",fontsize=7.8,color="#f8fafc",linespacing=1.35,zorder=25,bbox=dict(boxstyle="round,pad=.55",facecolor="#0b0f14",edgecolor="#f59e0b",alpha=.88,linewidth=.8))\n        except Exception: pass\n    try:\n        state="BREAK + RETEST CONFIRMED" if ret.get("status")=="CONFIRMED" else "BREAK CONFIRMED / WAIT RETEST" if brk.get("strength")=="confirmed" else "BREAK DEVELOPING" if brk.get("strength")=="developing" else "INTACT"\n        er=family.get("entry_rules") or {}; passed=er.get("passed"); req=er.get("required",3); entry_txt="CONFIRMED" if er.get("confirmed") else (f"WAIT ({passed}/{req})" if passed is not None else "NOT CONFIRMED")\n        decision=f"BIAS: {direction}\\nMARKET STATE: {state}\\nENTRY: {entry_txt}\\nWAIT FOR: retest + candle + entry confirmation"\n        ax.text(.985,.035,decision,transform=ax.transAxes,ha="right",va="bottom",fontsize=7.2,color="#f8fafc",linespacing=1.35,zorder=25,bbox=dict(boxstyle="round,pad=.45",facecolor="#0b0f14",edgecolor="#ef4444" if direction=="SELL" else "#00e676",alpha=.9,linewidth=.8))\n    except Exception: pass\n\n'''
+          if anchor not in s: raise SystemExit('chart insert anchor missing')
+          s=s.replace(anchor,insert+anchor,1); p.write_text(s,encoding='utf-8')
+
+          p2=Path('strategies.py'); t=p2.read_text(encoding='utf-8')
+          grade='''    return {\n        "strength": strength,\n        "penetration_atr": round(penetration_atr, 2),\n        "consecutive_closes": consecutive,\n        "body_ratio": round(body_ratio, 2),\n        "retest_level": line_val,\n    }\n\n'''
+          helper='''    return {\n        "strength": strength,\n        "penetration_atr": round(penetration_atr, 2),\n        "consecutive_closes": consecutive,\n        "body_ratio": round(body_ratio, 2),\n        "retest_level": line_val,\n    }\n\n\ndef _detect_trendline_retest(df: pd.DataFrame, line: Optional[Dict], break_kind: str, lookback: int = 12) -> Dict[str, Any]:\n    if df is None or df.empty or not line or not break_kind:\n        return {"status":"INTACT","index":None,"level":None}\n    n=len(df); atrs=df["ATR"].to_numpy(float) if "ATR" in df.columns else (df["High"]-df["Low"]).to_numpy(float)\n    closes=df["Close"].to_numpy(float); highs=df["High"].to_numpy(float); lows=df["Low"].to_numpy(float)\n    down=break_kind=="support_break_down"; start=max(int(line.get("x1",0))+1,n-lookback); bi=None\n    for i in range(start,n):\n        lv=_line_value(line["x0"],line["y0"],line["x1"],line["y1"],i); a=max(float(atrs[i]) if np.isfinite(atrs[i]) and atrs[i]>0 else 0.0,1e-9)\n        if (down and closes[i]<lv-a*.15) or ((not down) and closes[i]>lv+a*.15): bi=i; break\n    if bi is None:\n        return {"status":"INTACT","index":None,"level":float(_line_value(line["x0"],line["y0"],line["x1"],line["y1"],n-1))}\n    for i in range(bi+1,n):\n        lv=_line_value(line["x0"],line["y0"],line["x1"],line["y1"],i); a=max(float(atrs[i]) if np.isfinite(atrs[i]) and atrs[i]>0 else 0.0,1e-9)\n        touched=(lows[i]<=lv+a*.35) if down else (highs[i]>=lv-a*.35); held=(closes[i]<lv) if down else (closes[i]>lv)\n        if touched and held: return {"status":"CONFIRMED","index":i,"level":float(lv),"break_index":bi}\n    return {"status":"BROKEN","index":None,"level":float(_line_value(line["x0"],line["y0"],line["x1"],line["y1"],n-1)),"break_index":bi}\n\n'''
+          if grade not in t: raise SystemExit('grade anchor missing')
+          t=t.replace(grade,helper,1)
+          anchor='''    # Series for chart (only the parallel family — clean)\n'''
+          ins='''    trendline_retest={"status":"INTACT","index":None,"level":None}\n    if breakout_grade and primary:\n        bk="support_break_down" if family_kind=="ascending" else "resistance_break_up"\n        trendline_retest=_detect_trendline_retest(df,primary,bk)\n        if trendline_retest.get("status")=="CONFIRMED": reasons.append(f"✅ Break + retest confirmed at {trendline_retest['level']:.5f}")\n        elif trendline_retest.get("status")=="BROKEN": reasons.append("⚡ Trendline broken — waiting for retest")\n\n'''
+          if anchor not in t: raise SystemExit('strategy insert anchor missing')
+          t=t.replace(anchor,ins+anchor,1)
+          t=t.replace('''        "breakout_grade": breakout_grade,\n''','''        "breakout_grade": breakout_grade,\n        "trendline_retest": trendline_retest,\n''',1)
+          report='''    brk = family.get("breakout_grade")\n    if brk:\n'''
+          report_new='''    ret = family.get("trendline_retest") or {}\n    if ret.get("status") in ("BROKEN", "CONFIRMED"):\n        lines.append(f"Trendline lifecycle: BREAK {ret.get('status')}" + (f" @ {ret.get('level'):.5f}" if ret.get("level") is not None else ""))\n    brk = family.get("breakout_grade")\n    if brk:\n'''
+          if report not in t: raise SystemExit('report anchor missing')
+          t=t.replace(report,report_new,1); p2.write_text(t,encoding='utf-8')
+
+      - name: Validate
+        run: python -m py_compile chart_engine.py strategies.py bot.py
+
+      - name: Commit and remove workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/workflows/educational-trendline-map.yml
+          git add chart_engine.py strategies.py .github/workflows/educational-trendline-map.yml
+          git commit -m "Map full Trendline structure and breakout lifecycle"
+          git push
