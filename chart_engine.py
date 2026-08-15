@@ -1033,6 +1033,38 @@ def generate_trendline_educational_map(
     )
     ax = axes[0]
 
+    # --- Label collision avoidance -----------------------------------
+    # Several independent pieces of text get placed near the right edge of
+    # the chart (trendline label, pattern trigger/neckline label, 4H level
+    # labels). Placed independently they can land on top of each other
+    # (e.g. "RISING SUPPORT" printing directly over "Double Top trigger"
+    # when the rising trendline and the neckline sit at similar prices).
+    # Track where labels have already landed, in *display pixel* space, and
+    # nudge a new label vertically if it would collide with one already
+    # placed.
+    _placed_label_px_y = []
+
+    def _claim_label_y(x_data, y_data, min_gap_px=13):
+        """Given a desired (x, y) in data coords, return a (possibly
+        nudged) y in data coords that won't visually overlap a previously
+        placed label at a similar x."""
+        try:
+            disp = ax.transData.transform((x_data, y_data))
+            px, py = float(disp[0]), float(disp[1])
+        except Exception:
+            return y_data
+        for i in range(60):  # bounded search, alternate up/down
+            collide = any(abs(px - ox) < 90 and abs(py - oy) < min_gap_px for ox, oy in _placed_label_px_y)
+            if not collide:
+                _placed_label_px_y.append((px, py))
+                inv = ax.transData.inverted()
+                return float(inv.transform((px, py))[1])
+            step = (i // 2 + 1) * min_gap_px
+            py = py + step if i % 2 == 0 else py - step
+        _placed_label_px_y.append((px, py))
+        inv = ax.transData.inverted()
+        return float(inv.transform((px, py))[1])
+
     # Higher-timeframe context: 4H key support/resistance is the structural
     # map underneath the 30M trendline. Only the strongest few levels are
     # drawn so the candle field stays readable.
@@ -1042,7 +1074,8 @@ def generate_trendline_educational_map(
             price=float(lvl.get("price")); side=str(lvl.get("side","level")).lower()
             line_color="#60a5fa" if side=="support" else "#f59e0b"
             ax.axhline(price, linestyle="--", linewidth=1.15, color=line_color, alpha=0.55, zorder=3)
-            ax.text(chart_len-2, price, f" 4H {side.upper()}", fontsize=7.2, color=line_color,
+            label_y = _claim_label_y(chart_len - 2, price)
+            ax.text(chart_len-2, label_y, f" 4H {side.upper()}", fontsize=7.2, color=line_color,
                     fontweight="bold", va="bottom" if side=="support" else "top", ha="right", zorder=8,
                     bbox=dict(boxstyle="round,pad=0.12", facecolor="#0b0f14", edgecolor=line_color, alpha=0.72, linewidth=0.5))
         except (TypeError, ValueError):
@@ -1110,6 +1143,7 @@ def generate_trendline_educational_map(
 
         lx = max(2, min(chart_len - 18, int(x0 + (xb - x0) * 0.72)))
         ly = float(tl["y0"]) + slope * ((lx + offset) - float(tl["x0"]))
+        ly = _claim_label_y(lx, ly)
         ax.text(lx, ly, label, fontsize=7.5, color=color, fontweight="bold",
                 va="bottom" if "SUPPORT" in label else "top", zorder=10)
 
@@ -1206,9 +1240,26 @@ def generate_trendline_educational_map(
     if sp.get("trigger_price") is not None:
         try:
             trigger = float(sp["trigger_price"])
+            # Draw the neckline/trigger as an actual zone (a shaded band),
+            # not a single infinitely-precise price. A neckline is a swing
+            # low/high with wick noise around it -- showing it as one hard
+            # line overstates the precision of where price will actually
+            # react. Band width scales off ATR so it's proportionate to
+            # the instrument's own volatility.
+            try:
+                atr_series = df["ATR"] if "ATR" in df.columns else (df["High"] - df["Low"]).rolling(14).mean()
+                atr_val = float(atr_series.iloc[-1])
+                if not np.isfinite(atr_val) or atr_val <= 0:
+                    raise ValueError
+            except Exception:
+                atr_val = trigger * 0.0015
+            band_half = max(atr_val * 0.18, trigger * 0.0006)
+            ax.axhspan(trigger - band_half, trigger + band_half,
+                       color="#f59e0b", alpha=0.14, zorder=4)
             ax.axhline(trigger, linestyle=":", linewidth=1.2,
-                       color="#f59e0b", alpha=0.65, zorder=5)
-            ax.text(chart_len - 2, trigger, f" {sp.get('name', 'Pattern')} trigger",
+                       color="#f59e0b", alpha=0.75, zorder=5)
+            label_y = _claim_label_y(chart_len - 2, trigger)
+            ax.text(chart_len - 2, label_y, f" {sp.get('name', 'Pattern')} trigger",
                     fontsize=6.8, color="#fbbf24", va="bottom", ha="right", zorder=9)
         except (TypeError, ValueError):
             pass

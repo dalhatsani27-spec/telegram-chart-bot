@@ -285,7 +285,13 @@ def analyse_structure(df, left=3, right=3, lookback=80):
             "note": "Insufficient data for structure.",
         }
 
-    swings = find_swings(df, left=left, right=right)
+    # Use the noise-filtered ZigZag swings (real, ATR-significant legs) for
+    # structure/BOS/CHoCH reads instead of the raw 3-bar fractal. The raw
+    # fractal flags every minor wiggle as a "swing", which is exactly the
+    # kind of noise that produces a false CHoCH/MSS off a pullback instead
+    # of a real structural break.
+    depth = max(2, left + right)
+    swings = zigzag_swings(df, depth=depth, deviation_atr=0.30)
     n = len(df)
     start = max(0, n - lookback)
     swings = [s for s in swings if s["index"] >= start]
@@ -879,7 +885,15 @@ def cluster_sr_zones(prices, tolerance_frac=0.0015):
     """
     prices: flat list/array of price levels (pivot highs + pivot lows combined).
     Greedily clusters values within tolerance_frac of each other.
-    Returns list of {"level": float, "touch_count": int}, sorted by touch_count desc.
+
+    Returns list of {"level", "low", "high", "touch_count"}, sorted by
+    touch_count desc. "level" is the mean touch price (for bonus/backtest
+    math); "low"/"high" is the actual price range the touches spanned, so
+    a caller drawing this on a chart can shade a real zone (band) instead
+    of pretending a support/resistance area is a single infinitely-thin
+    price -- which is what was making S/R levels look precise (and
+    sometimes wrong) when the touches themselves were spread across a
+    small range.
     """
     if prices is None or len(prices) == 0:
         return []
@@ -887,15 +901,23 @@ def cluster_sr_zones(prices, tolerance_frac=0.0015):
     zones = []
     current_cluster = [sorted_prices[0]]
 
+    def _finalize(cluster):
+        return {
+            "level": sum(cluster) / len(cluster),
+            "low": min(cluster),
+            "high": max(cluster),
+            "touch_count": len(cluster),
+        }
+
     for p in sorted_prices[1:]:
         cluster_center = sum(current_cluster) / len(current_cluster)
         tol = cluster_center * tolerance_frac
         if abs(p - cluster_center) <= tol:
             current_cluster.append(p)
         else:
-            zones.append({"level": sum(current_cluster) / len(current_cluster), "touch_count": len(current_cluster)})
+            zones.append(_finalize(current_cluster))
             current_cluster = [p]
-    zones.append({"level": sum(current_cluster) / len(current_cluster), "touch_count": len(current_cluster)})
+    zones.append(_finalize(current_cluster))
 
     zones.sort(key=lambda z: z["touch_count"], reverse=True)
     return zones
@@ -1495,6 +1517,44 @@ def classify_pattern_stage(df, pattern) -> dict:
 #    Each takes (df, pivot_highs, pivot_lows) and returns a Pattern or None.
 # ----------------------------------------------------------------------------
 
+def _has_dominant_rival(df, ph_or_pl, i1, i2, is_high, tolerance, lookback=60):
+    """
+    Reject a double/triple top-or-bottom candidate if a more extreme swing
+    sits in the surrounding structure -- i.e. the two/three points chosen
+    aren't actually the dominant peaks/troughs, just two pivots that happen
+    to be near each other.
+
+    A real double top is the market failing twice at the *same real
+    resistance*. If a taller swing high sits just before/between the chosen
+    tops (a proper HH the pattern's own peaks never actually reached), the
+    "tops" are really just lower-high noise inside a bigger down-leg, not a
+    genuine double top -- exactly the case where the pattern should be built
+    from the real swing (the HH), not the pullback.
+
+    ph_or_pl: full pivot list (positions) of the same type as the pattern
+              (pivot highs for tops, pivot lows for bottoms).
+    i1, i2  : the two extreme points chosen for the pattern (first/last).
+    is_high : True for tops (look for a higher rival), False for bottoms.
+    """
+    if df is None or not ph_or_pl:
+        return False
+    col = 'High' if is_high else 'Low'
+    extreme = max(float(df[col].iloc[i1]), float(df[col].iloc[i2])) if is_high \
+        else min(float(df[col].iloc[i1]), float(df[col].iloc[i2]))
+    window_start = max(0, i1 - lookback)
+    for p in ph_or_pl:
+        if p in (i1, i2):
+            continue
+        if not (window_start <= p <= i2):
+            continue
+        val = float(df[col].iloc[p])
+        if is_high and val > extreme * (1 + tolerance):
+            return True
+        if not is_high and val < extreme * (1 - tolerance):
+            return True
+    return False
+
+
 def detect_double_top(df, ph, pl, min_bars=12, min_depth_atr=1.4, max_peak_diff=0.0035):
     """
     High-quality Double Top only.
@@ -1505,6 +1565,8 @@ def detect_double_top(df, ph, pl, min_bars=12, min_depth_atr=1.4, max_peak_diff=
     - Right peak must be the most recent significant high (not buried)
     - Price must still be near or below the neckline zone (not already far below or making new highs)
     - Prefer patterns where the second top is slightly lower or equal (classic)
+    - Both tops must be the dominant swing highs in the surrounding structure,
+      not two minor pullback highs sitting beneath a bigger, untested swing high
     """
     if len(ph) < 2:
         return None
@@ -1517,6 +1579,11 @@ def detect_double_top(df, ph, pl, min_bars=12, min_depth_atr=1.4, max_peak_diff=
         return None
     # Second top should not be significantly higher than the first (classic DT is equal or lower)
     if h2 > h1 * 1.002:
+        return None
+    # Dominance check: reject if a real swing high (the actual HH) sits in
+    # the recent structure and neither chosen top ever traded there. That's
+    # not a double top -- it's two lower-high pullbacks in a downtrend.
+    if _has_dominant_rival(df, ph, i1, i2, is_high=True, tolerance=max_peak_diff):
         return None
     between_lows = [p for p in pl if i1 < p < i2]
     if not between_lows:
@@ -1573,6 +1640,11 @@ def detect_double_bottom(df, ph, pl, min_bars=12, min_depth_atr=1.4, max_peak_di
     # Second bottom should not be significantly lower than the first
     if l2 < l1 * 0.998:
         return None
+    # Dominance check: reject if a real swing low sits in the recent
+    # structure that neither chosen bottom actually reached -- two higher-low
+    # pullbacks in an uptrend aren't a double bottom.
+    if _has_dominant_rival(df, pl, i1, i2, is_high=False, tolerance=max_peak_diff):
+        return None
     between_highs = [p for p in ph if i1 < p < i2]
     if not between_highs:
         return None
@@ -1616,6 +1688,8 @@ def detect_triple_top(df, ph, pl):
     tops = [h1, h2, h3]
     if (max(tops) - min(tops)) / max(tops) > 0.008:
         return None
+    if _has_dominant_rival(df, ph, i1, i3, is_high=True, tolerance=0.008):
+        return None
     between = [p for p in pl if i1 < p < i3]
     if not between:
         return None
@@ -1641,6 +1715,8 @@ def detect_triple_bottom(df, ph, pl):
     l1, l2, l3 = df['Low'].iloc[i1], df['Low'].iloc[i2], df['Low'].iloc[i3]
     bots = [l1, l2, l3]
     if (max(bots) - min(bots)) / max(bots) > 0.008:
+        return None
+    if _has_dominant_rival(df, pl, i1, i3, is_high=False, tolerance=0.008):
         return None
     between = [p for p in ph if i1 < p < i3]
     if not between:
@@ -2036,7 +2112,7 @@ _PRIORITY = {
 }
 
 
-def scan_all_patterns(df, left=3, right=3, volume_profile=None):
+def scan_all_patterns(df, left=3, right=3, volume_profile=None, pivots=None):
     """
     Runs every detector against the given OHLC dataframe (must have a
     'Close'-indexed reset-friendly integer position order — pass df as-is,
@@ -2049,9 +2125,26 @@ def scan_all_patterns(df, left=3, right=3, volume_profile=None):
     post-detection adjustment layered on top -- it never changes whether a
     pattern is detected, only how much weight its trigger level deserves.
 
+    pivots: optional pre-computed swing list (e.g. from
+    strategies.find_structural_pivots / build_trendline_family), formatted
+    as [{"index": int, "price": float, "type": "high"|"low"}, ...].
+    When provided, pattern detection uses THESE swings instead of running
+    its own separate zigzag pass. This matters: previously the chart's
+    HH/HL/LH/LL structure and the pattern scanner's Double Top/H&S points
+    came from two independent pivot detectors with different parameters,
+    so they could (and did) disagree about which points on the chart were
+    the "real" swings -- e.g. a Double Top drawn on two minor pullback
+    highs while the chart's own structure line showed a bigger, untested
+    swing high right next to them. Sharing one pivot source keeps every
+    detector reading the same market structure.
+
     Returns: (best_pattern_or_None, all_detected_list)
     """
-    ph, pl = find_pivots(df, left=left, right=right)
+    if pivots:
+        ph = sorted(int(p["index"]) for p in pivots if p.get("type") == "high")
+        pl = sorted(int(p["index"]) for p in pivots if p.get("type") == "low")
+    else:
+        ph, pl = find_pivots(df, left=left, right=right)
     ph = _dedupe_adjacent(ph, min_gap=left + right)
     pl = _dedupe_adjacent(pl, min_gap=left + right)
 

@@ -838,11 +838,17 @@ def _detect_horizontal_levels(df: pd.DataFrame, pivots: List[Dict], n: int,
         # that just happened to form in the last handful of candles.
         score = n_touch * 10 + span * 0.08 + recency * 5
         quality = "unconfirmed" if n_touch < 3 else ("confirmed" if n_touch <= 4 else "crowded")
+        touch_prices = [float(t["price"]) for t in c["touches"]]
         levels.append({
             "price": c["price"], "touches": n_touch, "span": span,
             "first_index": first_idx, "last_index": last_idx,
             "side": "resistance" if c["price"] >= close else "support",
             "quality": quality, "score": round(score, 2),
+            # Real zone band (not a single infinitely-thin price) so the
+            # chart can shade the actual range the touches occurred in,
+            # padded a touch by the clustering tolerance itself.
+            "zone_low": min(min(touch_prices), c["price"] - tol),
+            "zone_high": max(max(touch_prices), c["price"] + tol),
         })
     levels.sort(key=lambda l: l["score"], reverse=True)
     return levels[:max_levels]
@@ -1667,6 +1673,10 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         "mw_pattern": mw,
         "market_sequence": market_seq,
         "pivots": pivots[-16:],
+        # Full pivot history (not trimmed to 16) so pattern detection has
+        # enough structure to check for a dominant rival swing outside the
+        # last few points -- see scan_all_patterns(pivots=...).
+        "pivots_full": pivots,
         "volume_profile": vp,
         "upper_line": upper_line,
         "lower_line": lower_line,
@@ -2826,7 +2836,13 @@ def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown: Optiona
     # double/triple tops, rectangles) -- this already existed for the
     # auto-trade engine but was never surfaced on the Trendline chart/report.
     try:
-        best_pattern, all_patterns = scan_all_patterns(df_tf)
+        # Share the SAME structural pivots the chart's HH/HL/LH/LL and
+        # trendlines are built from, instead of letting the pattern scanner
+        # run its own independent swing detection. Two different swing
+        # engines on one chart is how a Double Top ends up drawn on minor
+        # pullback highs while the structure line shows a bigger untested
+        # swing high right next to it.
+        best_pattern, all_patterns = scan_all_patterns(df_tf, pivots=family.get("pivots_full") or family.get("pivots"))
         family["scanned_pattern"] = best_pattern.to_dict() if best_pattern else None
         family["scanned_patterns"] = [p.to_dict() for p in all_patterns]
     except Exception as e:
