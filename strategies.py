@@ -712,6 +712,88 @@ def build_pattern_visual_report(wedge: Dict[str, Any], df: pd.DataFrame, n: int)
     }
 
 
+def _sr_setup_confidence(df: pd.DataFrame, horizontal_levels: List[Dict], close: float,
+                          atr_now: Optional[float]) -> Optional[Dict[str, Any]]:
+    """
+    Confidence that the nearest horizontal S/R level is a live, tradeable
+    setup right now -- not just a level that exists somewhere on the chart.
+    Rewards proximity (price actually at the level, not 5 ATR away),
+    touch count, and level quality.
+    """
+    if not horizontal_levels:
+        return None
+    best, best_dist = None, None
+    for lvl in horizontal_levels:
+        dist = abs(close - float(lvl["price"]))
+        if best_dist is None or dist < best_dist:
+            best, best_dist = lvl, dist
+    if best is None:
+        return None
+    dist_atr = (best_dist / atr_now) if atr_now else 999
+    if dist_atr <= 0.15:
+        prox_score = 30
+    elif dist_atr <= 0.5:
+        prox_score = 20
+    elif dist_atr <= 1.2:
+        prox_score = 8
+    else:
+        prox_score = 0
+    touch_score = min(35, int(best.get("touches", 0)) * 8)
+    quality_score = {"confirmed": 15, "crowded": 8, "unconfirmed": 4}.get(best.get("quality"), 4)
+    confidence = max(0, min(100, touch_score + quality_score + prox_score + 15))
+    bias = "BUY" if best.get("side") == "support" else "SELL"
+    return {"confidence": confidence, "level": best, "bias": bias, "distance_atr": round(dist_atr, 2)}
+
+
+def select_best_setup(family: Dict[str, Any], df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Scans the SAME analysis (trendline geometry, pattern geometry, S/R
+    proximity) and scores all three so the report/chart can lead with
+    whichever one is actually the strongest, live opportunity right now --
+    instead of always framing everything as a trendline setup and leaving
+    a trader "waiting endlessly without real reason" when the trendline
+    happens to be weak but a pattern or S/R reaction is strong.
+    """
+    close = float(df["Close"].iloc[-1])
+    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
+
+    trendline_conf = family.get("strength", 0) if family.get("family_kind", "none") != "none" else 0
+
+    pattern_conf, pattern_label = 0, None
+    pv = family.get("pattern_visual")
+    if pv:
+        pattern_conf, pattern_label = pv["final_confidence"], pv["pattern_name"]
+    else:
+        sp = family.get("scanned_pattern")
+        mw = family.get("mw_pattern")
+        if sp:
+            stage = str(family.get("pattern_stage") or sp.get("stage") or "").upper()
+            mult = {"CONFIRMED": 1.0, "TRIGGERED": 0.85, "FORMING": 0.55}.get(stage, 0.5)
+            pattern_conf, pattern_label = int(sp.get("confidence", 0) * mult), sp.get("name")
+        elif mw:
+            pattern_conf, pattern_label = int(family.get("pattern_confidence", 0)), mw.get("name")
+
+    sr_result = _sr_setup_confidence(df, family.get("horizontal_levels") or [], close, atr_now)
+    sr_conf = sr_result["confidence"] if sr_result else 0
+
+    scores = {"TRENDLINE": trendline_conf, "PATTERN": pattern_conf, "S/R": sr_conf}
+    winner = max(scores, key=scores.get)
+    # Don't dress up a genuinely setup-less chart as "TRENDLINE (0%)" --
+    # if nothing cleared a basic bar, say so plainly instead of implying
+    # a setup is being tracked when none exists.
+    if scores[winner] < 30:
+        winner = "NONE"
+
+    family["setup_scores"] = scores
+    family["active_setup"] = winner
+    family["active_setup_confidence"] = scores.get(winner, 0)
+    family["pattern_label"] = pattern_label
+    if winner == "S/R" and sr_result:
+        family["sr_setup"] = sr_result
+        family["active_pattern"] = "sr"  # drives chart drawing selection
+    return family
+
+
 def _detect_horizontal_levels(df: pd.DataFrame, pivots: List[Dict], n: int,
                                max_levels: int = 4, tol_atr: float = 0.45) -> List[Dict]:
     """
@@ -2157,6 +2239,35 @@ def build_position_container(family: Dict[str, Any], atr_mult_sl: float = 1.0) -
         }
 
 
+def _swing_structure_bias(family: Dict[str, Any], limit: int = 4) -> str:
+    """
+    Reads the ACTUAL HH/HL/LH/LL sequence and returns what the swing
+    structure itself says (BULLISH/BEARISH/MIXED) -- independent of
+    whatever the trendline geometry decided the trade direction is.
+    This is what the 'Structure:' line should reflect; mirroring the
+    trade bias instead (the old bug) let the report show a LH -> LL
+    sequence labeled BULLISH, which is self-contradictory.
+    """
+    anns = [a for a in (family.get("trendline_annotations") or [])
+            if str(a.get("label")) in {"HH", "HL", "LH", "LL"}]
+    labels = [str(a["label"]) for a in anns[-limit:]]
+    if not labels:
+        return "NEUTRAL"
+    bull_votes = sum(1 for l in labels if l in ("HH", "HL"))
+    bear_votes = sum(1 for l in labels if l in ("LH", "LL"))
+    # Weight the most recent label more heavily -- it's the current state.
+    last = labels[-1]
+    if last in ("HH", "HL"):
+        bull_votes += 1
+    else:
+        bear_votes += 1
+    if bull_votes > bear_votes:
+        return "BULLISH"
+    if bear_votes > bull_votes:
+        return "BEARISH"
+    return "MIXED"
+
+
 def _trendline_structure_sequence(family: Dict[str, Any], limit: int = 4) -> str:
     """Compact HH/HL/LH/LL sequence for the educational report."""
     anns = [a for a in (family.get("trendline_annotations") or [])
@@ -2262,7 +2373,11 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
 
     lifecycle = _trendline_status_text(family)
     structure = _trendline_structure_sequence(family)
-    structure_bias = "BULLISH" if bias_30 == "BUY" else "BEARISH" if bias_30 == "SELL" else "NEUTRAL"
+    trade_bias = "BULLISH" if bias_30 == "BUY" else "BEARISH" if bias_30 == "SELL" else "NEUTRAL"
+    structure_bias = _swing_structure_bias(family)
+    structure_conflict = (
+        trade_bias != "NEUTRAL" and structure_bias not in ("NEUTRAL", "MIXED") and structure_bias != trade_bias
+    )
 
     # A setup is not an entry simply because the trendline points in one
     # direction. Entry requires the actual confirmation engine to pass.
@@ -2296,8 +2411,36 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
     color_state = family.get("trendline_color_state", "NEUTRAL")
     color_icon = "🟢" if color_state == "BULLISH" else ("🔴" if color_state == "BEARISH" else "⚪")
 
+    setup_scores = family.get("setup_scores") or {}
+    active_setup = family.get("active_setup", "TRENDLINE")
+    active_conf = family.get("active_setup_confidence", 0)
+
     lines = [
-        f"📐 TRENDLINE ANALYSIS — {symbol} {tf_label}",
+        f"📐 ANALYSIS — {symbol} {tf_label}",
+        "",
+        "🔎 SETUP SCAN",
+    ]
+    for name in ("TRENDLINE", "PATTERN", "S/R"):
+        marker = "👉" if name == active_setup else "  "
+        lines.append(f"{marker} {name}: {setup_scores.get(name, 0)}%")
+    if active_setup == "NONE":
+        lines.append("BEST SETUP: NONE — no setup cleared minimum confidence, market is choppy/ranging")
+    else:
+        lines.append(f"BEST SETUP: {active_setup} ({active_conf}%)")
+
+    sr = family.get("sr_setup")
+    if active_setup == "S/R" and sr:
+        lvl = sr["level"]
+        lines += [
+            "",
+            "S/R ZONE",
+            f"Level: {float(lvl['price']):.5f} ({str(lvl.get('side','level')).upper()})",
+            f"Touches: {int(lvl.get('touches',0))}  |  Quality: {str(lvl.get('quality','')).upper()}",
+            f"Distance from price: {sr['distance_atr']} ATR",
+            f"Reaction bias: {sr['bias']}",
+        ]
+
+    lines += [
         "",
         "BIAS",
     ]
@@ -2342,7 +2485,7 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
         "",
         "STRUCTURE",
         f"{structure}",
-        f"Structure: {structure_bias}",
+        f"Structure: {structure_bias}" + (f"  ⚠ conflicts with trade bias ({trade_bias})" if structure_conflict else ""),
         "",
         "BREAKOUT",
         f"Status: {lifecycle['breakout']}",
@@ -2910,6 +3053,11 @@ def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown: Optiona
     # direction (pattern/OB/sequence logic above can change it from what
     # build_trendline_family saw initially).
     family["trendline_color_state"] = _trendline_color_state(direction, family.get("sma_direction", "FLAT"))
+
+    # Best-setup scan: score Trendline vs Pattern vs S/R and let whichever
+    # is actually strongest right now drive the report/chart, instead of
+    # always framing everything through the trendline lens.
+    family = select_best_setup(family, df_tf)
 
     family["strength"] = max(0, min(100, int(strength)))
     family["gating_notes"] = gating_notes

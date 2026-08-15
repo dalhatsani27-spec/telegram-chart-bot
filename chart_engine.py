@@ -730,6 +730,28 @@ def generate_trendline_map(
                 ax.plot([x0, chart_len - 1], [y0, y1], color=ch_color, linewidth=2.1,
                         alpha=0.88, zorder=4, solid_capstyle="round")
 
+    elif active_pattern == "sr" and family.get("sr_setup"):
+        # Winning setup was S/R, not a diagonal shape -- draw the zone as a
+        # transparent colored box (green = support/demand, red = resistance/
+        # supply) spanning +/- 0.25 ATR around the level, the width the
+        # level was actually respected across.
+        sr = family["sr_setup"]
+        lvl = sr["level"]
+        price = float(lvl["price"])
+        side = str(lvl.get("side", "support"))
+        pattern_title = f"S/R Zone ({side.capitalize()})"
+        atr_now_sr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else price * 0.002
+        half = max(atr_now_sr * 0.25, 1e-9)
+        zone_color = "#00c853" if side == "support" else "#ff1744"
+        x0 = max(0, int(lvl.get("first_index", 0)) - offset)
+        ax.axhspan(price - half, price + half, xmin=max(0, x0 / max(chart_len, 1)), xmax=1.0,
+                   color=zone_color, alpha=0.16, zorder=1)
+        ax.axhline(price, color=zone_color, linestyle="-", linewidth=1.6, alpha=0.85, zorder=4)
+        ax.text(chart_len - 2, price, f" {side.upper()} ZONE  {int(lvl.get('touches',0))}x", fontsize=7.2,
+                color=zone_color, fontweight="bold", va="bottom" if side == "support" else "top",
+                ha="right", zorder=9,
+                bbox=dict(boxstyle="round,pad=0.15", facecolor="#0b0f14", edgecolor=zone_color, alpha=0.75, linewidth=0.5))
+
     # --- Dual trendlines (MT5 hand-drawn style) -----------------------
     # ALWAYS draw ascending support + descending resistance when present.
     # Color is dynamic: green while price/20SMA support a bullish read,
