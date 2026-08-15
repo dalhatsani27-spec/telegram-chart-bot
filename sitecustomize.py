@@ -1,336 +1,304 @@
-"""20-SMA-led trend/pattern map adapter.
+"""Trendline-master adapter for the chart analyzer.
 
-The mapper follows the charting rule used by the manual Volatility 100 maps:
-1) 20 SMA is median price (H+L)/2.
-2) A sustained SMA slope establishes whether a trend exists.
-3) The first leg that crosses/establishes beyond the 20 SMA supplies the
-   starting structural anchor.
-4) Rising SMA -> ascending support only. Falling SMA -> descending resistance
-   only. Flat SMA -> no trendline; map consolidation/SR instead.
-5) A trendline is sloped from the 20-SMA slope, but anchored to price
-   structure, so the line stays close to the SMA instead of inheriting SMA lag.
+Loaded automatically by Python on Render. It leaves the existing analysis
+and chart renderer intact, but makes the 20-SMA / structural-trendline
+hierarchy explicit after the legacy family builder has produced its geometry.
 """
 
-import numpy as np
-import pandas as pd
 
+def _structural_impulse_anchor_pair(pivots, df, kind):
+    """Return the hand-drawn trendline anchors from a completed impulse leg.
 
-def _sma20(df):
-    return ((df["High"] + df["Low"]) / 2.0).rolling(20, min_periods=10).mean()
+    The important rule is not "pick the last two lows/highs". The line must
+    describe the leg that actually launched the current move:
 
+      UP:   previous Low -> HL(anchor) -> HH(impulse) -> current HL
+            trendline = HL(anchor) -> current HL
 
-def _sma_state(df, lookback=8):
-    sma = _sma20(df)
-    valid = sma.dropna()
-    if len(valid) < lookback + 2:
-        return "FLAT", sma, 0.0
-    atr = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and pd.notna(df["ATR"].iloc[-1]) else 0.0
-    delta = float(valid.iloc[-1] - valid.iloc[-1 - lookback])
-    threshold = max(atr * 0.08, abs(float(valid.iloc[-1])) * 0.00015)
-    if delta > threshold:
-        return "RISING", sma, delta / lookback
-    if delta < -threshold:
-        return "FALLING", sma, delta / lookback
-    return "FLAT", sma, delta / lookback
+      DOWN: previous High -> LH(anchor) -> LL(impulse) -> current LH
+            trendline = LH(anchor) -> current LH
 
-
-def _atr(df, i):
-    try:
-        v = float(df["ATR"].iloc[i])
-        if np.isfinite(v) and v > 0:
-            return v
-    except Exception:
-        pass
-    try:
-        return max(float(df["High"].iloc[i] - df["Low"].iloc[i]), 1e-9)
-    except Exception:
-        return 1e-9
-
-
-def _establishing_cross(df, sma, state, lookback=80):
-    """Find the start of the current SMA-confirmed leg.
-
-    We deliberately look for the price/SMA transition before choosing a
-    pivot. This is the key difference from generic pivot-to-pivot trendline
-    fitting: the line begins with the leg that actually established the
-    trend above/below the 20 SMA.
+    Pivots supplied by strategies are already structural/ATR filtered. This
+    function adds the structural sequence requirement so a 1-2 candle wiggle
+    cannot become a trendline anchor.
     """
-    close = pd.to_numeric(df["Close"], errors="coerce").to_numpy(float)
-    s = sma.to_numpy(float)
-    n = len(df)
-    start = max(1, n - lookback)
-    want_up = state == "RISING"
-    crosses = []
-    for i in range(start, n):
-        if not (np.isfinite(s[i]) and np.isfinite(s[i - 1]) and np.isfinite(close[i]) and np.isfinite(close[i - 1])):
-            continue
-        if want_up and close[i - 1] <= s[i - 1] and close[i] > s[i]:
-            crosses.append(i)
-        elif not want_up and close[i - 1] >= s[i - 1] and close[i] < s[i]:
-            crosses.append(i)
-    if crosses:
-        return crosses[-1]
-    # If the current trend has persisted beyond the window, use the first
-    # sustained same-side run available in the window.
-    side = close > s if want_up else close < s
-    for i in range(n - 10, start - 1, -1):
-        if 0 <= i < n and bool(side[i]) and all(bool(side[j]) for j in range(i, min(i + 3, n)) if np.isfinite(s[j])):
-            return i
-    return start
-
-
-def _structural_anchor(df, pivots, cross_i, state):
-    """Choose the actual price anchor for the establishing leg."""
-    if not pivots:
-        return None
-    want = "low" if state == "RISING" else "high"
-    candidates = [p for p in pivots if p.get("type") == want]
-    if not candidates:
+    if df is None or len(pivots or []) < 4:
         return None
 
-    # The leg normally begins just before the SMA cross. Prefer the strongest
-    # extreme in the 15-bar launch window, then fall back to the nearest one.
-    lo = max(0, cross_i - 18)
-    hi = min(len(df) - 1, cross_i + 3)
-    window = [p for p in candidates if lo <= int(p["index"]) <= hi]
-    if window:
-        return (min(window, key=lambda p: p["price"]) if state == "RISING"
-                else max(window, key=lambda p: p["price"]))
+    ordered = sorted(pivots, key=lambda p: int(p.get("index", 0)))
+    lows = [p for p in ordered if p.get("type") == "low"]
+    highs = [p for p in ordered if p.get("type") == "high"]
 
-    before = [p for p in candidates if int(p["index"]) <= cross_i]
-    if before:
-        return before[-1]
-    return candidates[0]
-
-
-def _latest_structural_endpoint(pivots, anchor, state):
-    if not anchor:
-        return None
-    idx = int(anchor["index"])
-    if state == "RISING":
-        pts = [p for p in pivots if p.get("type") == "low" and int(p["index"]) > idx and float(p["price"]) > float(anchor["price"])]
-    else:
-        pts = [p for p in pivots if p.get("type") == "high" and int(p["index"]) > idx and float(p["price"]) < float(anchor["price"])]
-    if not pts:
-        return None
-    return pts[-1]
-
-
-def _sma_guided_line(df, pivots, state, sma, sma_slope):
-    if state not in ("RISING", "FALLING"):
-        return None
-    cross_i = _establishing_cross(df, sma, state)
-    anchor = _structural_anchor(df, pivots, cross_i, state)
-    endpoint = _latest_structural_endpoint(pivots, anchor, state) if anchor else None
-    if anchor is None:
+    if len(lows) < 3 or len(highs) < 2:
         return None
 
-    # The 20 SMA supplies the slope. The price anchor supplies the vertical
-    # position. This removes the SMA's lag without allowing a pivot fitter to
-    # invent a slope that contradicts the live SMA direction.
-    slope = float(sma_slope)
-    if state == "RISING":
-        slope = max(slope, abs(slope) * 0.25, 1e-9)
-    else:
-        slope = min(slope, -max(abs(slope) * 0.25, 1e-9))
+    def atr_at(index):
+        try:
+            if "ATR" in df.columns:
+                value = float(df["ATR"].iloc[int(index)])
+                if value > 0:
+                    return value
+            high = float(df["High"].iloc[int(index)])
+            low = float(df["Low"].iloc[int(index)])
+            return max(high - low, 1e-9)
+        except Exception:
+            return 1e-9
 
-    # If the SMA slope is extremely small but the state is still directional,
-    # estimate it from the two structural points while preserving the sign.
-    if abs(slope) < 1e-9 and endpoint is not None:
-        raw = (float(endpoint["price"]) - float(anchor["price"])) / max(int(endpoint["index"]) - int(anchor["index"]), 1)
-        slope = abs(raw) if state == "RISING" else -abs(raw)
+    if kind == "support":
+        # Only completed sequences ending at the latest confirmed structural
+        # low are eligible. This makes the current pivot the line endpoint.
+        current = lows[-1]
+        candidates = []
 
-    # Move the line vertically only enough to keep the latest structural
-    # endpoint close to the same rail. Never change its slope sign.
-    y0 = float(anchor["price"])
-    if endpoint is not None:
-        predicted = y0 + slope * (int(endpoint["index"]) - int(anchor["index"]))
-        error = float(endpoint["price"]) - predicted
-        limit = _atr(df, int(endpoint["index"])) * 0.75
-        y0 += float(np.clip(error, -limit, limit))
+        for i in range(1, len(lows) - 1):
+            anchor = lows[i]
+            previous_low = lows[i - 1]
 
-    x0 = int(anchor["index"])
-    x1 = int(endpoint["index"]) if endpoint is not None else min(len(df) - 1, x0 + 8)
-    x1 = max(x1, x0 + 4)
-    y1 = y0 + slope * (x1 - x0)
-    y_end = y0 + slope * (len(df) - 1 - x0)
+            # Anchor must genuinely be a Higher Low.
+            if float(anchor["price"]) <= float(previous_low["price"]):
+                continue
 
-    kind = "support" if state == "RISING" else "resistance"
-    touches = strategies._count_touches(df, x0, y0, x1, y1, kind, tol_atr=0.55)
-    violations = strategies._count_violations(df, x0, y0, x1, y1, kind, tol_atr=0.35)
-    quality = "confirmed" if touches >= 3 else "unconfirmed"
+            # The impulse must be the first meaningful HH leg launched from
+            # this HL, not a later arbitrary high.
+            highs_after_anchor = [h for h in highs if h["index"] > anchor["index"]]
+            if not highs_after_anchor:
+                continue
+            impulse_high = highs_after_anchor[0]
 
-    return {
-        "x0": x0, "y0": float(y0), "x1": x1, "y1": float(y1), "y_end": float(y_end),
-        "slope": float(slope), "touches": max(2, int(touches)),
-        "violations": int(violations), "confirmed": quality == "confirmed",
-        "quality": quality, "kind": kind, "method": "20sma_establishing_leg",
-        "establishing_cross": int(cross_i),
-        "sma_slope": float(sma_slope),
-    }
+            highs_before_impulse = [h for h in highs if h["index"] < impulse_high["index"]]
+            if not highs_before_impulse:
+                continue
+            previous_high = highs_before_impulse[-1]
+
+            # Impulse must create a Higher High.
+            if float(impulse_high["price"]) <= float(previous_high["price"]):
+                continue
+
+            # The endpoint must be the structural retracement low after that
+            # impulse and must remain a Higher Low relative to the anchor.
+            lows_after_impulse = [l for l in lows if l["index"] > impulse_high["index"]]
+            if not lows_after_impulse:
+                continue
+            endpoint = lows_after_impulse[0]
+            if endpoint["index"] != current["index"]:
+                continue
+            if float(endpoint["price"]) <= float(anchor["price"]):
+                continue
+
+            move = float(impulse_high["price"]) - float(anchor["price"])
+            reference_atr = max(
+                (atr_at(anchor["index"]) + atr_at(impulse_high["index"])) / 2.0,
+                1e-9,
+            )
+            impulse_atr = move / reference_atr
+            if impulse_atr < 1.25:
+                continue
+
+            # Prefer the most recent completed impulse; strength breaks ties.
+            candidates.append((endpoint["index"], impulse_high["index"], impulse_atr, anchor, endpoint))
+
+        if not candidates:
+            return None
+        _, _, _, anchor, endpoint = max(candidates, key=lambda x: (x[0], x[1], x[2]))
+        return anchor, endpoint
+
+    if kind == "resistance":
+        # Mirror image for bearish structure: LH -> LL impulse -> current LH.
+        current = highs[-1]
+        candidates = []
+
+        for i in range(1, len(highs) - 1):
+            anchor = highs[i]
+            previous_high = highs[i - 1]
+
+            # Anchor must genuinely be a Lower High.
+            if float(anchor["price"]) >= float(previous_high["price"]):
+                continue
+
+            lows_after_anchor = [l for l in lows if l["index"] > anchor["index"]]
+            if not lows_after_anchor:
+                continue
+            impulse_low = lows_after_anchor[0]
+
+            lows_before_impulse = [l for l in lows if l["index"] < impulse_low["index"]]
+            if not lows_before_impulse:
+                continue
+            previous_low = lows_before_impulse[-1]
+
+            # Impulse must create a Lower Low.
+            if float(impulse_low["price"]) >= float(previous_low["price"]):
+                continue
+
+            highs_after_impulse = [h for h in highs if h["index"] > impulse_low["index"]]
+            if not highs_after_impulse:
+                continue
+            endpoint = highs_after_impulse[0]
+            if endpoint["index"] != current["index"]:
+                continue
+            if float(endpoint["price"]) >= float(anchor["price"]):
+                continue
+
+            move = float(anchor["price"]) - float(impulse_low["price"])
+            reference_atr = max(
+                (atr_at(anchor["index"]) + atr_at(impulse_low["index"])) / 2.0,
+                1e-9,
+            )
+            impulse_atr = move / reference_atr
+            if impulse_atr < 1.25:
+                continue
+
+            candidates.append((endpoint["index"], impulse_low["index"], impulse_atr, anchor, endpoint))
+
+        if not candidates:
+            return None
+        _, _, _, anchor, endpoint = max(candidates, key=lambda x: (x[0], x[1], x[2]))
+        return anchor, endpoint
+
+    return None
 
 
-def _consolidation_pattern(df, pivots, sma, state):
-    """Create a clean pattern map when the SMA is flat.
-
-    This is deliberately a pattern/SR map, not a trendline classification.
-    The renderer can use the two rails as a consolidation shape while the
-    trade engine remains neutral until a breakout is confirmed.
-    """
-    if state != "FLAT" or len(pivots) < 6:
-        return None
-    n = len(df)
-    recent = [p for p in pivots if int(p["index"]) >= max(0, n - 45)]
-    highs = [p for p in recent if p.get("type") == "high"][-3:]
-    lows = [p for p in recent if p.get("type") == "low"][-3:]
-    if len(highs) < 2 or len(lows) < 2:
-        return None
-
-    def slope(a, b):
-        return (float(b["price"]) - float(a["price"])) / max(int(b["index"]) - int(a["index"]), 1)
-    hs = slope(highs[0], highs[-1])
-    ls = slope(lows[0], lows[-1])
-    atr = _atr(df, n - 1)
-    threshold = max(atr * 0.04, abs(float(df["Close"].iloc[-1])) * 0.00005)
-    high_flat = abs(hs) <= threshold
-    low_flat = abs(ls) <= threshold
-
-    if hs < -threshold and ls > threshold:
-        name = "CONSOLIDATION"
-    elif high_flat and ls > threshold:
-        name = "ASCENDING CONSOLIDATION"
-    elif hs < -threshold and low_flat:
-        name = "DESCENDING CONSOLIDATION"
-    elif high_flat and low_flat:
-        name = "RANGE"
-    else:
-        return None
-
-    upper = {"x0": int(highs[0]["index"]), "y0": float(highs[0]["price"]),
-             "x1": int(highs[-1]["index"]), "y1": float(highs[-1]["price"]), "slope": float(hs)}
-    lower = {"x0": int(lows[0]["index"]), "y0": float(lows[0]["price"]),
-             "x1": int(lows[-1]["index"]), "y1": float(lows[-1]["price"]), "slope": float(ls)}
-    upper["y_end"] = upper["y0"] + upper["slope"] * (n - 1 - upper["x0"])
-    lower["y_end"] = lower["y0"] + lower["slope"] * (n - 1 - lower["x0"])
-    return {"pattern": name, "upper": upper, "lower": lower,
-            "apex_index": max(upper["x1"], lower["x1"]), "bias": "NEUTRAL"}
-
-
-def _install():
-    global strategies
+def _patch_trendline_master():
     try:
-        import strategies as _strategies
-        strategies = _strategies
+        import strategies
     except Exception as exc:
-        print(f"[trendline_map] strategies unavailable: {exc!r}")
+        print(f"[trendline_master] strategies not ready: {exc!r}")
         return
+
+    # Patch the anchor selector BEFORE build_trendline_family runs. The
+    # existing renderer and breakout engine then receive the corrected line
+    # naturally, without rewriting the chart or strategy code.
+    strategies._find_impulse_anchor_pair = _structural_impulse_anchor_pair
+    print("[trendline_master] impulse-leg structural anchor selector installed")
 
     original = getattr(strategies, "build_trendline_family", None)
-    if original is None or getattr(original, "_sma_map_wrapped", False):
+    if original is None or getattr(original, "_trendline_master_wrapped", False):
         return
 
-    def _wrapped(df, max_lines=4, lookback_bars=60):
+    def _master(df, max_lines=4, lookback_bars=60):
         family = original(df, max_lines=max_lines, lookback_bars=lookback_bars)
         if not family or family.get("error"):
             return family
 
-        pivots = family.get("pivots_full") or family.get("pivots") or []
-        state, sma, sma_slope = _sma_state(df)
-        line = _sma_guided_line(df, pivots, state, sma, sma_slope)
-        pattern = _consolidation_pattern(df, pivots, sma, state)
+        sma_dir = str(family.get("sma_direction") or "FLAT").upper()
+        supports = family.get("uptrends") or []
+        resistances = family.get("downtrends") or []
 
-        family["sma_series"] = sma
-        family["sma_direction"] = state
-        family["sma_applied_price"] = "median"
-        family["sma_slope"] = float(sma_slope)
-        family["sma_establishing_leg"] = _establishing_cross(df, sma, state) if state != "FLAT" else None
-
-        if line is not None:
-            # One and only one trendline. Never mix ascending support with
-            # descending resistance in the trend map.
-            role = "support" if state == "RISING" else "resistance"
-            family["uptrends"] = [line] if role == "support" else []
-            family["downtrends"] = [line] if role == "resistance" else []
-            family["family_lines"] = [line]
-            family["channel"] = None
-            family["mode"] = "lines"
-            family["master_trendline"] = line
-            family["master_role"] = role
-            family["family_kind"] = "ascending" if role == "support" else "descending"
-            family["primary_quality"] = line["quality"]
-            family["primary_touches"] = line["touches"]
-            family["bias_touch_points"] = strategies._touch_points(df, line["x0"], line["y0"], line["x1"], line["y1"], role)
-            family["trendline_color_state"] = "BULLISH" if role == "support" else "BEARISH"
-            family["direction"] = "BUY" if role == "support" else "SELL"
-            family["strength"] = max(int(family.get("strength") or 0), 55)
-            family["active_pattern"] = "channel" if family.get("strength", 0) >= 55 else "none"
-            family["mode"] = "lines"
-            family["reasons"] = list(family.get("reasons") or []) + [
-                f"20 SMA median-price state: {state}; trendline anchored from the establishing leg and slope-guided by the 20 SMA."
-            ]
-
-            # Recalculate lifecycle against the SAME master line.
-            close = float(df["Close"].iloc[-1])
-            line_now = strategies._line_value(line["x0"], line["y0"], line["x1"], line["y1"], len(df) - 1)
-            break_kind = None
-            if role == "support" and close < line_now:
-                break_kind = "support_break_down"
-            elif role == "resistance" and close > line_now:
-                break_kind = "resistance_break_up"
-            breakout = strategies._grade_breakout(df, line, break_kind, len(df)) if break_kind else None
-            retest = strategies._trendline_retest_state(df, line, breakout, break_kind)
-            family["breakout_grade"] = breakout
-            family["trendline_retest"] = retest
-            family["trendline_status"] = retest.get("status", "INTACT")
-            family["trendline_break_kind"] = break_kind
-
-            # Do not call the old geometry's opposite rail after this point.
-            # It is the master line that controls the map.
-            if retest.get("status") == "BREAK_RETEST_CONFIRMED":
-                family["retest_entry_ready"] = True
-                family["reasons"].append("Break + retest confirmed on the master trendline.")
-            else:
-                family["retest_entry_ready"] = False
+        # SMA is a compass only: it selects which structural rail is the
+        # directional/master rail. It is never used as an entry trigger.
+        if sma_dir == "RISING":
+            master = supports[0] if supports else None
+            master_role = "support"
+            base_bias = "BUY"
+        elif sma_dir == "FALLING":
+            master = resistances[0] if resistances else None
+            master_role = "resistance"
+            base_bias = "SELL"
         else:
-            # Flat SMA = consolidation/SR map. Do not manufacture a diagonal
-            # trendline merely because two pivots have a small slope.
-            family["uptrends"] = []
-            family["downtrends"] = []
-            family["family_lines"] = []
-            family["channel"] = None
+            master = None
+            master_role = "none"
+            base_bias = "NEUTRAL"
+
+        if master is None:
             family["master_trendline"] = None
             family["master_role"] = "none"
-            family["family_kind"] = "none"
-            family["direction"] = "NEUTRAL"
-            family["strength"] = min(int(family.get("strength") or 40), 45)
-            family["trendline_color_state"] = "NEUTRAL"
-            family["mode"] = "sr"
-            family["master_decision"] = "20 SMA FLAT — consolidation/SR map"
-            if pattern:
-                family["wedge"] = pattern
-                family["pattern_visual"] = {
-                    "pattern_name": pattern["pattern"], "final_confidence": 70,
-                    "upper_touches": 2, "lower_touches": 2, "fit_quality": 70
-                }
-                family["active_pattern"] = "wedge"
-                family["pattern_confidence"] = 70
-                family["reasons"] = list(family.get("reasons") or []) + [
-                    f"20 SMA flat: {pattern['pattern']} mapped instead of a trendline."
-                ]
+            family["master_decision"] = "WAIT — no structural trendline in SMA direction"
+            return family
+
+        n = len(df)
+        close = float(df["Close"].iloc[-1])
+        line_now = strategies._line_value(
+            master["x0"], master["y0"], master["x1"], master["y1"], n - 1
+        )
+
+        breakout = None
+        retest = {"status": "INTACT", "note": "No confirmed trendline break."}
+        break_kind = None
+
+        if master_role == "support" and close < line_now:
+            break_kind = "support_break_down"
+        elif master_role == "resistance" and close > line_now:
+            break_kind = "resistance_break_up"
+
+        if break_kind:
+            breakout = strategies._grade_breakout(df, master, break_kind, n)
+            retest = strategies._trendline_retest_state(df, master, breakout, break_kind)
+
+        # The trendline is the decision-maker. A confirmed structural break
+        # flips the bias; the SMA is not allowed to veto that flip.
+        direction = base_bias
+        decision = "INTACT"
+        strength = int(family.get("strength") or 40)
+        reasons = list(family.get("reasons") or [])
+
+        if retest.get("status") == "FAKEOUT":
+            direction = base_bias
+            decision = "FAKEOUT — original bias retained"
+            reasons.append("🚫 Trendline excursion reclaimed — bias retained; no structural flip.")
+        elif breakout and breakout.get("strength") == "confirmed":
+            direction = "SELL" if master_role == "support" else "BUY"
+            decision = "BREAK CONFIRMED — BIAS FLIPPED"
+            strength = max(strength, 68)
+            reasons.append(
+                f"🔄 MASTER TRENDLINE BREAK: {master_role} broken with "
+                f"{breakout['consecutive_closes']} close(s), "
+                f"{breakout['penetration_atr']} ATR penetration. Bias flipped to {direction}."
+            )
+        elif breakout and breakout.get("strength") == "developing":
+            direction = base_bias
+            decision = "BREAK DEVELOPING — WAIT FOR CONFIRMATION"
+            strength = max(strength, 52)
+            reasons.append("⏳ Structural break developing — SMA bias retained until the trendline break confirms.")
+        elif master_role == "support":
+            direction = "BUY"
+            decision = "INTACT — BULLISH STRUCTURE"
+            reasons.append("🟢 SMA direction: RISING → green rising-support is the master trendline.")
+        else:
+            direction = "SELL"
+            decision = "INTACT — BEARISH STRUCTURE"
+            reasons.append("🔴 SMA direction: FALLING → red falling-resistance is the master trendline.")
+
+        # Replace only the decision layer. Keep both rails, patterns, zones,
+        # candles, and existing chart geometry untouched.
+        family["direction"] = direction
+        family["strength"] = max(0, min(100, int(strength)))
+        family["family_kind"] = "ascending" if master_role == "support" else "descending"
+        family["primary_quality"] = master.get("quality")
+        family["primary_touches"] = master.get("touches", 0)
+        family["bias_touch_points"] = strategies._touch_points(
+            df, int(master["x0"]), master["y0"], int(master["x1"]), master["y1"], master_role
+        )
+        family["master_trendline"] = master
+        family["master_role"] = master_role
+        family["master_decision"] = decision
+        family["master_line_value"] = float(line_now)
+        family["breakout_grade"] = breakout
+        family["trendline_retest"] = retest
+        family["trendline_break_kind"] = break_kind
+        family["trendline_color_state"] = "BULLISH" if direction == "BUY" else "BEARISH" if direction == "SELL" else "NEUTRAL"
+        family["reasons"] = reasons
+
+        # Re-evaluate confirmation using the master decision. This remains
+        # an entry gate; SMA still has no entry role.
+        if direction in ("BUY", "SELL") and hasattr(strategies, "_entry_confirmation"):
+            family["entry_rules"] = strategies._entry_confirmation(df, direction)
+
+        if hasattr(strategies, "_measured_move_projections"):
+            family["projections"] = strategies._measured_move_projections(df, family.get("pivots") or [], direction)
+
+        # A confirmed break is a transition until the retest confirms it.
+        family["prefer_retest_entry"] = retest.get("status") == "BREAK_CONFIRMED"
+        family["master_entry_ready"] = retest.get("status") == "BREAK_RETEST_CONFIRMED"
+        if family["master_entry_ready"]:
+            reasons.append("✅ MASTER TRENDLINE BREAK + RETEST CONFIRMED — entry can now be evaluated.")
+        elif break_kind and retest.get("status") in ("BREAK_CONFIRMED", "BREAK_DEVELOPING"):
+            reasons.append("⏳ Wait for the master trendline retest before entry.")
 
         return family
 
-    _wrapped._sma_map_wrapped = True
-    _wrapped._original = original
-    strategies.build_trendline_family = _wrapped
-    print("[trendline_map] 20-SMA median-price structural map installed")
+    _master._trendline_master_wrapped = True
+    _master._original = original
+    strategies.build_trendline_family = _master
+    print("[trendline_master] master decision adapter installed")
 
 
-_install()
-
-# Keep the existing confirmation/pullback adapter available. It runs after
-# the mapper so historical pullbacks use the exact same master line.
-try:
-    import usercustomize
-except Exception as exc:
-    print(f"[trendline_map] usercustomize unavailable: {exc!r}")
+_patch_trendline_master()
