@@ -386,6 +386,38 @@ def _draw_tv_position_box(ax, pos, chart_len: int):
 
 
 
+def _infer_pattern_geometry(pivots, chart_len, offset):
+    highs=[]; lows=[]
+    for p in (pivots or []):
+        try:
+            x=int(p.get("index",-1))-offset; y=float(p.get("price")); t=str(p.get("type","")).lower()
+            if 0<=x<chart_len:
+                (highs if t=="high" else lows if t=="low" else []).append((x,y))
+        except (TypeError,ValueError): pass
+    highs=sorted(highs); lows=sorted(lows)
+    if len(highs)<2: return None
+    rh=highs[-3:] if len(highs)>=3 else highs[-2:]
+    us=(rh[-1][1]-rh[0][1])/max(rh[-1][0]-rh[0][0],1)
+    resistance={"points":rh} if us<0 else None
+    support=None
+    if len(lows)>=2:
+        rl=lows[-3:] if len(lows)>=3 else lows[-2:]
+        ls=(rl[-1][1]-rl[0][1])/max(rl[-1][0]-rl[0][0],1)
+        if ls>0: support={"points":rl}
+    if not resistance and not support: return None
+    return {"resistance":resistance,"support":support,"name":"Symmetrical Triangle" if resistance and support else "Descending Resistance"}
+
+def _draw_inferred_pattern(ax, g, chart_len):
+    def rail(r,c,label):
+        if not r: return
+        pts=r["points"]; x0,y0=pts[0]; x1,y1=pts[-1]; slope=(y1-y0)/max(x1-x0,1); xe=chart_len-1; ye=y0+slope*(xe-x0)
+        ax.plot([x0,xe],[y0,ye],color=c,linewidth=2.6,alpha=.95,zorder=9)
+        for x,y in pts: ax.scatter([x],[y],s=52,color=c,edgecolors="#fff",linewidths=1.1,zorder=12)
+        ax.text(xe-2,ye,label,fontsize=7.2,color=c,fontweight="bold",ha="right",va="bottom" if "SUPPORT" in label else "top",zorder=13,bbox=dict(boxstyle="round,pad=.14",facecolor="#0b0f14",edgecolor=c,alpha=.82,linewidth=.55))
+    rail(g.get("resistance"),"#ff5252","FALLING RESISTANCE")
+    rail(g.get("support"),"#00e676","RISING SUPPORT")
+
+
 # ============================================================
 # TRENDLINE CHART -- 30M entry chart for the Trendline strategy
 # ============================================================
@@ -418,6 +450,7 @@ def generate_trendline_map(
         y_on_right=True,
         facecolor=COLORS["bg"],
         figcolor=COLORS["bg"],
+        rc={"axes.labelcolor": COLORS["text"], "xtick.color": COLORS["text"], "ytick.color": COLORS["text"], "text.color": COLORS["text"]},
     )
 
     # NOTE: the old code plotted upper_line/middle_line/lower_line here via
@@ -751,6 +784,14 @@ def generate_trendline_map(
                 color=zone_color, fontweight="bold", va="bottom" if side == "support" else "top",
                 ha="right", zorder=9,
                 bbox=dict(boxstyle="round,pad=0.15", facecolor="#0b0f14", edgecolor=zone_color, alpha=0.75, linewidth=0.5))
+
+    # Pattern geometry fallback: connect meaningful resistance highs in red
+    # and rising support lows in green when no explicit rails were supplied.
+    inferred_pattern=_infer_pattern_geometry(pivots,chart_len,offset)
+    if inferred_pattern and not (family.get("downtrends") or family.get("family_lines")):
+        _draw_inferred_pattern(ax,inferred_pattern,chart_len)
+        if not (family.get("scanned_pattern") or {}).get("name") and inferred_pattern.get("name"):
+            family["visual_pattern_name"]=inferred_pattern["name"]
 
     # --- Dual trendlines (MT5 hand-drawn style) -----------------------
     # ALWAYS draw ascending support + descending resistance when present.
@@ -1350,6 +1391,14 @@ def generate_trendline_educational_map(
     title = f"{symbol}  |  {tf_label}  |  {direction} BIAS  |  {status.replace('_', ' ')}"
     if pattern_name:
         title += f"  |  {pattern_name}"
+    pattern_conf=(sp.get("confidence") if isinstance(sp,dict) else None)
+    if pattern_conf is None: pattern_conf=family.get("pattern_confidence")
+    if pattern_name and pattern_conf is not None:
+        try:
+            pc=float(pattern_conf); tag="HIGH CONFIDENCE" if pc>=75 else "MODERATE CONFIDENCE" if pc>=60 else "LOW CONFIDENCE"
+            ax.text(.99,.985,f"{pattern_name.upper()} | {pc:.0f}% | {tag}",transform=ax.transAxes,ha="right",va="top",fontsize=7.2,color="#ffe082",fontweight="bold",zorder=20,bbox=dict(boxstyle="round,pad=.2",facecolor="#0b0f14",edgecolor="#ffe082",alpha=.82,linewidth=.6))
+        except (TypeError,ValueError): pass
+
     ax.set_title(title, color="#f8fafc", fontsize=12.5, fontweight="bold", pad=10)
 
     img_buf = io.BytesIO()
