@@ -1,0 +1,43 @@
+name: Enhance Trendline map
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch chart engine
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('chart_engine.py'); s=p.read_text(encoding='utf-8')
+          old='''        y_on_right=True,\n        facecolor=COLORS["bg"],\n        figcolor=COLORS["bg"],\n    )'''
+          new='''        y_on_right=True,\n        facecolor=COLORS["bg"],\n        figcolor=COLORS["bg"],\n        rc={"axes.labelcolor": COLORS["text"], "xtick.color": COLORS["text"], "ytick.color": COLORS["text"], "text.color": COLORS["text"]},\n    )'''
+          if old not in s: raise SystemExit('style block not found')
+          s=s.replace(old,new,1)
+          marker='# ============================================================\n# TRENDLINE CHART -- 30M entry chart for the Trendline strategy\n# ============================================================'
+          helper='''def _infer_pattern_geometry(pivots, chart_len, offset):\n    highs=[]; lows=[]\n    for p in (pivots or []):\n        try:\n            x=int(p.get("index",-1))-offset; y=float(p.get("price")); t=str(p.get("type","")).lower()\n            if 0<=x<chart_len:\n                (highs if t=="high" else lows if t=="low" else []).append((x,y))\n        except (TypeError,ValueError): pass\n    highs=sorted(highs); lows=sorted(lows)\n    if len(highs)<2: return None\n    rh=highs[-3:] if len(highs)>=3 else highs[-2:]\n    us=(rh[-1][1]-rh[0][1])/max(rh[-1][0]-rh[0][0],1)\n    resistance={"points":rh} if us<0 else None\n    support=None\n    if len(lows)>=2:\n        rl=lows[-3:] if len(lows)>=3 else lows[-2:]\n        ls=(rl[-1][1]-rl[0][1])/max(rl[-1][0]-rl[0][0],1)\n        if ls>0: support={"points":rl}\n    if not resistance and not support: return None\n    return {"resistance":resistance,"support":support,"name":"Symmetrical Triangle" if resistance and support else "Descending Resistance"}\n\ndef _draw_inferred_pattern(ax, g, chart_len):\n    def rail(r,c,label):\n        if not r: return\n        pts=r["points"]; x0,y0=pts[0]; x1,y1=pts[-1]; slope=(y1-y0)/max(x1-x0,1); xe=chart_len-1; ye=y0+slope*(xe-x0)\n        ax.plot([x0,xe],[y0,ye],color=c,linewidth=2.6,alpha=.95,zorder=9)\n        for x,y in pts: ax.scatter([x],[y],s=52,color=c,edgecolors="#fff",linewidths=1.1,zorder=12)\n        ax.text(xe-2,ye,label,fontsize=7.2,color=c,fontweight="bold",ha="right",va="bottom" if "SUPPORT" in label else "top",zorder=13,bbox=dict(boxstyle="round,pad=.14",facecolor="#0b0f14",edgecolor=c,alpha=.82,linewidth=.55))\n    rail(g.get("resistance"),"#ff5252","FALLING RESISTANCE")\n    rail(g.get("support"),"#00e676","RISING SUPPORT")\n\n\n'''
+          if marker not in s: raise SystemExit('chart marker not found')
+          s=s.replace(marker,helper+marker,1)
+          marker2='    # --- Dual trendlines (MT5 hand-drawn style) -----------------------\n'
+          insert2='''    # Pattern geometry fallback: connect meaningful resistance highs in red\n    # and rising support lows in green when no explicit rails were supplied.\n    inferred_pattern=_infer_pattern_geometry(pivots,chart_len,offset)\n    if inferred_pattern and not (family.get("downtrends") or family.get("family_lines")):\n        _draw_inferred_pattern(ax,inferred_pattern,chart_len)\n        if not (family.get("scanned_pattern") or {}).get("name") and inferred_pattern.get("name"):\n            family["visual_pattern_name"]=inferred_pattern["name"]\n\n'''
+          if marker2 not in s: raise SystemExit('dual marker not found')
+          s=s.replace(marker2,insert2+marker2,1)
+          marker3='    ax.set_title(title, color="#f8fafc", fontsize=12.5, fontweight="bold", pad=10)\n'
+          insert3='''    pattern_conf=(sp.get("confidence") if isinstance(sp,dict) else None)\n    if pattern_conf is None: pattern_conf=family.get("pattern_confidence")\n    if pattern_name and pattern_conf is not None:\n        try:\n            pc=float(pattern_conf); tag="HIGH CONFIDENCE" if pc>=75 else "MODERATE CONFIDENCE" if pc>=60 else "LOW CONFIDENCE"\n            ax.text(.99,.985,f"{pattern_name.upper()} | {pc:.0f}% | {tag}",transform=ax.transAxes,ha="right",va="top",fontsize=7.2,color="#ffe082",fontweight="bold",zorder=20,bbox=dict(boxstyle="round,pad=.2",facecolor="#0b0f14",edgecolor="#ffe082",alpha=.82,linewidth=.6))\n        except (TypeError,ValueError): pass\n\n'''+marker3
+          if marker3 not in s: raise SystemExit('title marker not found')
+          s=s.replace(marker3,insert3,1)
+          p.write_text(s,encoding='utf-8')
+      - name: Validate and commit
+        shell: bash
+        run: |
+          python -m py_compile chart_engine.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/workflows/enhance-trendline-map.yml
+          git add chart_engine.py .github/workflows/enhance-trendline-map.yml
+          git commit -m "Enhance trendline pattern mapping and chart readability"
+          git push
