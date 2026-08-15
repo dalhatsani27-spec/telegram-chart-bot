@@ -323,3 +323,11 @@ def _add_historical_pullbacks():
 
 
 _add_historical_pullbacks()
+
+
+# TRENDLINE_V2_FINAL_HOOK
+try:
+    import trendline_mapper_v2
+    trendline_mapper_v2.install()
+except Exception as _trendline_v2_exc:
+    print(f"[trendline_v2] final hook failed: {_trendline_v2_exc!r}")
