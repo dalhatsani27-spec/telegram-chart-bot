@@ -302,3 +302,8 @@ def _patch_trendline_master():
 
 
 _patch_trendline_master()
+
+# Load the finalized entry adapter after the protected master-trendline adapter.
+# usercustomize.py is kept separate so the working chart/trendline code above
+# remains unchanged and can be removed/reverted independently if necessary.
+import usercustomize
