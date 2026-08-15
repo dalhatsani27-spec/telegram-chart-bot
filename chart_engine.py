@@ -1380,6 +1380,8 @@ def generate_trendline_educational_map(
         pattern_name = sp.get("name")
     elif family.get("active_pattern") and family.get("active_pattern") != "none":
         pattern_name = str(family.get("active_pattern")).replace("_", " ").title()
+    elif family.get("visual_pattern_name"):
+        pattern_name = str(family.get("visual_pattern_name"))
     direction = str(
         setup.get("direction")
         or family.get("direction")
