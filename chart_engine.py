@@ -1079,6 +1079,17 @@ def generate_trendline_educational_map(
     )
     ax = axes[0]
 
+    # Final dark-theme axis contrast: explicitly set the rendered tick and
+    # axis-label artists. This is visual-only; price/date values are untouched.
+    ax.tick_params(axis="x", colors=COLORS["text"], labelcolor=COLORS["text"])
+    ax.tick_params(axis="y", colors=COLORS["text"], labelcolor=COLORS["text"])
+    ax.xaxis.label.set_color(COLORS["text"])
+    ax.yaxis.label.set_color(COLORS["text"])
+    for _lbl in ax.get_xticklabels():
+        _lbl.set_color(COLORS["text"])
+    for _lbl in ax.get_yticklabels():
+        _lbl.set_color(COLORS["text"])
+
     # --- Label collision avoidance -----------------------------------
     # Several independent pieces of text get placed near the right edge of
     # the chart (trendline label, pattern trigger/neckline label, 4H level
@@ -1407,6 +1418,17 @@ def generate_trendline_educational_map(
         except (TypeError,ValueError): pass
 
     ax.set_title(title, color="#f8fafc", fontsize=12.5, fontweight="bold", pad=10)
+
+    # Repeat the axis contrast pass immediately before rendering so no later
+    # Matplotlib/mplfinance operation can revert the labels to black.
+    ax.tick_params(axis="x", colors=COLORS["text"], labelcolor=COLORS["text"])
+    ax.tick_params(axis="y", colors=COLORS["text"], labelcolor=COLORS["text"])
+    ax.xaxis.label.set_color(COLORS["text"])
+    ax.yaxis.label.set_color(COLORS["text"])
+    for _lbl in ax.get_xticklabels():
+        _lbl.set_color(COLORS["text"])
+    for _lbl in ax.get_yticklabels():
+        _lbl.set_color(COLORS["text"])
 
     img_buf = io.BytesIO()
     fig.savefig(img_buf, dpi=190, bbox_inches="tight", facecolor=fig.get_facecolor())

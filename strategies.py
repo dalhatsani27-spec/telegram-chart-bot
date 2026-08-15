@@ -1641,6 +1641,35 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
                 reasons.append(touch_note)
                 breakout_grade = brk
 
+    # Dual-rail breakout detection: when both rising support and falling
+    # resistance exist, inspect BOTH rails before the lifecycle/report block.
+    # The previous logic only graded a breakout inside the single-rail branch,
+    # so a visible close below rising support could still be reported as
+    # NOT BROKEN when the two rails were both present.
+    if support and resistance:
+        close_now = float(df["Close"].iloc[-1])
+        support_now = float(support["y_end"])
+        resistance_now = float(resistance["y_end"])
+
+        if close_now < support_now:
+            primary = support
+            family_kind = "ascending"
+            breakout_grade = _grade_breakout(df, support, "support_break_down", n)
+            direction = "SELL"
+            reasons.append(
+                f"BREAK below rising support — {breakout_grade['penetration_atr']} ATR, "
+                f"{breakout_grade['consecutive_closes']} close(s), body {breakout_grade['body_ratio']}"
+            )
+        elif close_now > resistance_now:
+            primary = resistance
+            family_kind = "descending"
+            breakout_grade = _grade_breakout(df, resistance, "resistance_break_up", n)
+            direction = "BUY"
+            reasons.append(
+                f"BREAK above falling resistance — {breakout_grade['penetration_atr']} ATR, "
+                f"{breakout_grade['consecutive_closes']} close(s), body {breakout_grade['body_ratio']}"
+            )
+
     # Trendline lifecycle: intact -> break -> retest (or fakeout).
     # Keep the line visible after a break so the chart can show the exact
     # break/retest geometry rather than deleting the evidence.
