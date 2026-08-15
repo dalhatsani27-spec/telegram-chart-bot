@@ -489,6 +489,11 @@ def generate_trendline_map(
     if addplots:
         mpf_kwargs["addplot"] = addplots
     mpf.plot(chart_df, **mpf_kwargs)
+
+    # Keep the chart axes readable on the dark background.  Do not add or
+    # change any price/date data; this only changes the tick label appearance.
+    ax.tick_params(axis="x", colors=COLORS["text"], labelcolor=COLORS["text"])
+    ax.tick_params(axis="y", colors=COLORS["text"], labelcolor=COLORS["text"])
     ax.set_ylim(price_min - padding, price_max + padding)
 
     # --- ALWAYS map pivot points (structure anchors) ---
