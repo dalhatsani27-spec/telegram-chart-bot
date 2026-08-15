@@ -745,6 +745,57 @@ def _sr_setup_confidence(df: pd.DataFrame, horizontal_levels: List[Dict], close:
     return {"confidence": confidence, "level": best, "bias": bias, "distance_atr": round(dist_atr, 2)}
 
 
+def _pattern_uses_trendline_geometry(sp: Optional[Dict], pv: Optional[Dict],
+                                      primary_line: Optional[Dict],
+                                      index_tol: int = 2, price_tol_frac: float = 0.01) -> bool:
+    """
+    A trendline is a plain structural read: a rising support or falling
+    resistance connecting swings. A classic chart pattern (Head & Shoulders,
+    Double Top, Wedge, Triangle...) is a *named formation* -- and several of
+    them are literally built out of trendline rails (an H&S's
+    shoulder-to-shoulder/neckline slope, a wedge's converging upper/lower
+    rails). Drawing that rail on the chart doesn't make the setup a
+    "trendline setup" -- it's the pattern's own skeleton.
+
+    This returns True when the "TRENDLINE" score being computed is really
+    just re-describing the same rail the detected pattern already accounts
+    for, so the caller can stop letting it compete as an independent setup
+    and inflate the report with e.g. "TRENDLINE 63%" while the chart is
+    unambiguously showing a Head and Shoulders.
+
+    Two ways this happens:
+    1. A wedge/triangle (pattern_visual) IS two trendlines by definition --
+       always counts as pattern geometry, never an independent trendline.
+    2. A classic pattern's (scanned_pattern) key points literally sit on
+       the primary trendline's own two anchor points (e.g. the rail runs
+       Head -> Right Shoulder, which are also two of the pattern's own
+       labelled points) -- same rail, described twice.
+    """
+    if pv:
+        return True
+    if not sp or not primary_line:
+        return False
+    kps = sp.get("key_points") or []
+    if len(kps) < 2:
+        return False
+    lx0, ly0 = primary_line.get("x0"), primary_line.get("y0")
+    lx1, ly1 = primary_line.get("x1"), primary_line.get("y1")
+    if None in (lx0, ly0, lx1, ly1):
+        return False
+    anchors = [(lx0, ly0), (lx1, ly1)]
+    matches = 0
+    for ax_, ay in anchors:
+        for kp in kps:
+            try:
+                kx, ky = float(kp[0]), float(kp[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if abs(kx - ax_) <= index_tol and abs(ky - ay) <= max(abs(ay), 1e-9) * price_tol_frac:
+                matches += 1
+                break
+    return matches >= 2
+
+
 def select_best_setup(family: Dict[str, Any], df: pd.DataFrame) -> Dict[str, Any]:
     """
     Scans the SAME analysis (trendline geometry, pattern geometry, S/R
@@ -776,18 +827,30 @@ def select_best_setup(family: Dict[str, Any], df: pd.DataFrame) -> Dict[str, Any
     sr_result = _sr_setup_confidence(df, family.get("horizontal_levels") or [], close, atr_now)
     sr_conf = sr_result["confidence"] if sr_result else 0
 
+    # A trendline rail that's actually just the detected pattern's own
+    # skeleton (e.g. this H&S's Head -> Right Shoulder slope) is not a
+    # second, independent setup -- score it for display, but don't let it
+    # outrank the pattern it's part of.
+    sp_for_check = family.get("scanned_pattern")
+    primary_line = (family.get("downtrends") or [None])[0] or (family.get("uptrends") or [None])[0]
+    trendline_is_pattern_rail = _pattern_uses_trendline_geometry(sp_for_check, pv, primary_line)
+
     scores = {"TRENDLINE": trendline_conf, "PATTERN": pattern_conf, "S/R": sr_conf}
-    winner = max(scores, key=scores.get)
+    eligible = dict(scores)
+    if trendline_is_pattern_rail and pattern_conf > 0:
+        eligible["TRENDLINE"] = -1
+    winner = max(eligible, key=eligible.get)
     # Don't dress up a genuinely setup-less chart as "TRENDLINE (0%)" --
     # if nothing cleared a basic bar, say so plainly instead of implying
     # a setup is being tracked when none exists.
-    if scores[winner] < 30:
+    if eligible[winner] < 30:
         winner = "NONE"
 
     family["setup_scores"] = scores
     family["active_setup"] = winner
     family["active_setup_confidence"] = scores.get(winner, 0)
     family["pattern_label"] = pattern_label
+    family["trendline_is_pattern_rail"] = trendline_is_pattern_rail
     if winner == "S/R" and sr_result:
         family["sr_setup"] = sr_result
         family["active_pattern"] = "sr"  # drives chart drawing selection
@@ -2432,7 +2495,10 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
     ]
     for name in ("TRENDLINE", "PATTERN", "S/R"):
         marker = "👉" if name == active_setup else "  "
-        lines.append(f"{marker} {name}: {setup_scores.get(name, 0)}%")
+        suffix = ""
+        if name == "TRENDLINE" and family.get("trendline_is_pattern_rail"):
+            suffix = "  (this rail IS the pattern below, not a separate setup)"
+        lines.append(f"{marker} {name}: {setup_scores.get(name, 0)}%{suffix}")
     if active_setup == "NONE":
         lines.append("BEST SETUP: NONE — no setup cleared minimum confidence, market is choppy/ranging")
     else:
