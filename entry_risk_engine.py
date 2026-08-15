@@ -132,6 +132,7 @@ def _build_ticket(family: Dict[str, Any], checks: Dict[str, Any]) -> Optional[Di
         "risk_percent": DEFAULT_RISK_PERCENT,
         "rr": DEFAULT_RR,
         "rr_tp2": DEFAULT_RR2,
+        "confirmed": True,
         "entry_reason": checks["candle"]["detail"],
         "break_index": retest.get("break_index"),
         "retest_index": retest.get("retest_index"),
@@ -151,8 +152,6 @@ def evaluate_trendline_entry(family: Dict[str, Any]) -> Dict[str, Any]:
         and breakout.get("strength") == "confirmed"
         and retest.get("status") == "BREAK_RETEST_CONFIRMED"
     )
-    # The retest engine is the authoritative lifecycle state. Keep the
-    # explicit check separate so the report can show exactly what is missing.
     retest_ok = retest.get("status") == "BREAK_RETEST_CONFIRMED"
     candle_ok, candle_name = _directional_candle_confirmation(df, direction)
 
