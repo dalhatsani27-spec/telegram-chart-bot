@@ -480,6 +480,90 @@ def _find_sma_reclaim_anchor(pivots: List[Dict], sma: Optional[pd.Series], df: p
     return None
 
 
+
+def _find_impulse_anchor_pair(pivots: List[Dict], df: pd.DataFrame, kind: str) -> Optional[Tuple[Dict, Dict]]:
+    """Select the hand-drawn structural trendline anchors.
+
+    BUY/uptrend: last confirmed HL before a meaningful bullish impulse
+    (HL -> HH), then the latest confirmed HL after that impulse.
+
+    SELL/downtrend: last confirmed HH before a meaningful bearish impulse
+    (HH -> LL), then the latest confirmed LH after that impulse.
+    """
+    if df is None or len(pivots) < 4:
+        return None
+
+    ordered = sorted(pivots, key=lambda p: p.get('index', 0))
+    atr = pd.to_numeric(df['ATR'], errors='coerce').to_numpy(float) if 'ATR' in df.columns else None
+
+    def _atr_at(i: int) -> float:
+        if atr is not None and 0 <= i < len(atr) and np.isfinite(atr[i]) and atr[i] > 0:
+            return float(atr[i])
+        return max(float(df['High'].iloc[i] - df['Low'].iloc[i]), 1e-9)
+
+    lows = [p for p in ordered if p.get('type') == 'low']
+    highs = [p for p in ordered if p.get('type') == 'high']
+
+    if kind == 'support':
+        if len(lows) < 3 or len(highs) < 2:
+            return None
+        candidates = []
+        for i in range(1, len(lows) - 1):
+            anchor = lows[i]
+            if float(anchor['price']) <= float(lows[i - 1]['price']):
+                continue
+            next_highs = [h for h in highs if h['index'] > anchor['index']]
+            if not next_highs:
+                continue
+            impulse_high = next_highs[0]
+            prior_highs = [h for h in highs if h['index'] < impulse_high['index']]
+            if not prior_highs or float(impulse_high['price']) <= float(prior_highs[-1]['price']):
+                continue
+            move = float(impulse_high['price']) - float(anchor['price'])
+            impulse_atr = move / max((_atr_at(anchor['index']) + _atr_at(impulse_high['index'])) / 2.0, 1e-9)
+            if impulse_atr < 1.25:
+                continue
+            candidates.append((impulse_high['index'], impulse_atr, anchor))
+        if not candidates:
+            return None
+        _, _, anchor = max(candidates, key=lambda x: (x[0], x[1]))
+        endpoints = [p for p in lows if p['index'] > anchor['index'] and float(p['price']) > float(anchor['price'])]
+        if not endpoints:
+            return None
+        endpoint = endpoints[-1]
+        return (anchor, endpoint) if endpoint['index'] - anchor['index'] >= 4 else None
+
+    if kind == 'resistance':
+        if len(highs) < 3 or len(lows) < 2:
+            return None
+        candidates = []
+        for i in range(1, len(highs) - 1):
+            anchor = highs[i]
+            if float(anchor['price']) >= float(highs[i - 1]['price']):
+                continue
+            next_lows = [l for l in lows if l['index'] > anchor['index']]
+            if not next_lows:
+                continue
+            impulse_low = next_lows[0]
+            prior_lows = [l for l in lows if l['index'] < impulse_low['index']]
+            if not prior_lows or float(impulse_low['price']) >= float(prior_lows[-1]['price']):
+                continue
+            move = float(anchor['price']) - float(impulse_low['price'])
+            impulse_atr = move / max((_atr_at(anchor['index']) + _atr_at(impulse_low['index'])) / 2.0, 1e-9)
+            if impulse_atr < 1.25:
+                continue
+            candidates.append((impulse_low['index'], impulse_atr, anchor))
+        if not candidates:
+            return None
+        _, _, anchor = max(candidates, key=lambda x: (x[0], x[1]))
+        endpoints = [p for p in highs if p['index'] > anchor['index'] and float(p['price']) < float(anchor['price'])]
+        if not endpoints:
+            return None
+        endpoint = endpoints[-1]
+        return (anchor, endpoint) if endpoint['index'] - anchor['index'] >= 4 else None
+
+    return None
+
 def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame,
                   sma: Optional[pd.Series] = None) -> Optional[Dict]:
     """
@@ -496,23 +580,25 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame,
             return None
         pts = pts[-2:]
 
-    # Prefer anchoring the line at the pivot that actually started the
-    # current leg -- the low/high price broke away from and then closed
-    # back through the 20 SMA. This beats picking whichever pivot merely
-    # maximizes span: a trendline that starts at the SMA-reclaim point is
-    # the one a trader would actually draw by hand, and it gives a single
-    # unambiguous line to watch for a break/flip instead of several
-    # candidate spans quietly competing underneath.
-    sma_anchor = _find_sma_reclaim_anchor(pivots, sma, df, kind)
-    if sma_anchor is not None:
-        later_pts = [p for p in pts if p["index"] > sma_anchor["index"]]
-        b = later_pts[-1] if later_pts else pts[-1]
-        if b["index"] > sma_anchor["index"]:
-            a = sma_anchor
+    # Hand-drawn structural rule: anchor at the last HL/HH that launched
+    # the current impulse, then connect it to the latest same-side pivot.
+    # The older SMA-reclaim method remains only as a fallback when the
+    # structural sequence is not mature enough.
+    impulse_pair = _find_impulse_anchor_pair(pivots, df, kind)
+    if impulse_pair is not None:
+        a, b = impulse_pair
+        sma_anchor = None
+    else:
+        sma_anchor = _find_sma_reclaim_anchor(pivots, sma, df, kind)
+        if sma_anchor is not None:
+            later_pts = [p for p in pts if p["index"] > sma_anchor["index"]]
+            b = later_pts[-1] if later_pts else pts[-1]
+            if b["index"] > sma_anchor["index"]:
+                a = sma_anchor
+            else:
+                a = None
         else:
             a = None
-    else:
-        a = None
 
     if a is None:
         # Prefer the longest clean span in the current structural sequence.
@@ -564,7 +650,7 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame,
         "quality": quality,
         "kind": kind,
         "bars_since_last_touch": n - 1 - b["index"],
-        "method": "sma_reclaim" if (sma_anchor is not None and a is sma_anchor) else "classic_sequential",
+        "method": "impulse_structural" if impulse_pair is not None else ("sma_reclaim" if (sma_anchor is not None and a is sma_anchor) else "classic_sequential"),
     }
 
 
