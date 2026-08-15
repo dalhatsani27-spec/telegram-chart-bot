@@ -440,7 +440,48 @@ def _get_sequential_pivots(pivots: List[Dict], kind: str, min_bars: int = 5) -> 
     return cleaned
 
 
-def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Optional[Dict]:
+def _find_sma_reclaim_anchor(pivots: List[Dict], sma: Optional[pd.Series], df: pd.DataFrame,
+                              kind: str, lookahead: int = 25) -> Optional[Dict]:
+    """
+    Find the swing low/high that actually STARTED the current trend leg:
+    the pivot low that price broke away from and then closed back above
+    the 20 SMA (uptrend), or the pivot high it closed back below (downtrend).
+
+    Anchoring the trendline here instead of on an arbitrary older swing
+    gives a clean line that begins exactly where the SMA (a lagging
+    indicator) finally confirmed the move -- and it means a close back
+    through that SAME trendline later is a genuine reason to start
+    hunting for a bias flip, not just noise.
+
+    Scans from the most recent pivot backward so we land on the anchor
+    that defines the CURRENT leg, not a stale one from an earlier cycle.
+    """
+    if sma is None or df is None or sma.dropna().empty:
+        return None
+    want_type = "low" if kind == "support" else "high"
+    candidates = sorted([p for p in pivots if p["type"] == want_type], key=lambda p: p["index"])
+    if not candidates:
+        return None
+
+    close = pd.to_numeric(df["Close"], errors="coerce").to_numpy(float)
+    sma_vals = sma.to_numpy(float)
+    n = len(close)
+
+    for p in reversed(candidates):
+        idx = p["index"]
+        end = min(idx + lookahead, n - 1)
+        for j in range(idx + 1, end + 1):
+            if not (np.isfinite(close[j]) and np.isfinite(sma_vals[j])):
+                continue
+            if kind == "support" and close[j] > sma_vals[j]:
+                return p
+            if kind == "resistance" and close[j] < sma_vals[j]:
+                return p
+    return None
+
+
+def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame,
+                  sma: Optional[pd.Series] = None) -> Optional[Dict]:
     """
     Classic trendline: connect sequential Higher Lows (support) or
     Lower Highs (resistance). Filters are kept light so the line is
@@ -455,24 +496,43 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Opt
             return None
         pts = pts[-2:]
 
-    # Prefer the longest clean span in the current structural sequence.
-    # This is deliberately different from the local pattern engine: the
-    # primary trendline should describe the broader move, not just the last
-    # two pivots. Keep it bounded to the recent structural chain so an old
-    # regime does not dominate a newly changed market.
-    max_chain = pts[-6:]
-    span_candidates = []
-    for i in range(len(max_chain) - 1):
-        for j in range(i + 1, len(max_chain)):
-            a0, b0 = max_chain[i], max_chain[j]
-            span = b0["index"] - a0["index"]
-            if span < 12:
-                continue
-            span_candidates.append((span, a0, b0))
-    if span_candidates:
-        _, a, b = max(span_candidates, key=lambda z: (z[0], z[2]["index"]))
+    # Prefer anchoring the line at the pivot that actually started the
+    # current leg -- the low/high price broke away from and then closed
+    # back through the 20 SMA. This beats picking whichever pivot merely
+    # maximizes span: a trendline that starts at the SMA-reclaim point is
+    # the one a trader would actually draw by hand, and it gives a single
+    # unambiguous line to watch for a break/flip instead of several
+    # candidate spans quietly competing underneath.
+    sma_anchor = _find_sma_reclaim_anchor(pivots, sma, df, kind)
+    if sma_anchor is not None:
+        later_pts = [p for p in pts if p["index"] > sma_anchor["index"]]
+        b = later_pts[-1] if later_pts else pts[-1]
+        if b["index"] > sma_anchor["index"]:
+            a = sma_anchor
+        else:
+            a = None
     else:
-        a, b = pts[-2], pts[-1]
+        a = None
+
+    if a is None:
+        # Prefer the longest clean span in the current structural sequence.
+        # This is deliberately different from the local pattern engine: the
+        # primary trendline should describe the broader move, not just the last
+        # two pivots. Keep it bounded to the recent structural chain so an old
+        # regime does not dominate a newly changed market.
+        max_chain = pts[-6:]
+        span_candidates = []
+        for i in range(len(max_chain) - 1):
+            for j in range(i + 1, len(max_chain)):
+                a0, b0 = max_chain[i], max_chain[j]
+                span = b0["index"] - a0["index"]
+                if span < 12:
+                    continue
+                span_candidates.append((span, a0, b0))
+        if span_candidates:
+            _, a, b = max(span_candidates, key=lambda z: (z[0], z[2]["index"]))
+        else:
+            a, b = pts[-2], pts[-1]
 
     if b["index"] <= a["index"]:
         return None
@@ -504,7 +564,7 @@ def _fit_primary(pivots: List[Dict], kind: str, n: int, df: pd.DataFrame) -> Opt
         "quality": quality,
         "kind": kind,
         "bars_since_last_touch": n - 1 - b["index"],
-        "method": "classic_sequential",
+        "method": "sma_reclaim" if (sma_anchor is not None and a is sma_anchor) else "classic_sequential",
     }
 
 
@@ -1326,8 +1386,13 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     if len(recent_pivots) < 3:
         recent_pivots = pivots
 
-    support = _fit_primary(recent_pivots, "support", n, df)
-    resistance = _fit_primary(recent_pivots, "resistance", n, df)
+    # Computed early (not just for the later confluence/color-state display)
+    # so the SMA-reclaim pivot can anchor the trendline itself -- see
+    # _find_sma_reclaim_anchor.
+    sma20_early = _sma20_series(df, period=20, applied_price="median")
+
+    support = _fit_primary(recent_pivots, "support", n, df, sma=sma20_early)
+    resistance = _fit_primary(recent_pivots, "resistance", n, df, sma=sma20_early)
 
     # Reject a candidate diagonal line whose actual price movement across
     # its own span is too shallow to be a meaningful trend -- e.g. two
@@ -1712,7 +1777,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # trendline. Computed here so both callers (run_trendline_analysis and
     # execution_engine's auto-fallback) get it for free.
     atr_now_sma = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
-    sma20 = _sma20_series(df, period=20, applied_price="median")
+    sma20 = sma20_early
     sma_dir = _sma_direction(sma20, atr_now=atr_now_sma)
     sma_last = float(sma20.dropna().iloc[-1]) if not sma20.dropna().empty else None
     primary_now = primary.get("y_end") if primary else None
