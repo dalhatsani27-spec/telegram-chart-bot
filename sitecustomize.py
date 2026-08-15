@@ -45,37 +45,23 @@ def _structural_impulse_anchor_pair(pivots, df, kind):
             return 1e-9
 
     if kind == "support":
-        # Only completed sequences ending at the latest confirmed structural
-        # low are eligible. This makes the current pivot the line endpoint.
         current = lows[-1]
         candidates = []
-
         for i in range(1, len(lows) - 1):
             anchor = lows[i]
             previous_low = lows[i - 1]
-
-            # Anchor must genuinely be a Higher Low.
             if float(anchor["price"]) <= float(previous_low["price"]):
                 continue
-
-            # The impulse must be the first meaningful HH leg launched from
-            # this HL, not a later arbitrary high.
             highs_after_anchor = [h for h in highs if h["index"] > anchor["index"]]
             if not highs_after_anchor:
                 continue
             impulse_high = highs_after_anchor[0]
-
             highs_before_impulse = [h for h in highs if h["index"] < impulse_high["index"]]
             if not highs_before_impulse:
                 continue
             previous_high = highs_before_impulse[-1]
-
-            # Impulse must create a Higher High.
             if float(impulse_high["price"]) <= float(previous_high["price"]):
                 continue
-
-            # The endpoint must be the structural retracement low after that
-            # impulse and must remain a Higher Low relative to the anchor.
             lows_after_impulse = [l for l in lows if l["index"] > impulse_high["index"]]
             if not lows_after_impulse:
                 continue
@@ -84,51 +70,35 @@ def _structural_impulse_anchor_pair(pivots, df, kind):
                 continue
             if float(endpoint["price"]) <= float(anchor["price"]):
                 continue
-
             move = float(impulse_high["price"]) - float(anchor["price"])
-            reference_atr = max(
-                (atr_at(anchor["index"]) + atr_at(impulse_high["index"])) / 2.0,
-                1e-9,
-            )
+            reference_atr = max((atr_at(anchor["index"]) + atr_at(impulse_high["index"])) / 2.0, 1e-9)
             impulse_atr = move / reference_atr
             if impulse_atr < 1.25:
                 continue
-
-            # Prefer the most recent completed impulse; strength breaks ties.
             candidates.append((endpoint["index"], impulse_high["index"], impulse_atr, anchor, endpoint))
-
         if not candidates:
             return None
         _, _, _, anchor, endpoint = max(candidates, key=lambda x: (x[0], x[1], x[2]))
         return anchor, endpoint
 
     if kind == "resistance":
-        # Mirror image for bearish structure: LH -> LL impulse -> current LH.
         current = highs[-1]
         candidates = []
-
         for i in range(1, len(highs) - 1):
             anchor = highs[i]
             previous_high = highs[i - 1]
-
-            # Anchor must genuinely be a Lower High.
             if float(anchor["price"]) >= float(previous_high["price"]):
                 continue
-
             lows_after_anchor = [l for l in lows if l["index"] > anchor["index"]]
             if not lows_after_anchor:
                 continue
             impulse_low = lows_after_anchor[0]
-
             lows_before_impulse = [l for l in lows if l["index"] < impulse_low["index"]]
             if not lows_before_impulse:
                 continue
             previous_low = lows_before_impulse[-1]
-
-            # Impulse must create a Lower Low.
             if float(impulse_low["price"]) >= float(previous_low["price"]):
                 continue
-
             highs_after_impulse = [h for h in highs if h["index"] > impulse_low["index"]]
             if not highs_after_impulse:
                 continue
@@ -137,18 +107,12 @@ def _structural_impulse_anchor_pair(pivots, df, kind):
                 continue
             if float(endpoint["price"]) >= float(anchor["price"]):
                 continue
-
             move = float(anchor["price"]) - float(impulse_low["price"])
-            reference_atr = max(
-                (atr_at(anchor["index"]) + atr_at(impulse_low["index"])) / 2.0,
-                1e-9,
-            )
+            reference_atr = max((atr_at(anchor["index"]) + atr_at(impulse_low["index"])) / 2.0, 1e-9)
             impulse_atr = move / reference_atr
             if impulse_atr < 1.25:
                 continue
-
             candidates.append((endpoint["index"], impulse_low["index"], impulse_atr, anchor, endpoint))
-
         if not candidates:
             return None
         _, _, _, anchor, endpoint = max(candidates, key=lambda x: (x[0], x[1], x[2]))
@@ -164,9 +128,6 @@ def _patch_trendline_master():
         print(f"[trendline_master] strategies not ready: {exc!r}")
         return
 
-    # Patch the anchor selector BEFORE build_trendline_family runs. The
-    # existing renderer and breakout engine then receive the corrected line
-    # naturally, without rewriting the chart or strategy code.
     strategies._find_impulse_anchor_pair = _structural_impulse_anchor_pair
     print("[trendline_master] impulse-leg structural anchor selector installed")
 
@@ -183,8 +144,6 @@ def _patch_trendline_master():
         supports = family.get("uptrends") or []
         resistances = family.get("downtrends") or []
 
-        # SMA is a compass only: it selects which structural rail is the
-        # directional/master rail. It is never used as an entry trigger.
         if sma_dir == "RISING":
             master = supports[0] if supports else None
             master_role = "support"
@@ -206,14 +165,11 @@ def _patch_trendline_master():
 
         n = len(df)
         close = float(df["Close"].iloc[-1])
-        line_now = strategies._line_value(
-            master["x0"], master["y0"], master["x1"], master["y1"], n - 1
-        )
+        line_now = strategies._line_value(master["x0"], master["y0"], master["x1"], master["y1"], n - 1)
 
         breakout = None
         retest = {"status": "INTACT", "note": "No confirmed trendline break."}
         break_kind = None
-
         if master_role == "support" and close < line_now:
             break_kind = "support_break_down"
         elif master_role == "resistance" and close > line_now:
@@ -223,8 +179,6 @@ def _patch_trendline_master():
             breakout = strategies._grade_breakout(df, master, break_kind, n)
             retest = strategies._trendline_retest_state(df, master, breakout, break_kind)
 
-        # The trendline is the decision-maker. A confirmed structural break
-        # flips the bias; the SMA is not allowed to veto that flip.
         direction = base_bias
         decision = "INTACT"
         strength = int(family.get("strength") or 40)
@@ -238,11 +192,7 @@ def _patch_trendline_master():
             direction = "SELL" if master_role == "support" else "BUY"
             decision = "BREAK CONFIRMED — BIAS FLIPPED"
             strength = max(strength, 68)
-            reasons.append(
-                f"🔄 MASTER TRENDLINE BREAK: {master_role} broken with "
-                f"{breakout['consecutive_closes']} close(s), "
-                f"{breakout['penetration_atr']} ATR penetration. Bias flipped to {direction}."
-            )
+            reasons.append(f"🔄 MASTER TRENDLINE BREAK: {master_role} broken with {breakout['consecutive_closes']} close(s), {breakout['penetration_atr']} ATR penetration. Bias flipped to {direction}.")
         elif breakout and breakout.get("strength") == "developing":
             direction = base_bias
             decision = "BREAK DEVELOPING — WAIT FOR CONFIRMATION"
@@ -257,16 +207,12 @@ def _patch_trendline_master():
             decision = "INTACT — BEARISH STRUCTURE"
             reasons.append("🔴 SMA direction: FALLING → red falling-resistance is the master trendline.")
 
-        # Replace only the decision layer. Keep both rails, patterns, zones,
-        # candles, and existing chart geometry untouched.
         family["direction"] = direction
         family["strength"] = max(0, min(100, int(strength)))
         family["family_kind"] = "ascending" if master_role == "support" else "descending"
         family["primary_quality"] = master.get("quality")
         family["primary_touches"] = master.get("touches", 0)
-        family["bias_touch_points"] = strategies._touch_points(
-            df, int(master["x0"]), master["y0"], int(master["x1"]), master["y1"], master_role
-        )
+        family["bias_touch_points"] = strategies._touch_points(df, int(master["x0"]), master["y0"], int(master["x1"]), master["y1"], master_role)
         family["master_trendline"] = master
         family["master_role"] = master_role
         family["master_decision"] = decision
@@ -277,15 +223,11 @@ def _patch_trendline_master():
         family["trendline_color_state"] = "BULLISH" if direction == "BUY" else "BEARISH" if direction == "SELL" else "NEUTRAL"
         family["reasons"] = reasons
 
-        # Re-evaluate confirmation using the master decision. This remains
-        # an entry gate; SMA still has no entry role.
         if direction in ("BUY", "SELL") and hasattr(strategies, "_entry_confirmation"):
             family["entry_rules"] = strategies._entry_confirmation(df, direction)
-
         if hasattr(strategies, "_measured_move_projections"):
             family["projections"] = strategies._measured_move_projections(df, family.get("pivots") or [], direction)
 
-        # A confirmed break is a transition until the retest confirms it.
         family["prefer_retest_entry"] = retest.get("status") == "BREAK_CONFIRMED"
         family["master_entry_ready"] = retest.get("status") == "BREAK_RETEST_CONFIRMED"
         if family["master_entry_ready"]:
@@ -301,4 +243,123 @@ def _patch_trendline_master():
     print("[trendline_master] master decision adapter installed")
 
 
+def _patch_entry_risk_layer():
+    """Attach the final entry/risk gate without modifying chart geometry.
+
+    The existing strategy/chart code remains the source of truth for
+    trendlines, SMA direction, breakouts, retests, patterns and drawings.
+    This layer only consumes those results.
+    """
+    try:
+        import strategies
+        from entry_risk_engine import evaluate_trendline_entry
+    except Exception as exc:
+        print(f"[entry_risk] not installed: {exc!r}")
+        return
+
+    original_report = getattr(strategies, "format_trendline_report", None)
+    original_position = getattr(strategies, "build_position_container", None)
+    if original_report is None or original_position is None:
+        print("[entry_risk] required strategy functions not found")
+        return
+
+    def _evaluate_and_attach(family):
+        decision = evaluate_trendline_entry(family)
+        family["entry_decision"] = decision
+        family["entry_rules_final"] = decision["checks"]
+        family["entry_status_final"] = decision["status"]
+        return decision
+
+    def _position(family, *args, **kwargs):
+        # If the final layer has already evaluated this family, its result is
+        # authoritative. If not, evaluate it now so EA/background callers
+        # cannot accidentally receive a pre-final-gate ticket.
+        decision = family.get("entry_decision")
+        if decision is None and family.get("df") is not None and family.get("trendline_retest") is not None:
+            decision = _evaluate_and_attach(family)
+
+        if decision is not None:
+            if decision.get("entry_ready") and decision.get("ticket"):
+                return decision["ticket"]
+            # A Trendline analysis that has not passed all three checks must
+            # not create a trade ticket. Return None only for this isolated
+            # Trendline entry layer; chart geometry itself is untouched.
+            if family.get("trendline_retest") is not None:
+                return None
+
+        return original_position(family, *args, **kwargs)
+
+    def _report(family, symbol):
+        decision = _evaluate_and_attach(family)
+
+        # The legacy report's old 4-check gate is not the final authority.
+        # Feed it an equivalent confirmed 3/3 result only when our exact
+        # break + retest + candle gate is actually satisfied. This changes
+        # the decision text, not the chart/trendline engine.
+        if decision.get("entry_ready"):
+            checks = decision.get("checks") or {}
+            family["entry_rules"] = {
+                "checks": {
+                    "break": (True, checks["break"]["detail"]),
+                    "retest": (True, checks["retest"]["detail"]),
+                    "candle": (True, checks["candle"]["detail"]),
+                },
+                "passed": 3,
+                "required": 3,
+                "confirmed": True,
+            }
+        else:
+            # Keep the legacy details available for diagnostics, but make
+            # the report's final decision explicitly reflect our 3-check
+            # gate and prevent a false confirmed state.
+            family["entry_rules"] = {
+                "checks": {
+                    name: (item["passed"], item["detail"])
+                    for name, item in (decision.get("checks") or {}).items()
+                },
+                "passed": decision.get("passed", 0),
+                "required": 3,
+                "confirmed": False,
+            }
+
+        text = original_report(family, symbol)
+
+        # Add the exact final checklist after the legacy report so the user
+        # sees precisely what is preventing ENTER NOW, without changing any
+        # chart or strategy geometry.
+        lines = [
+            "",
+            "━━━━━━━━━━━━━━━━",
+            "🔐 FINAL ENTRY GATE",
+            f"1. Break confirmed: {'✅' if decision['checks']['break']['passed'] else '❌'}",
+            f"2. Retest confirmed: {'✅' if decision['checks']['retest']['passed'] else '❌'}",
+            f"3. Entry candle confirmed: {'✅' if decision['checks']['candle']['passed'] else '❌'}",
+        ]
+        if decision.get("entry_ready") and decision.get("ticket"):
+            t = decision["ticket"]
+            lines += [
+                "",
+                "🟢 ENTER NOW",
+                f"ENTRY: {t['entry']:.5f}",
+                f"SL: {t['sl']:.5f}",
+                f"TP: {t['tp1']:.5f}",
+                f"R:R: 1:{t['rr']:.1f}",
+                f"RISK: {t['risk_percent']:.2f}%",
+            ]
+        else:
+            missing = decision.get("missing") or []
+            labels = {"break": "confirmed trendline break", "retest": "confirmed retest/hold", "candle": "directional entry candle"}
+            lines += ["", "🔴 WAIT", "WAIT FOR:"]
+            for name in missing:
+                lines.append(f"• {labels.get(name, name)}")
+            lines.append(f"ENTRY CONFIRMATION: {decision.get('passed', 0)}/3")
+
+        return text + "\n" + "\n".join(lines)
+
+    strategies.build_position_container = _position
+    strategies.format_trendline_report = _report
+    print("[entry_risk] final 3-check Trendline entry gate installed")
+
+
 _patch_trendline_master()
+_patch_entry_risk_layer()
