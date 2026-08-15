@@ -1,0 +1,31 @@
+name: Show inferred pattern name
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch title
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('chart_engine.py'); s=p.read_text(encoding='utf-8')
+          old='''    elif family.get("active_pattern") and family.get("active_pattern") != "none":\n        pattern_name = str(family.get("active_pattern")).replace("_", " ").title()\n'''
+          new='''    elif family.get("active_pattern") and family.get("active_pattern") != "none":\n        pattern_name = str(family.get("active_pattern")).replace("_", " ").title()\n    elif family.get("visual_pattern_name"):\n        pattern_name = str(family.get("visual_pattern_name"))\n'''
+          if old not in s: raise SystemExit('pattern title block not found')
+          s=s.replace(old,new,1)
+          p.write_text(s,encoding='utf-8')
+      - name: Validate and commit
+        shell: bash
+        run: |
+          python -m py_compile chart_engine.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/workflows/name-inferred-pattern.yml
+          git add chart_engine.py .github/workflows/name-inferred-pattern.yml
+          git commit -m "Show inferred trendline pattern name"
+          git push
