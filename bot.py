@@ -20,8 +20,10 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 
 import market_data
 from market_analysis import direction_banner
-from chart_engine import generate_trendline_educational_map, generate_ote_map
+from chart_engine import generate_trendline_educational_map, generate_ote_map, generate_smc_map
 import strategies
+import smc_strategy
+from topdown_engine import get_topdown_bias
 import execution_engine as engine
 from execution_engine import state as ts_state
 
@@ -113,6 +115,7 @@ TELEGRAM_APP = None
 # Per-chat input state for the personal Watch Level flow.
 # A callback selects the market first; the next plain-text message is the price.
 _pending_price_watch = {}
+_pending_htf_context = set()
 
 ASSET_CONTAINER = {
     "Forex Majors": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD"],
@@ -150,8 +153,10 @@ def get_home_menu():
     strat_label = ts_state.strategy_label()
     keyboard = [
         [InlineKeyboardButton(f"🧠 STRATEGY: {strat_label}", callback_data="menu_strategy")],
-        [InlineKeyboardButton("📐  Trendline (4H→1H→30M)", callback_data="menu_trendline")],
+        [InlineKeyboardButton("📐  Trendline (Selected TF)", callback_data="menu_trendline")],
         [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],
+        [InlineKeyboardButton("🧠  SMC (selected TF)", callback_data="menu_smc")],
+        [InlineKeyboardButton("📍  HTF Context", callback_data="prompt_htf_context")],
         [InlineKeyboardButton("👁  Watch Price Level", callback_data="menu_price_watch"),
          InlineKeyboardButton("📋  My Watch Levels", callback_data="show_price_watches")],
         [InlineKeyboardButton("🔎  Custom Ticker", callback_data="prompt_custom_ticker")],
@@ -170,6 +175,9 @@ def get_strategy_menu():
         [InlineKeyboardButton(
             f"{'✅' if selected == engine.STRATEGY_OTE else '⚪'} OTE (62–79%)",
             callback_data="set_strategy|OTE")],
+        [InlineKeyboardButton(
+            f"{'✅' if selected == engine.STRATEGY_SMC else '⚪'} SMC (Structure/Liquidity)",
+            callback_data="set_strategy|SMC")],
         [InlineKeyboardButton("« Back", callback_data="menu_home")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -331,10 +339,15 @@ async def background_watchlist_scanner():
 
 
 async def send_trendline_analysis(context, chat_id, symbol):
-    """Trendline strategy: full 4H -> 1H -> 30M top-down cascade."""
+    """Trendline strategy: single selected timeframe. HTF context is
+    optional -- only included if the user separately fetched it via
+    the "HTF Context" button (stored on ts_state) in this session."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tf_code = ts_state.get_watch_timeframe()
+    tf_label = ts_state.watch_timeframe_label()
+    topdown = ts_state.get_last_htf_context(symbol)
     try:
-        family = strategies.run_trendline_analysis(symbol)
+        family = strategies.run_trendline_analysis(symbol, tf_code=tf_code, topdown=topdown)
         if family.get("error"):
             report = strategies.format_trendline_report(family, symbol)
             await context.bot.send_message(chat_id=chat_id, text=report)
@@ -351,7 +364,7 @@ async def send_trendline_analysis(context, chat_id, symbol):
                 chart_img = generate_trendline_educational_map(df_tl, symbol, chart_payload, title_suffix=ts_str)
                 await context.bot.send_photo(
                     chat_id=chat_id, photo=chart_img,
-                    caption=f"{symbol} Trendline (30M) | {ts_str}",
+                    caption=f"{symbol} Trendline ({tf_label}) | {ts_str}",
                 )
             else:
                 print(f"[send_trendline_analysis] {symbol}: no df in family, skipping chart. "
@@ -436,6 +449,55 @@ async def send_ote_analysis(context, chat_id, symbol):
         )
 
 
+async def send_smc_analysis(context, chat_id, symbol):
+    """SMC strategy: single selected timeframe (no fixed 4H/1H/30M cascade)."""
+    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tf_code = ts_state.get_watch_timeframe()
+    try:
+        analysis = smc_strategy.run_smc_analysis(symbol, tf_code=tf_code)
+        report = smc_strategy.format_smc_report(analysis)
+
+        if analysis.get("error"):
+            await context.bot.send_message(chat_id=chat_id, text=report)
+            await context.bot.send_message(chat_id=chat_id, text="Choose next action:", reply_markup=get_home_menu())
+            return
+
+        try:
+            df_smc = analysis.get("df")
+            if df_smc is not None and not getattr(df_smc, "empty", True):
+                chart_img = generate_smc_map(df_smc, symbol, analysis, title_suffix=ts_str)
+                await context.bot.send_photo(
+                    chat_id=chat_id, photo=chart_img,
+                    caption=f"{symbol} SMC ({analysis['timeframe_label']}) | {ts_str}",
+                )
+        except Exception:
+            print(f"[send_smc_analysis] chart generation failed for {symbol}:")
+            traceback.print_exc()
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ Chart failed to render for {symbol} (sending text analysis only). "
+                     f"Check server logs for the traceback.",
+            )
+
+        await context.bot.send_message(chat_id=chat_id, text=report)
+
+        if ts_state.get_mode() == engine.MODE_COPY_TRADE and analysis.get("entry_ready"):
+            ticket = smc_strategy.build_smc_ticket(analysis)
+            if ticket:
+                ticket_text = format_trade_ticket(
+                    symbol, "SMC", ticket["direction"], 0, ticket, reasons=None,
+                )
+                await context.bot.send_message(chat_id=chat_id, text=ticket_text)
+
+        await context.bot.send_message(chat_id=chat_id, text="Choose next action:", reply_markup=get_home_menu())
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"SMC analysis failed for '{symbol}': {str(e)}",
+            reply_markup=get_home_menu(),
+        )
+
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """A typed symbol is routed to whichever strategy is currently selected."""
     global primary_chat_id
@@ -444,6 +506,33 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     raw_text = (update.message.text or "").strip()
     if not raw_text:
         return
+    # Lightweight, on-demand HTF context fetch -- separate from the main
+    # per-analysis flow (see prior discussion: don't hammer MT5 with a
+    # forced 4H/1H/30M cascade on every run; this is opt-in, one symbol
+    # at a time, cached for reuse by Trendline/SMC until refreshed).
+    if chat_id in _pending_htf_context:
+        _pending_htf_context.discard(chat_id)
+        symbol = raw_text.upper()
+        await update.message.reply_text(f"Fetching HTF context for {symbol}...")
+        try:
+            topdown = get_topdown_bias(symbol)
+            ts_state.set_last_htf_context(symbol, topdown)
+            td_dir = topdown.get("direction", "NEUTRAL")
+            emoji = "🟢" if td_dir == "BUY" else ("🔴" if td_dir == "SELL" else "⚪")
+            location = topdown.get("location_4h") or topdown.get("premium_discount") or "N/A"
+            text = (
+                f"📍 HTF CONTEXT — {symbol}\n\n"
+                f"BIAS: {emoji} {topdown.get('bias_4h', 'NEUTRAL')}\n"
+                f"1H DIRECTION: {td_dir}\n"
+                f"LOCATION: {location}\n\n"
+                f"Cached — {symbol}'s next Trendline/SMC analysis will include this context "
+                f"until you refresh it again."
+            )
+            await update.message.reply_text(text, reply_markup=get_home_menu())
+        except Exception as e:
+            await update.message.reply_text(f"HTF context fetch failed for '{symbol}': {e}", reply_markup=get_home_menu())
+        return
+
     # If the user is entering a personal watch level, do not interpret it as a ticker.
     if chat_id in _pending_price_watch:
         symbol = _pending_price_watch.pop(chat_id)
@@ -463,8 +552,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     symbol = raw_text.upper()
     await update.message.reply_text(f"Running {ts_state.strategy_label()} analysis for {symbol}...")
-    if ts_state.get_selected_strategy() == engine.STRATEGY_OTE:
+    strat = ts_state.get_selected_strategy()
+    if strat == engine.STRATEGY_OTE:
         await send_ote_analysis(context, chat_id, symbol)
+    elif strat == engine.STRATEGY_SMC:
+        await send_smc_analysis(context, chat_id, symbol)
     else:
         await send_trendline_analysis(context, chat_id, symbol)
 
@@ -499,7 +591,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data.startswith("set_strategy|"):
         name = data.split("|", 1)[1]
-        mapping = {"TRENDLINE": engine.STRATEGY_TRENDLINE, "OTE": engine.STRATEGY_OTE}
+        mapping = {"TRENDLINE": engine.STRATEGY_TRENDLINE, "OTE": engine.STRATEGY_OTE, "SMC": engine.STRATEGY_SMC}
         if name in mapping:
             ts_state.set_selected_strategy(mapping[name])
         await query.edit_message_text(
@@ -549,6 +641,38 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(
             "Type any ticker for OTE analysis.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_ote")]])
+        )
+
+    # ---------------- Optional HTF context (on-demand only) ------------
+    elif data == "prompt_htf_context":
+        await query.edit_message_text(
+            "📍 Type a ticker to fetch HTF (4H/1H) context.\n\n"
+            "This is cached and folded into your next Trendline/SMC analysis "
+            "for that symbol -- it does not run automatically every time.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_home")]])
+        )
+        _pending_htf_context.add(chat_id)
+
+    # ---------------- SMC ----------------
+    elif data == "menu_smc":
+        extra = [InlineKeyboardButton("🔎 Custom Ticker", callback_data="prompt_custom_ticker_smc")]
+        await query.edit_message_text(
+            "🧠 SMC (Structure / Liquidity / OB+FVG, selected timeframe):",
+            reply_markup=get_category_keyboard("cat_smc", "menu_home", extra_row=extra),
+        )
+    elif data.startswith("cat_smc|"):
+        _, cat = data.split("|", 1)
+        await query.edit_message_text(f"{cat}:", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_smc", "menu_smc"))
+    elif data.startswith("run_smc|"):
+        _, symbol = data.split("|", 1)
+        ts_state.set_selected_strategy(engine.STRATEGY_SMC)
+        await query.edit_message_text(f"Running SMC analysis for {symbol}...")
+        await send_smc_analysis(context, chat_id, symbol)
+    elif data == "prompt_custom_ticker_smc":
+        ts_state.set_selected_strategy(engine.STRATEGY_SMC)
+        await query.edit_message_text(
+            "Type any ticker for SMC analysis.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_smc")]])
         )
 
     # ---------------- Personal price-watch levels ----------------

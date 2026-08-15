@@ -45,6 +45,92 @@ def _line_value(x0: float, y0: float, x1: float, y1: float, x: float) -> float:
     return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
 
 
+# ============================================================
+# 20 SMA (median price) -- direction + confluence with the primary
+# trendline. This is what lets the Trendline chart color itself
+# green while price/SMA agree bullish, and flip red the moment
+# price breaks below the SMA and starts forming a bear trend
+# (rather than the diagonal line always being drawn the same
+# fixed color regardless of state).
+# ============================================================
+
+def _sma20_series(df: pd.DataFrame, period: int = 20, applied_price: str = "median") -> pd.Series:
+    if applied_price == "median":
+        price = (df["High"] + df["Low"]) / 2.0
+    elif applied_price == "close":
+        price = df["Close"]
+    else:
+        price = (df["High"] + df["Low"] + df["Close"]) / 3.0
+    return price.rolling(period, min_periods=max(2, period // 2)).mean()
+
+
+def _sma_direction(sma: pd.Series, slope_lookback: int = 5, atr_now: Optional[float] = None) -> str:
+    valid = sma.dropna()
+    if len(valid) < slope_lookback + 1:
+        return "FLAT"
+    now = float(valid.iloc[-1])
+    prev = float(valid.iloc[-1 - slope_lookback])
+    threshold = (atr_now * 0.08) if atr_now else abs(now) * 0.0004
+    if now - prev > threshold:
+        return "RISING"
+    if prev - now > threshold:
+        return "FALLING"
+    return "FLAT"
+
+
+def _sma_trendline_confluence(sma_now: Optional[float], trendline_now: Optional[float],
+                               atr_now: Optional[float], sma_dir: str, family_kind: str) -> Dict[str, Any]:
+    if sma_now is None or trendline_now is None:
+        return {"relationship": "N/A", "distance_atr": None, "status": "NOT AVAILABLE", "strength": "N/A"}
+
+    distance = abs(sma_now - trendline_now)
+    distance_atr = round(distance / atr_now, 2) if atr_now else None
+
+    aligned = (sma_dir == "RISING" and family_kind == "ascending") or \
+              (sma_dir == "FALLING" and family_kind == "descending")
+    conflicting = (sma_dir == "RISING" and family_kind == "descending") or \
+                  (sma_dir == "FALLING" and family_kind == "ascending")
+    relationship = "ALIGNED" if aligned else ("CONFLICTING" if conflicting else "NEUTRAL")
+
+    if distance_atr is None:
+        status = "UNKNOWN"
+    elif distance_atr <= 0.10:
+        status = "TOUCHING"
+    elif distance_atr <= 0.5:
+        status = "NEAR"
+    else:
+        status = "FAR"
+
+    if aligned and status in ("TOUCHING", "NEAR"):
+        strength = "STRONG"
+    elif aligned:
+        strength = "MODERATE"
+    elif conflicting:
+        strength = "WEAK"
+    else:
+        strength = "MODERATE"
+
+    return {"relationship": relationship, "distance_atr": distance_atr, "status": status, "strength": strength}
+
+
+def _trendline_color_state(direction: str, sma_dir: str) -> str:
+    """
+    Dynamic trend-state color for the drawn trendline (chart_engine reads
+    this): GREEN while price/SMA support a bullish read, RED the moment
+    price/SMA confirm bearish, WHITE/grey when neutral or conflicting.
+    """
+    if direction == "BUY" and sma_dir != "FALLING":
+        return "BULLISH"
+    if direction == "SELL" and sma_dir != "RISING":
+        return "BEARISH"
+    if direction == "NEUTRAL":
+        if sma_dir == "RISING":
+            return "BULLISH"
+        if sma_dir == "FALLING":
+            return "BEARISH"
+    return "NEUTRAL"
+
+
 def _count_touches(df: pd.DataFrame, x0: int, y0: float, x1: int, y1: float,
                    kind: str, tol_atr: float = 0.35) -> int:
     if df is None or len(df) < 5:
@@ -508,6 +594,121 @@ def _detect_converging_wedge(pivots: List[Dict], df: pd.DataFrame, n: int) -> Op
         "lower": lower, "upper": upper,
         "gap_start": round(gap_start, 5), "gap_end": round(gap_end, 5),
         "apex_index": apex_x,
+    }
+
+
+def _rail_fit_quality(df: pd.DataFrame, line: Dict, kind: str, n: int) -> int:
+    """
+    0-100 goodness-of-fit for a rail across ALL its actual touches (not just
+    the 2 anchor points that defined it) -- how tightly the wicks hug the
+    line, in ATR terms. This is what the sample report's "Fit quality: 94%"
+    represents.
+    """
+    pts = _touch_points(df, int(line["x0"]), line["y0"], int(line["x1"]), line["y1"], kind, tol_atr=0.6)
+    if len(pts) < 2:
+        return 60  # only the 2 defining anchors -- can't score fit, assume moderate
+    atr_col = df["ATR"].values if "ATR" in df.columns else (df["High"] - df["Low"]).values
+    devs = []
+    for p in pts:
+        lv = _line_value(line["x0"], line["y0"], line["x1"], line["y1"], p["index"])
+        a = float(atr_col[p["index"]]) if p["index"] < len(atr_col) and atr_col[p["index"]] > 0 else abs(p["price"]) * 0.002
+        devs.append(abs(p["price"] - lv) / max(a, 1e-9))
+    avg_dev = sum(devs) / len(devs)
+    # avg_dev of 0 ATR -> 100%, 0.6+ ATR -> floor near 40%
+    return max(40, min(100, int(round(100 - avg_dev * 100))))
+
+
+def _slope_word(slope: float, atr_now: Optional[float]) -> str:
+    threshold = (atr_now * 0.02) if atr_now else 1e-6
+    if slope > threshold:
+        return "rising"
+    if slope < -threshold:
+        return "falling"
+    return "flat"
+
+
+def build_pattern_visual_report(wedge: Dict[str, Any], df: pd.DataFrame, n: int) -> Optional[Dict[str, Any]]:
+    """
+    Assembles the '📐 VISUAL PATTERN' geometry + breakout/retest + confidence
+    block for a converging wedge/triangle, matching the sample schema:
+    rail directions, touches, fit quality, breakout state, retest state,
+    final confidence, entry decision.
+    """
+    if not wedge:
+        return None
+
+    lower, upper = wedge["lower"], wedge["upper"]
+    bias = wedge["bias"]
+    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
+
+    upper_dir = _slope_word(upper["slope"], atr_now)
+    lower_dir = _slope_word(lower["slope"], atr_now)
+    upper_fit = _rail_fit_quality(df, upper, "resistance", n)
+    lower_fit = _rail_fit_quality(df, lower, "support", n)
+    fit_quality = int(round((upper_fit + lower_fit) / 2))
+
+    # Geometry confidence: touches + fit quality + how cleanly the rails
+    # converge (gap_end vs gap_start -- tighter apex = more mature pattern).
+    touch_score = min(30, (upper["touches"] + lower["touches"]) * 3)
+    convergence_ratio = 1 - (wedge["gap_end"] / wedge["gap_start"]) if wedge.get("gap_start") else 0
+    convergence_score = min(25, int(convergence_ratio * 25))
+    geometry_confidence = max(0, min(100, int(fit_quality * 0.45 + touch_score + convergence_score)))
+
+    # Breakout direction implied by the pattern bias.
+    if bias == "BUY":
+        break_kind, break_line = "resistance_break_up", upper
+    elif bias == "SELL":
+        break_kind, break_line = "support_break_down", lower
+    else:
+        break_kind, break_line = None, None
+
+    breakout_grade = None
+    retest = {"status": "INTACT", "note": "No confirmed break yet."}
+    if break_line:
+        breakout_grade = _grade_breakout(df, break_line, break_kind, n)
+        retest = _trendline_retest_state(df, break_line, breakout_grade, break_kind)
+
+    br_status = "NOT YET" if not breakout_grade else \
+        ("CONFIRMED" if breakout_grade["strength"] == "confirmed" else
+         "DEVELOPING" if breakout_grade["strength"] == "developing" else "WEAK / WICK ONLY")
+    rt_status = {
+        "BREAK_RETEST_CONFIRMED": "CONFIRMED",
+        "FAKEOUT": "FAILED (fakeout)",
+        "BREAK_CONFIRMED": "PENDING",
+        "BREAK_DEVELOPING": "PENDING",
+        "INTACT": "NOT APPLICABLE",
+    }.get(retest.get("status"), "PENDING")
+
+    # Final confidence blends geometry with how far the breakout/retest
+    # sequence has actually progressed -- a clean-looking wedge that hasn't
+    # broken yet scores lower here than in the top-line geometry confidence.
+    final_confidence = geometry_confidence
+    entry_status = "WAIT"
+    if retest.get("status") == "BREAK_RETEST_CONFIRMED":
+        final_confidence = min(100, geometry_confidence + 4)
+        entry_status = "CONFIRMED"
+    elif breakout_grade and breakout_grade["strength"] == "confirmed":
+        final_confidence = max(0, geometry_confidence - 8)
+        entry_status = "WAIT FOR RETEST"
+    elif breakout_grade and breakout_grade["strength"] == "developing":
+        final_confidence = max(0, geometry_confidence - 15)
+        entry_status = "WAIT"
+    elif retest.get("status") == "FAKEOUT":
+        final_confidence = max(0, geometry_confidence - 30)
+        entry_status = "INVALIDATED"
+    else:
+        final_confidence = max(0, geometry_confidence - 20)
+        entry_status = "WAIT"
+
+    return {
+        "pattern_name": wedge["pattern"], "bias": bias,
+        "confidence": geometry_confidence,
+        "upper_dir": upper_dir, "lower_dir": lower_dir,
+        "upper_touches": upper["touches"], "lower_touches": lower["touches"],
+        "fit_quality": fit_quality,
+        "breakout_status": br_status, "retest_status": rt_status,
+        "final_confidence": final_confidence,
+        "entry_status": entry_status,
     }
 
 
@@ -1192,6 +1393,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # truncated to the last 16 below, so an older well-tested level or a
     # wedge anchored further back doesn't silently drop out.
     wedge = _detect_converging_wedge(recent_pivots, df, n)
+    pattern_visual = build_pattern_visual_report(wedge, df, n) if wedge else None
     # Keep only the 2 strongest horizontal levels (1 support + 1 resistance,
     # nearest to price) for the chart -- the full clustered history is still
     # useful for the text report, but 3-4 stacked S/R lines on top of a
@@ -1355,6 +1557,16 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
             lower_line[i] = _line_value(lo["x0"], lo["y0"], lo["x1"], lo["y1"], i)
             mid_line[i] = (upper_line[i] + lower_line[i]) / 2.0
 
+    # --- 20 SMA (median price) direction + confluence with the primary
+    # trendline. Computed here so both callers (run_trendline_analysis and
+    # execution_engine's auto-fallback) get it for free.
+    atr_now_sma = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
+    sma20 = _sma20_series(df, period=20, applied_price="median")
+    sma_dir = _sma_direction(sma20, atr_now=atr_now_sma)
+    sma_last = float(sma20.dropna().iloc[-1]) if not sma20.dropna().empty else None
+    primary_now = primary.get("y_end") if primary else None
+    sma_confluence = _sma_trendline_confluence(sma_last, primary_now, atr_now_sma, sma_dir, family_kind)
+
     return {
         "direction": direction,
         "strength": max(0, min(100, int(strength))),
@@ -1367,6 +1579,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         "downtrends": [resistance] if resistance else [],
         "channel": channel,
         "wedge": wedge,
+        "pattern_visual": pattern_visual,
         "horizontal_levels": horizontal_levels,
         "projections": projections,
         "mw_pattern": mw,
@@ -1417,6 +1630,13 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         # Previously excluded by design; added back deliberately now.
         "order_blocks": order_blocks,
         "active_order_block": active_ob,
+        "sma_period": 20,
+        "sma_applied_price": "median",
+        "sma_direction": sma_dir,
+        "sma_last": sma_last,
+        "sma_confluence": sma_confluence,
+        "sma_series": sma20.values,
+        "trendline_color_state": _trendline_color_state(direction, sma_dir),
     }
 
 
@@ -2025,6 +2245,7 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
         return family["error"]
 
     topdown = family.get("topdown") or {}
+    tf_label = family.get("timeframe_label") or "M30"
     bias_4h = str(topdown.get("bias_4h") or topdown.get("bias") or "NEUTRAL").upper()
     bias_1h = str(topdown.get("direction") or "NEUTRAL").upper()
     bias_30 = str(family.get("short_term_signal") or family.get("direction") or "NEUTRAL").upper()
@@ -2068,31 +2289,56 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
     sp_name = str(sp.get("name") or "")
     sp_stage = str(family.get("pattern_stage") or sp.get("stage") or "").upper()
 
+    sma_dir = family.get("sma_direction", "FLAT")
+    sma_icon = "🟢" if sma_dir == "RISING" else ("🔴" if sma_dir == "FALLING" else "⚪")
+    sma_last = family.get("sma_last")
+    sc = family.get("sma_confluence") or {}
+    color_state = family.get("trendline_color_state", "NEUTRAL")
+    color_icon = "🟢" if color_state == "BULLISH" else ("🔴" if color_state == "BEARISH" else "⚪")
+
     lines = [
-        f"📐 TRENDLINE ANALYSIS — {symbol} M30",
+        f"📐 TRENDLINE ANALYSIS — {symbol} {tf_label}",
         "",
         "BIAS",
-        f"4H: {bias_4h}",
-        f"1H: {bias_1h}",
-        f"30M: {bias_30}",
-        "",
-        "HIGHER-TIMEFRAME STRUCTURE",
-        f"4H swings: {str(family.get('htf_structure_4h') or 'NEUTRAL')}",
-        f"1H swings: {str(family.get('htf_structure_1h') or 'NEUTRAL')}",
     ]
-    htf_levels=family.get("htf_key_levels_4h") or []
-    if htf_levels:
-        for lvl in htf_levels[:3]:
-            lines.append(f"4H {str(lvl.get('side','level')).upper()}: {float(lvl.get('price',0)):.5f} ({int(lvl.get('touches',0))} touches)")
-    else:
-        lines.append("4H key S/R: —")
+    if topdown:
+        lines += [f"4H: {bias_4h}", f"1H: {bias_1h}"]
+    lines.append(f"{tf_label}: {bias_30}")
     lines += [
         "",
-        "TRENDLINE",
+        "20 SMA",
+        f"Applied price: MEDIAN PRICE",
+        f"Period: {family.get('sma_period', 20)}",
+        f"Direction: {sma_icon} {sma_dir}",
+        f"Value: {sma_last:.5f}" if sma_last is not None else "Value: —",
+    ]
+    if topdown:
+        lines += [
+            "",
+            "HIGHER-TIMEFRAME STRUCTURE",
+            f"4H swings: {str(family.get('htf_structure_4h') or 'NEUTRAL')}",
+            f"1H swings: {str(family.get('htf_structure_1h') or 'NEUTRAL')}",
+        ]
+        htf_levels=family.get("htf_key_levels_4h") or []
+        if htf_levels:
+            for lvl in htf_levels[:3]:
+                lines.append(f"4H {str(lvl.get('side','level')).upper()}: {float(lvl.get('price',0)):.5f} ({int(lvl.get('touches',0))} touches)")
+        else:
+            lines.append("4H key S/R: —")
+    lines += [
+        "",
+        "MARKET STRUCTURE",
+        f"Trendline: {color_icon} {color_state}",
         f"Type: {primary_kind if primary_kind != 'NONE' else 'NONE'}",
         f"Touches: {touches}",
         f"Validation: {validation_text}",
         f"Status: {'INTACT' if lifecycle['status'] == 'INTACT' else lifecycle['breakout']}",
+        "",
+        "20 SMA ↔ TRENDLINE",
+        f"Relationship: {sc.get('relationship', 'N/A')}",
+        f"Distance: {sc.get('distance_atr')} ATR" if sc.get("distance_atr") is not None else "Distance: —",
+        f"Status: {sc.get('status', 'UNKNOWN')}",
+        f"Directional strength: {sc.get('strength', 'N/A')}",
         "",
         "STRUCTURE",
         f"{structure}",
@@ -2121,6 +2367,35 @@ def format_trendline_report(family: Dict[str, Any], symbol: str) -> str:
     if sp_name and sp_stage:
         icon = "⚠️" if sp_stage in ("FORMING", "TRIGGERED") else "✅" if sp_stage == "CONFIRMED" else "🚫"
         lines.append(f"{sp_name}: {icon} {sp_stage}")
+
+    # Visual pattern block (wedge/triangle) -- only shown when it's the
+    # active, meaningful pattern on this chart, matching the sample
+    # '📐 VISUAL PATTERN' geometry/confidence/breakout/retest schema.
+    pv = family.get("pattern_visual")
+    if pv and family.get("active_pattern") == "wedge":
+        lines += [
+            "",
+            "━━━━━━━━━━━━━━━━",
+            "",
+            "📐 VISUAL PATTERN",
+            pv["pattern_name"].upper(),
+            "",
+            f"Confidence: {pv['confidence']}%",
+            "",
+            "Geometry:",
+            f"• Upper rail: {pv['upper_dir']}",
+            f"• Lower rail: {pv['lower_dir']}",
+            "• Rails: converging",
+            f"• Upper touches: {pv['upper_touches']}",
+            f"• Lower touches: {pv['lower_touches']}",
+            f"• Fit quality: {pv['fit_quality']}%",
+            "",
+            f"BREAKOUT: {pv['breakout_status']}",
+            f"RETEST: {pv['retest_status']}",
+            "",
+            f"🎯 FINAL CONFIDENCE: {pv['final_confidence']}%",
+            f"ENTRY: {pv['bias']} {pv['entry_status']}" if pv["bias"] != "NEUTRAL" else f"ENTRY: {pv['entry_status']}",
+        ]
 
     lines += [
         "",
@@ -2373,24 +2648,33 @@ def build_ote_ticket(analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 # read gates and scores it (see topdown_engine.get_topdown_bias).
 # ============================================================
 
-def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
-    topdown = get_topdown_bias(symbol)
-    df_30m = market_data.fetch_candles(symbol, "30min", count=250)
-    if df_30m is None or df_30m.empty or len(df_30m) < 30:
+def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Runs entirely on the single selected timeframe (tf_code). Top-down
+    HTF context is OPTIONAL -- pass a pre-fetched topdown_engine.get_topdown_bias()
+    dict in explicitly (e.g. from a separate "HTF Context" button) if you want
+    it folded into the gating notes below; otherwise it's skipped and the
+    trendline read stands on its own.
+    """
+    df_tf = market_data.fetch_candles(symbol, tf_code, count=250)
+    tf_label = {"1min": "M1", "3min": "M3", "5min": "M5", "15min": "M15",
+                "30min": "M30", "1h": "H1", "4h": "H4"}.get(tf_code, tf_code)
+    if df_tf is None or df_tf.empty or len(df_tf) < 30:
         return {
-            "error": "Insufficient 30M data for Trendline analysis",
+            "error": f"Insufficient {tf_label} data for Trendline analysis",
             "direction": "NEUTRAL", "symbol": symbol, "topdown": topdown,
         }
 
-    family = build_trendline_family(df_30m, max_lines=4, lookback_bars=120)
+    family = build_trendline_family(df_tf, max_lines=4, lookback_bars=120)
     family["symbol"] = symbol
-    family["timeframe"] = "30min"
+    family["timeframe"] = tf_code
+    family["timeframe_label"] = tf_label
     family["topdown"] = topdown
-    family["htf_key_levels_4h"] = topdown.get("key_levels_4h") or []
-    family["htf_swings_4h"] = topdown.get("swings_4h") or []
-    family["htf_swings_1h"] = topdown.get("swings_1h") or []
-    family["htf_structure_4h"] = (topdown.get("swing_context_4h") or {}).get("structure_bias", "NEUTRAL")
-    family["htf_structure_1h"] = (topdown.get("swing_context_1h") or {}).get("structure_bias", "NEUTRAL")
+    if topdown:
+        family["htf_key_levels_4h"] = topdown.get("key_levels_4h") or []
+        family["htf_swings_4h"] = topdown.get("swings_4h") or []
+        family["htf_swings_1h"] = topdown.get("swings_1h") or []
+        family["htf_structure_4h"] = (topdown.get("swing_context_4h") or {}).get("structure_bias", "NEUTRAL")
+        family["htf_structure_1h"] = (topdown.get("swing_context_1h") or {}).get("structure_bias", "NEUTRAL")
     family["continuation_state"] = _classify_trendline_state(family)
     if family.get("error"):
         return family
@@ -2399,7 +2683,7 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     # double/triple tops, rectangles) -- this already existed for the
     # auto-trade engine but was never surfaced on the Trendline chart/report.
     try:
-        best_pattern, all_patterns = scan_all_patterns(df_30m)
+        best_pattern, all_patterns = scan_all_patterns(df_tf)
         family["scanned_pattern"] = best_pattern.to_dict() if best_pattern else None
         family["scanned_patterns"] = [p.to_dict() for p in all_patterns]
     except Exception as e:
@@ -2409,7 +2693,7 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
 
     direction = family.get("direction", "NEUTRAL")
     strength = family.get("strength", 0)
-    td_dir = topdown.get("direction", "NEUTRAL")
+    td_dir = topdown.get("direction", "NEUTRAL") if topdown else "NEUTRAL"
     gating_notes = []
     mw = family.get("mw_pattern")
     reasons = list(family.get("reasons") or [])
@@ -2425,7 +2709,7 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
     # Also demotes Double Top (M) when ascending structure or Bull Flag is present.
     # ------------------------------------------------------------------
     sp = family.get("scanned_pattern")
-    close = float(df_30m["Close"].iloc[-1])
+    close = float(df_tf["Close"].iloc[-1])
     family_kind = family.get("family_kind", "none")
 
     # ------------------------------------------------------------------
@@ -2596,16 +2880,18 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
 
     # SHORT-TERM TRENDLINE IS PRIMARY.
     # We adapt to the structure the trendlines show instead of fighting it
-    # with lagging higher-timeframe direction. 4H/1H is now advisory only.
-    if direction in ("BUY", "SELL"):
+    # with lagging higher-timeframe direction. HTF context is now OPTIONAL --
+    # only applied when the caller explicitly passed a `topdown` dict in
+    # (e.g. from a separate "HTF Context" button), otherwise skipped entirely.
+    if direction in ("BUY", "SELL") and topdown:
         if td_dir == direction and topdown.get("allowed"):
             strength = min(100, strength + 12)
             gating_notes.append(
-                f"✅ Short-term trend ({direction}) aligned with 4H/1H top-down ({td_dir})"
+                f"✅ Short-term trend ({direction}) aligned with HTF top-down ({td_dir})"
             )
         elif td_dir == direction and not topdown.get("allowed"):
             gating_notes.append(
-                f"Short-term trend ({direction}) matches top-down direction but 1H permission "
+                f"Short-term trend ({direction}) matches top-down direction but HTF permission "
                 f"not yet granted — still valid, slightly lower conviction"
             )
         elif td_dir == "NEUTRAL":
@@ -2619,6 +2905,11 @@ def run_trendline_analysis(symbol: str) -> Dict[str, Any]:
                 f"Short-term Trend: {direction} (from trendline) — higher TF still {td_dir} "
                 f"(advisory only, not blocking)"
             )
+
+    # Recompute the trendline's dynamic color state with the FINAL resolved
+    # direction (pattern/OB/sequence logic above can change it from what
+    # build_trendline_family saw initially).
+    family["trendline_color_state"] = _trendline_color_state(direction, family.get("sma_direction", "FLAT"))
 
     family["strength"] = max(0, min(100, int(strength)))
     family["gating_notes"] = gating_notes

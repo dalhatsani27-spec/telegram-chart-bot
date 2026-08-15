@@ -699,6 +699,21 @@ def generate_trendline_map(
             for ax_key, ay_key in (("x0", "y0"), ("x1", "y1")):
                 px = int(rail[ax_key]) - offset
                 _pivot_dot(px, float(rail[ay_key]), tag, color)
+        # Live geometry readout right on the chart (touches + fit quality),
+        # not just in the text report -- pulled fresh from pattern_visual
+        # each time this chart is generated, so it always reflects the
+        # current candles, not a cached/stale drawing.
+        pv_wedge = family.get("pattern_visual")
+        if pv_wedge:
+            label_y = _line_at(wedge["upper"], chart_len - 1 + offset)
+            label_x = min(chart_len - 2, max(0, (chart_len - 1) * 0.55))
+            ax.text(
+                label_x, label_y,
+                f" {wedge['pattern']} | Touches U:{pv_wedge['upper_touches']} L:{pv_wedge['lower_touches']} "
+                f"| Fit {pv_wedge['fit_quality']}%",
+                fontsize=7, color="#ffe082", fontweight="bold", va="bottom", ha="left", zorder=11,
+                bbox=dict(boxstyle="round,pad=0.15", facecolor="#0b0f14", edgecolor="#ffe082", alpha=0.75, linewidth=0.5),
+            )
 
     elif active_pattern == "channel" and family.get("channel"):
         pattern_title = f"{family_kind.capitalize()} Channel" if family_kind != "none" else "Channel"
@@ -717,10 +732,32 @@ def generate_trendline_map(
 
     # --- Dual trendlines (MT5 hand-drawn style) -----------------------
     # ALWAYS draw ascending support + descending resistance when present.
-    # Thick bright green so the lines are impossible to miss.
-    def _draw_one_tl(tl, color="#00e676", width=2.8):
+    # Color is dynamic: green while price/20SMA support a bullish read,
+    # red the moment price/SMA confirm bearish, grey when neutral/conflicting
+    # (see strategies._trendline_color_state -- the trendline is no longer
+    # a fixed color regardless of what the market is actually doing).
+    _state_color = {"BULLISH": "#00e676", "BEARISH": "#ff5252", "NEUTRAL": "#b0bec5"}
+    tl_color = _state_color.get(family.get("trendline_color_state"), "#00e676")
+
+    # 20 SMA (median price) -- drawn thin/orange so it reads as context,
+    # distinct from the thick trendline itself.
+    sma_series = family.get("sma_series")
+    if sma_series is not None and len(sma_series) == len(df):
+        sma_slice = sma_series[offset:offset + chart_len]
+        xs = np.arange(chart_len)
+        valid = ~np.isnan(sma_slice)
+        if valid.any():
+            ax.plot(xs[valid], sma_slice[valid], color="#ffb300", linewidth=1.3, alpha=0.85, zorder=6)
+            last_valid = np.where(valid)[0]
+            if len(last_valid):
+                lx = last_valid[-1]
+                ax.text(lx, sma_slice[lx], " 20 SMA", fontsize=6.8, color="#ffb300", fontweight="bold",
+                        va="center", ha="left", zorder=9)
+
+    def _draw_one_tl(tl, color=None, width=2.8):
         if not tl:
             return
+        color = color or tl_color
         try:
             x0 = max(0, int(tl["x0"]) - offset)
             # Use actual anchor y, then extend to current bar
@@ -759,16 +796,16 @@ def generate_trendline_map(
 
     drawn = 0
     for tl in (family.get("uptrends") or []):
-        _draw_one_tl(tl, color="#00e676", width=2.8)
+        _draw_one_tl(tl)
         drawn += 1
     for tl in (family.get("downtrends") or []):
-        _draw_one_tl(tl, color="#00e676", width=2.8)
+        _draw_one_tl(tl)
         drawn += 1
 
     # Fallback: if uptrends/downtrends empty, try family_lines
     if drawn == 0:
         for tl in (family.get("family_lines") or []):
-            _draw_one_tl(tl, color="#00e676", width=2.8)
+            _draw_one_tl(tl)
 
     # Trendline lifecycle markers: BREAK / RETEST are derived from candle
     # closes and the line itself, never from prediction.
@@ -902,8 +939,14 @@ def generate_trendline_map(
 
     direction = family.get("direction") or setup.get("direction", "")
     strength = family.get("strength") or setup.get("confidence") or setup.get("score") or 0
-    line1 = f"{symbol}  |  TF: 30m  |  {title_suffix}  |  {direction}  |  Str {strength:.0f}"
-    if pattern_title:
+    tf_disp = family.get("timeframe_label") or "30m"
+    line1 = f"{symbol}  |  TF: {tf_disp}  |  {title_suffix}  |  {direction}  |  Str {strength:.0f}"
+    pv = family.get("pattern_visual")
+    if pattern_title and active_pattern == "wedge" and pv:
+        conf = pv["final_confidence"]
+        line2 = (f"Pattern: {pattern_title}  |  Confidence: {conf:.0f}%  |  "
+                 f"Breakout: {pv['breakout_status']}  |  Retest: {pv['retest_status']}")
+    elif pattern_title:
         conf = pattern_conf if pattern_conf is not None else strength
         line2 = f"Pattern: {pattern_title}  |  Confidence: {conf:.0f}%"
     else:
@@ -1257,3 +1300,77 @@ def generate_ote_map(df: pd.DataFrame, symbol: str, analysis: Dict[str, Any], ti
         pmin,pmax=min(prices),max(prices); pad=(pmax-pmin)*.05 if pmax>pmin else 1
         ax.set_ylim(pmin-pad,pmax+pad)
     img_buf=io.BytesIO(); fig.savefig(img_buf,dpi=180,bbox_inches="tight",facecolor=fig.get_facecolor()); img_buf.seek(0); plt.close(fig); return img_buf
+
+
+def generate_smc_map(df: pd.DataFrame, symbol: str, analysis: Dict[str, Any], title_suffix: str = "") -> io.BytesIO:
+    """SMC chart: candles + liquidity pool lines (sweep marked) + OB/FVG zone
+    box + entry/SL/TP lines when a trade is confirmed. Same dark theme and
+    box-drawing conventions as the Trendline/OTE charts.
+    """
+    chart_df, chart_len = _prepare_ohlc(df, max_bars=160)
+    offset = len(df) - chart_len
+    mc = mpf.make_marketcolors(up=COLORS["bull"], down=COLORS["bear"], edge="inherit", wick="inherit")
+    style = mpf.make_mpf_style(marketcolors=mc, gridstyle=":", gridcolor=COLORS["grid"], y_on_right=True,
+        facecolor=COLORS["bg"], figcolor=COLORS["bg"],
+        rc={"axes.labelcolor": COLORS["text"], "xtick.color": COLORS["text"], "ytick.color": COLORS["text"]})
+    fig, axlist = mpf.plot(chart_df, type="candle", style=style, volume=False, returnfig=True,
+        figsize=(12, 6.8), warn_too_much_data=10000)
+    ax = axlist[0]
+
+    liquidity = analysis.get("liquidity") or {}
+    for key, side_label in (("buy_side", "BSL"), ("sell_side", "SSL")):
+        pool = liquidity.get(key)
+        if not pool:
+            continue
+        level = pool["level"]
+        swept = pool.get("status") == "SWEPT"
+        color = "#94a3b8" if swept else "#ea80fc"
+        ax.axhline(level, linestyle="--" if swept else "-.", linewidth=1.1, color=color, alpha=0.75, zorder=3)
+        tag = f" {side_label} {'SWEPT ✅' if swept else 'INTACT'}"
+        ax.text(chart_len - 2, level, tag, fontsize=7, color=color, fontweight="bold",
+                va="bottom", ha="right", zorder=8,
+                bbox=dict(boxstyle="round,pad=0.12", facecolor="#0b0f14", edgecolor=color, alpha=0.75, linewidth=0.5))
+        if swept and pool.get("swept_index") is not None:
+            x = pool["swept_index"] - offset
+            if 0 <= x < chart_len:
+                ax.scatter([x], [level], s=70, marker="x", color=color, linewidths=2.2, zorder=10)
+
+    zone = analysis.get("zone") or {}
+    if zone.get("zone_top") is not None:
+        zt, zb = zone["zone_top"], zone["zone_bottom"]
+        bias = analysis.get("bias", "NEUTRAL")
+        zone_color = COLORS["bear"] if bias == "SELL" else COLORS["bull"]
+        ax.axhspan(zb, zt, color=zone_color, alpha=0.18, zorder=1)
+        label = "Bearish Zone (OB/FVG)" if bias == "SELL" else "Bullish Zone (OB/FVG)"
+        ax.text(2, zt, f" {label} — {zone.get('status', '')}", fontsize=7, color=zone_color, fontweight="bold",
+                va="bottom", ha="left", zorder=8,
+                bbox=dict(boxstyle="round,pad=0.12", facecolor="#0b0f14", edgecolor=zone_color, alpha=0.75, linewidth=0.5))
+
+    if analysis.get("entry_ready") and analysis.get("sl") and (analysis.get("tp1") or analysis.get("tp2")):
+        entry, sl = analysis["entry"], analysis["sl"]
+        ax.axhline(entry, color=COLORS["entry"], linewidth=1.2, alpha=0.9, zorder=6)
+        ax.axhline(sl, color=COLORS["sl"], linewidth=1.2, alpha=0.9, zorder=6)
+        for tp in (analysis.get("tp1"), analysis.get("tp2")):
+            if tp:
+                ax.axhline(tp, color=COLORS["tp"], linewidth=1.0, alpha=0.8, zorder=6)
+
+    structure = analysis.get("structure") or {}
+    bias = analysis.get("bias", "NEUTRAL")
+    status = analysis.get("status", "WAIT")
+    ax.set_title(
+        f"{symbol}  SMC ({analysis.get('timeframe_label', '')}) | {bias} | {status}" +
+        (f" | {title_suffix}" if title_suffix else ""),
+        color=COLORS["text"], fontsize=10, fontweight="bold", pad=10,
+    )
+    prices = list(chart_df["High"]) + list(chart_df["Low"])
+    if zone.get("zone_top") is not None:
+        prices += [zone["zone_top"], zone["zone_bottom"]]
+    if prices:
+        pmin, pmax = min(prices), max(prices)
+        pad = (pmax - pmin) * 0.06 if pmax > pmin else 1
+        ax.set_ylim(pmin - pad, pmax + pad)
+    img_buf = io.BytesIO()
+    fig.savefig(img_buf, dpi=180, bbox_inches="tight", facecolor=fig.get_facecolor())
+    img_buf.seek(0)
+    plt.close(fig)
+    return img_buf

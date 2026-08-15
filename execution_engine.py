@@ -48,7 +48,8 @@ VALID_MODES = {MODE_OFF, MODE_AUTO, MODE_APPROVAL, MODE_COPY_TRADE}
 
 STRATEGY_TRENDLINE = "TRENDLINE"
 STRATEGY_OTE = "OTE"
-VALID_STRATEGIES = {STRATEGY_TRENDLINE, STRATEGY_OTE}
+STRATEGY_SMC = "SMC"
+VALID_STRATEGIES = {STRATEGY_TRENDLINE, STRATEGY_OTE, STRATEGY_SMC}
 
 APPROVAL_EXPIRY_SECONDS = 180
 
@@ -78,6 +79,18 @@ class TradeStateManager:
         self._commands = {}
         self._pending_approvals = {}
         self._ea_last_seen = {}
+
+        # Optional HTF context cache -- populated only when the user
+        # explicitly requests it via the "HTF Context" button, keyed by
+        # symbol. Trendline/SMC analysis reads this in (if present) rather
+        # than fetching a 4H/1H cascade automatically on every run.
+        self._htf_context = {}
+
+    def set_last_htf_context(self, symbol, data):
+        self._htf_context[symbol.upper()] = data
+
+    def get_last_htf_context(self, symbol):
+        return self._htf_context.get(symbol.upper())
 
     # ---------------- watched symbol ----------------
     def set_watched_symbol(self, symbol):
