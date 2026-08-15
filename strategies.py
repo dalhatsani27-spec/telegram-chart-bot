@@ -3038,6 +3038,21 @@ def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown: Optiona
                 family["mw_pattern"] = None
                 mw = None
 
+        # A reversal pattern that hasn't even broken its neckline (stage
+        # FORMING) is a shape, not a signal -- it must never be allowed to
+        # flip the trade direction. Only TRIGGERED/CONFIRMED reversals may
+        # override below. FORMING stays visible in CONFLUENCE as a watch
+        # item (handled further down) but cannot drive BIAS.
+        reversal_stage = str(family.get("pattern_stage") or "").upper()
+        reversal_confirmed_enough = reversal_stage in ("TRIGGERED", "CONFIRMED")
+        if (is_strong_bullish_rev or is_strong_bearish_rev) and not reversal_confirmed_enough:
+            reasons.append(
+                f"⏳ {sp_name} ({sp_conf:.0f}%) still FORMING — neckline not broken, "
+                f"cannot override current bias yet"
+            )
+            is_strong_bullish_rev = False
+            is_strong_bearish_rev = False
+
         # Strong Inverse H&S / Double Bottom vs weak M or NEUTRAL
         elif is_strong_bullish_rev and direction in ("SELL", "NEUTRAL"):
             head_price = None
@@ -3141,7 +3156,43 @@ def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown: Optiona
     # always framing everything through the trendline lens.
     family = select_best_setup(family, df_tf)
 
+    # ------------------------------------------------------------------
+    # Reconciliation: BIAS must agree with whichever setup the scan just
+    # crowned the winner. Without this, SETUP SCAN could hand TRENDLINE
+    # an 80% lead while BIAS still carried whatever a lower-scoring,
+    # unconfirmed pattern decided earlier -- a chart/report that
+    # contradicts itself. If TRENDLINE wins by a clear margin, is INTACT
+    # (not broken), and the pattern that disagrees hasn't even confirmed
+    # (no FORMING pattern gets veto power), direction snaps back to what
+    # the winning trendline actually implies: ascending = BUY-on-retest,
+    # descending = SELL-on-retest.
+    # ------------------------------------------------------------------
+    scores = family.get("setup_scores") or {}
+    active_setup = family.get("active_setup")
+    trendline_lifecycle = _trendline_status_text(family)
+    pattern_stage_now = str(family.get("pattern_stage") or "").upper()
+    if (
+        active_setup == "TRENDLINE"
+        and trendline_lifecycle.get("status") == "INTACT"
+        and scores.get("TRENDLINE", 0) - scores.get("PATTERN", 0) >= 20
+        and pattern_stage_now not in ("TRIGGERED", "CONFIRMED")
+    ):
+        trend_kind = family.get("family_kind", "none")
+        implied_dir = "BUY" if trend_kind == "ascending" else "SELL" if trend_kind == "descending" else None
+        if implied_dir and direction != implied_dir:
+            old_dir = direction
+            reasons.append(
+                f"↩ Reconciled: TRENDLINE ({scores.get('TRENDLINE',0)}%) dominates unconfirmed "
+                f"{family.get('pattern_label') or 'pattern'} ({scores.get('PATTERN',0)}%) — "
+                f"bias follows trendline continuation ({old_dir} → {implied_dir})"
+            )
+            direction = implied_dir
+            family["direction"] = direction
+            family["trendline_color_state"] = _trendline_color_state(direction, family.get("sma_direction", "FLAT"))
+            family["continuation_state"] = _classify_trendline_state(family)
+
     family["strength"] = max(0, min(100, int(strength)))
     family["gating_notes"] = gating_notes
+    family["reasons"] = reasons
     family["short_term_signal"] = direction  # explicit short-term read for reports
     return family

@@ -1065,6 +1065,20 @@ def generate_trendline_educational_map(
         inv = ax.transData.inverted()
         return float(inv.transform((px, py))[1])
 
+    # Shared price span used to convert label stagger offsets into DATA
+    # coordinates (not display points) so every label -- trendline,
+    # structure, break/retest, pattern -- can be placed through the same
+    # _claim_label_y collision map. Derived from the candle range itself
+    # rather than ax.get_ylim() since the axes can still autoscale as more
+    # artists (trendlines etc.) get added below.
+    _price_lo = float(chart_df["Low"].min())
+    _price_hi = float(chart_df["High"].max())
+    yspan = max(_price_hi - _price_lo, 1e-9)
+
+    def _label_bbox(edge_color, filled_alpha=0.78):
+        return dict(boxstyle="round,pad=0.15", facecolor="#0b0f14",
+                    edgecolor=edge_color, alpha=filled_alpha, linewidth=0.6)
+
     # Higher-timeframe context: 4H key support/resistance is the structural
     # map underneath the 30M trendline. Only the strongest few levels are
     # drawn so the candle field stays readable.
@@ -1145,7 +1159,8 @@ def generate_trendline_educational_map(
         ly = float(tl["y0"]) + slope * ((lx + offset) - float(tl["x0"]))
         ly = _claim_label_y(lx, ly)
         ax.text(lx, ly, label, fontsize=7.5, color=color, fontweight="bold",
-                va="bottom" if "SUPPORT" in label else "top", zorder=10)
+                va="bottom" if "SUPPORT" in label else "top", zorder=10,
+                bbox=_label_bbox(color))
 
     # Structure labels: only the most recent meaningful labels.
     anns = [a for a in (family.get("trendline_annotations") or [])
@@ -1160,10 +1175,13 @@ def generate_trendline_educational_map(
         is_high = ann.get("type") == "high"
         ax.scatter([px], [py], s=28, color="#f8fafc", edgecolors="#94a3b8",
                    linewidths=0.8, zorder=10)
+        gap = yspan * 0.028
+        label_y = py + gap if is_high else py - gap
+        label_y = _claim_label_y(px, label_y)
         ax.annotate(
-            label, (px, py), fontsize=8, color="#f8fafc", fontweight="bold",
-            xytext=(0, 10 if is_high else -14), textcoords="offset points",
-            ha="center", zorder=11,
+            label, (px, label_y), fontsize=8, color="#f8fafc", fontweight="bold",
+            ha="center", va="bottom" if is_high else "top", zorder=11,
+            bbox=_label_bbox("#94a3b8", filled_alpha=0.7),
         )
 
     # Break/retest lifecycle — this is the educational core.
@@ -1178,8 +1196,10 @@ def generate_trendline_educational_map(
             by = float(chart_df["Close"].iloc[bx])
             ax.scatter([bx], [by], s=95, color="#f59e0b", edgecolors="#ffffff",
                        linewidths=1.3, marker="D", zorder=14)
-            ax.annotate("BREAK", (bx, by), xytext=(8, 12), textcoords="offset points",
-                        color="#f59e0b", fontsize=8, fontweight="bold", zorder=15)
+            label_y = _claim_label_y(bx, by + yspan * 0.03)
+            ax.annotate("BREAK", (bx, label_y),
+                        color="#f59e0b", fontsize=8, fontweight="bold", zorder=15,
+                        ha="center", va="bottom", bbox=_label_bbox("#f59e0b"))
     if ri is not None and level is not None:
         rx = int(ri) - offset
         if 0 <= rx < chart_len:
@@ -1187,22 +1207,40 @@ def generate_trendline_educational_map(
             rcolor = "#22c55e" if retest_ok else "#ef4444"
             ax.scatter([rx], [float(level)], s=90, color=rcolor, edgecolors="#ffffff",
                        linewidths=1.3, zorder=14)
-            ax.annotate("RETEST" if retest_ok else "RECLAIM", (rx, float(level)),
-                        xytext=(8, -18), textcoords="offset points", color=rcolor,
-                        fontsize=8, fontweight="bold", zorder=15)
+            label_y = _claim_label_y(rx, float(level) - yspan * 0.035)
+            ax.annotate("RETEST" if retest_ok else "RECLAIM", (rx, label_y),
+                        color=rcolor, fontsize=8, fontweight="bold", zorder=15,
+                        ha="center", va="top", bbox=_label_bbox(rcolor))
 
     # Pattern geometry: draw only the selected pattern's compact structure.
     # Long rails describe trend direction; these short lines/points describe
     # the local pattern without covering the candle field.
+    #
+    # Visual weight must match the report's SETUP SCAN winner. A pattern
+    # that lost the scan and hasn't even broken its neckline (FORMING) is
+    # a "watch" item, not the live setup -- drawing it as boldly as an
+    # intact, dominant trendline made the chart argue against its own
+    # report (bold "Top 1/Top 2/Neckline" while text said TRENDLINE won).
+    # Dim + relabel it here instead of dropping it, so it's still visible
+    # as context/invalidation trigger.
     sp = family.get("scanned_pattern") or {}
+    pattern_stage_viz = str(family.get("pattern_stage") or "").upper()
+    pattern_confirmed_viz = pattern_stage_viz in ("TRIGGERED", "CONFIRMED")
+    pattern_is_active_setup = family.get("active_setup") == "PATTERN"
+    pattern_is_watch_only = bool(sp) and not pattern_is_active_setup and not pattern_confirmed_viz
+    p_alpha = 0.4 if pattern_is_watch_only else 0.9
+    p_lw_trigger = 1.1 if pattern_is_watch_only else 1.8
+    p_lw_axhline = 0.9 if pattern_is_watch_only else 1.2
+    p_label_suffix = " (watch — not confirmed)" if pattern_is_watch_only else ""
+
     trigger_line = sp.get("trigger_line") or []
     if len(trigger_line) >= 2:
         pts = [(float(p[0]) - offset, float(p[1])) for p in trigger_line]
         pts = [(x, y) for x, y in pts if 0 <= x < chart_len]
         if len(pts) >= 2:
             xs, ys = zip(*pts)
-            ax.plot(xs, ys, linestyle="--", linewidth=1.8,
-                    color="#f59e0b", alpha=0.9, zorder=7)
+            ax.plot(xs, ys, linestyle="--", linewidth=p_lw_trigger,
+                    color="#f59e0b", alpha=p_alpha, zorder=7)
     seen_pattern_points = set()
     pattern_label_counts = {}
     for kp in (sp.get("key_points") or []):
@@ -1215,7 +1253,7 @@ def generate_trendline_educational_map(
             px = int(raw_x) - offset
             if 0 <= px < chart_len:
                 ax.scatter([px], [float(py)], s=34, color="#f59e0b",
-                           edgecolors="#ffffff", linewidths=0.8, zorder=10)
+                           edgecolors="#ffffff", linewidths=0.8, zorder=10, alpha=p_alpha)
                 label_text = str(label)
                 upper_label = label_text.upper()
                 # Stagger repeated pattern labels (Top 1/2/3, Bottom 1/2/3,
@@ -1226,14 +1264,23 @@ def generate_trendline_educational_map(
                             "HEAD" if "HEAD" in upper_label else "OTHER")
                 n_seen = pattern_label_counts.get(base_key, 0)
                 pattern_label_counts[base_key] = n_seen + 1
-                yoff = 10 + min(n_seen, 3) * 11
-                if "BOTTOM" in upper_label:
-                    yoff = -(10 + min(n_seen, 3) * 11)
-                ax.annotate(label_text, (px, float(py)), xytext=(0, yoff),
-                            textcoords="offset points", ha="center",
+                is_bottom = "BOTTOM" in upper_label
+                # Desired offset in DATA coordinates (not display points) so
+                # it can be checked against the shared collision map that
+                # trendline/4H/trigger labels already register into --
+                # otherwise a label like "Neckline" can land squarely on
+                # top of "RISING SUPPORT" since neither system knew about
+                # the other.
+                gap = yspan * 0.022 * (1 + min(n_seen, 3))
+                label_y = float(py) - gap if is_bottom else float(py) + gap
+                label_y = _claim_label_y(px, label_y)
+                ax.annotate(label_text, (px, label_y), ha="center",
+                            va="top" if is_bottom else "bottom",
                             fontsize=7.5, color="#fef3c7", fontweight="bold",
+                            alpha=p_alpha,
                             bbox=dict(boxstyle="round,pad=0.12",facecolor="#0b0f14",
-                                      edgecolor="#f59e0b",alpha=0.78,linewidth=0.6),
+                                      edgecolor="#f59e0b",alpha=0.78 if not pattern_is_watch_only else 0.35,
+                                      linewidth=0.6),
                             zorder=11)
         except (TypeError, ValueError, IndexError):
             continue
@@ -1254,13 +1301,21 @@ def generate_trendline_educational_map(
             except Exception:
                 atr_val = trigger * 0.0015
             band_half = max(atr_val * 0.18, trigger * 0.0006)
-            ax.axhspan(trigger - band_half, trigger + band_half,
-                       color="#f59e0b", alpha=0.14, zorder=4)
-            ax.axhline(trigger, linestyle=":", linewidth=1.2,
-                       color="#f59e0b", alpha=0.75, zorder=5)
+            # Only shade from where the pattern itself begins, not the full
+            # candle field -- a band stretching across unrelated candles
+            # (price action that has nothing to do with this pattern) just
+            # muddies the background and makes every other label harder to
+            # read against it.
+            pattern_xs = [int(kp[0]) - offset for kp in (sp.get("key_points") or []) if kp]
+            band_x0 = max(0, min(pattern_xs)) if pattern_xs else max(0, chart_len - 40)
+            band_xmin = band_x0 / max(chart_len - 1, 1)
+            ax.axhspan(trigger - band_half, trigger + band_half, xmin=band_xmin, xmax=1.0,
+                       color="#f59e0b", alpha=0.14 if not pattern_is_watch_only else 0.06, zorder=4)
+            ax.axhline(trigger, linestyle=":", linewidth=p_lw_axhline, xmin=band_xmin,
+                       color="#f59e0b", alpha=0.75 if not pattern_is_watch_only else 0.4, zorder=5)
             label_y = _claim_label_y(chart_len - 2, trigger)
-            ax.text(chart_len - 2, label_y, f" {sp.get('name', 'Pattern')} trigger",
-                    fontsize=6.8, color="#fbbf24", va="bottom", ha="right", zorder=9)
+            ax.text(chart_len - 2, label_y, f" {sp.get('name', 'Pattern')} trigger{p_label_suffix}",
+                    fontsize=6.8, color="#fbbf24", alpha=p_alpha, va="bottom", ha="right", zorder=9)
         except (TypeError, ValueError):
             pass
 
@@ -1270,9 +1325,17 @@ def generate_trendline_educational_map(
 
     # Minimal title: bias + structural state. Everything else is deliberately
     # left off the candle field so the eye can read the price action.
+    # Only name a pattern in the title when it's actually driving the setup
+    # (won the scan, or has confirmed/triggered) -- otherwise the title
+    # itself contradicts the report the same way the old chart did
+    # ("SELL BIAS ... Double Top" while text said TRENDLINE won).
     pattern_name = None
     sp = family.get("scanned_pattern") or {}
-    if sp.get("name"):
+    pattern_stage_title = str(family.get("pattern_stage") or "").upper()
+    pattern_worth_naming = (
+        family.get("active_setup") == "PATTERN" or pattern_stage_title in ("TRIGGERED", "CONFIRMED")
+    )
+    if sp.get("name") and pattern_worth_naming:
         pattern_name = sp.get("name")
     elif family.get("active_pattern") and family.get("active_pattern") != "none":
         pattern_name = str(family.get("active_pattern")).replace("_", " ").title()
