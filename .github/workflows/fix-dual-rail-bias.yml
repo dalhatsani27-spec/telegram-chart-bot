@@ -1,0 +1,49 @@
+name: Fix dual-rail bullish bias
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch trendline decision logic
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('strategies.py')
+          s = p.read_text(encoding='utf-8')
+
+          old = '''    if primary and family_lines:\n        lower = family_lines[0]["y_end"]\n        upper = family_lines[-1]["y_end"]\n        mid = (lower + upper) / 2.0\n'''
+          new = '''    if primary and family_lines:\n        # When BOTH rails exist, do not let the nearest rail win the whole\n        # directional decision. A falling resistance + rising support is a\n        # converging structure; the primary rail can be closer to price while\n        # the broader setup is still bullish. Use the combined structure +\n        # 20-SMA direction for the bias, and keep breakout/retest as the\n        # confirmation gate.\n        lower = min(\n            float((support or {}).get("y_end", family_lines[0]["y_end"])),\n            float((resistance or {}).get("y_end", family_lines[-1]["y_end"])),\n        )\n        upper = max(\n            float((support or {}).get("y_end", family_lines[0]["y_end"])),\n            float((resistance or {}).get("y_end", family_lines[-1]["y_end"])),\n        )\n        mid = (lower + upper) / 2.0\n\n        if support and resistance:\n            sma_dir_early = _sma_direction(sma20_early, atr_now=atr_now)\n            sma_valid = sma20_early.dropna()\n            sma_now_early = float(sma_valid.iloc[-1]) if not sma_valid.empty else None\n            atr_dual = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else max(abs(upper-lower)*0.1, 1e-9)\n            support_now = float(support["y_end"])\n            resistance_now = float(resistance["y_end"])\n\n            bullish_context = (\n                support_now < close\n                and sma_dir_early == "RISING"\n                and (sma_now_early is None or close >= sma_now_early)\n            )\n            bearish_context = (\n                close < resistance_now\n                and sma_dir_early == "FALLING"\n                and (sma_now_early is None or close <= sma_now_early)\n            )\n\n            if bullish_context and not bearish_context:\n                direction = "BUY"\n                strength = 55\n                reasons.append("Converging rails · rising support + falling resistance")\n                reasons.append("Bullish structure: price above rising support and 20 SMA is rising")\n                if close > mid:\n                    strength += 10\n                    reasons.append("Price above pattern midpoint — bullish control")\n                else:\n                    reasons.append("Price above support but below resistance — bullish setup, wait for confirmation")\n                primary = support\n                family_kind = "ascending"\n            elif bearish_context and not bullish_context:\n                direction = "SELL"\n                strength = 55\n                reasons.append("Converging rails · rising support + falling resistance")\n                reasons.append("Bearish structure: price below falling resistance and 20 SMA is falling")\n                if close < mid:\n                    strength += 10\n                    reasons.append("Price below pattern midpoint — bearish control")\n                else:\n                    reasons.append("Price below resistance but above support — bearish setup, wait for confirmation")\n                primary = resistance\n                family_kind = "descending"\n            else:\n                reasons.append("Converging rails conflict — wait for directional breakout")\n'''
+          if old not in s:
+              raise SystemExit('dual-rail insertion point not found')
+          s = s.replace(old, new, 1)
+
+          old2 = '''    if primary and family_lines:\n        lower = family_lines[0]["y_end"]\n'''
+          # The branch below must not immediately re-enter the old ascending/descending\n          # rail decision after the dual-rail decision above. Wrap those branches so\n          # they only run when exactly one rail exists.\n          old_branch = '''        if family_kind == "ascending":\n'''
+          new_branch = '''        if support and resistance:\n            # Dual-rail direction was decided above from the combined setup.\n            # Do not overwrite it using only whichever rail is closest to price.\n            pass\n        elif family_kind == "ascending":\n'''
+          if old_branch not in s:
+              raise SystemExit('ascending branch not found')
+          s = s.replace(old_branch, new_branch, 1)
+
+          old_active = '''        "active_pattern": (\n            "mw" if mw else\n            "wedge" if (wedge and strength >= 60) else\n            "channel" if (channel and strength >= 55) else\n            "none"\n        ),\n'''
+          new_active = '''        "active_pattern": (\n            # Converging support + resistance is the primary pattern. Do not\n            # let a merely-forming M/W candidate hide the actual triangle\n            # geometry or manufacture a high-confidence reversal label.\n            "wedge" if (support and resistance and wedge and strength >= 55) else\n            "mw" if mw and not (support and resistance) else\n            "wedge" if (wedge and strength >= 60) else\n            "channel" if (channel and strength >= 55) else\n            "none"\n        ),\n'''
+          if old_active not in s:
+              raise SystemExit('active pattern block not found')
+          s = s.replace(old_active, new_active, 1)
+
+          p.write_text(s, encoding='utf-8')
+      - name: Validate
+        run: python -m py_compile strategies.py
+      - name: Commit and remove workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/workflows/fix-dual-rail-bias.yml
+          git add strategies.py .github/workflows/fix-dual-rail-bias.yml
+          git commit -m "Fix dual-rail trendline bias and pattern priority"
+          git push
