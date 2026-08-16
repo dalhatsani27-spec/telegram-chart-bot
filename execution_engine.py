@@ -25,7 +25,7 @@ import numpy as np
 from flask import request, jsonify
 
 import market_data
-from market_analysis import scan_all_patterns, Pattern, compute_volume_profile, detect_confirmation_candle
+from market_analysis import scan_all_patterns, Pattern, compute_volume_profile, detect_confirmation_candle, is_price_ranging_vs_sma
 from strategies import build_trendline_family, build_position_container
 
 
@@ -687,6 +687,47 @@ def poll(symbol, tf, magic_number=None, pushed_df=None):
         response["value_area_low"] = volume_profile["value_area_low"]
         response["value_area_high"] = volume_profile["value_area_high"]
 
+    # Full pattern geometry + regime state so the EA can draw the exact
+    # same cheat-sheet-style rails/label a chat request would show, off
+    # this ONE bot-side read -- rather than re-detecting patterns itself
+    # and risking the two copies of the logic drifting apart over time.
+    try:
+        is_ranging, ranging_reason = is_price_ranging_vs_sma(established_df)
+        response["sma_ranging"] = is_ranging
+        response["sma_ranging_reason"] = ranging_reason
+    except Exception:
+        response["sma_ranging"] = None
+        response["sma_ranging_reason"] = None
+
+    if best is not None:
+        response["category"] = getattr(best, "category", None)
+        response["stage"] = getattr(best, "stage", None)
+        response["confidence"] = getattr(best, "confidence", None)
+
+        def _pts_to_epoch(pts):
+            out = []
+            for pt in (pts or []):
+                try:
+                    xi = int(round(float(pt[0])))
+                    y = float(pt[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if 0 <= xi < len(established_df):
+                    t = established_df.index[xi]
+                    out.append([int(t.timestamp()), y])
+            return out
+
+        boundary_lines = getattr(best, "boundary_lines", None)
+        if boundary_lines:
+            response["upper_line"] = _pts_to_epoch(boundary_lines.get("upper"))
+            response["lower_line"] = _pts_to_epoch(boundary_lines.get("lower"))
+        else:
+            # Classic marker patterns (H&S, Double Top...) don't have a
+            # two-rail boundary_lines dict -- fall back to trigger_line
+            # (the neckline) so the EA still has something to draw.
+            response["upper_line"] = []
+            response["lower_line"] = _pts_to_epoch(getattr(best, "trigger_line", None))
+
     if decision["action"] not in ("FIRE_MARKET", "FIRE_LIMIT"):
         response["command"] = state.pop_command(symbol)
         return response
@@ -745,13 +786,47 @@ def _check_key():
     return request.headers.get("X-API-KEY") == API_KEY
 
 
+def _df_from_posted_candles(candles):
+    """
+    Build a normalized OHLC dataframe from the candle list an EA POSTs
+    (its own live MT5 data -- more authoritative than the bot re-fetching
+    from Deriv/MT5 independently, and lets the bot mark this symbol's EA
+    heartbeat as genuinely alive, per mark_ea_seen()'s contract).
+    Expected shape: [{"time": <epoch seconds>, "open":, "high":, "low":, "close":}, ...]
+    """
+    if not candles:
+        return None
+    try:
+        import pandas as pd
+        rows = []
+        for c in candles:
+            rows.append({
+                "time": c.get("time"),
+                "Open": c.get("open"), "High": c.get("high"),
+                "Low": c.get("low"), "Close": c.get("close"),
+            })
+        df = pd.DataFrame(rows)
+        if df.empty or df[["time", "Open", "High", "Low", "Close"]].isnull().any().any():
+            return None
+        df["datetime"] = pd.to_datetime(df["time"], unit="s")
+        df = df.set_index("datetime").sort_index()
+        df = df[["Open", "High", "Low", "Close"]].astype(float)
+        return market_data.clean_and_normalize_data(df)
+    except Exception:
+        return None
+
+
 def register_routes(app):
 
-    @app.route("/api/ea/poll/<symbol>/<tf>", methods=["GET"])
+    @app.route("/api/ea/poll/<symbol>/<tf>", methods=["GET", "POST"])
     def ea_poll(symbol, tf):
         if not _check_key():
             return jsonify({"error": "unauthorized"}), 401
-        result = poll(symbol, tf)
+        pushed_df = None
+        if request.method == "POST":
+            data = request.get_json(force=True, silent=True) or {}
+            pushed_df = _df_from_posted_candles(data.get("candles"))
+        result = poll(symbol, tf, pushed_df=pushed_df)
         return jsonify(result)
 
     @app.route("/api/ea/report", methods=["POST"])
