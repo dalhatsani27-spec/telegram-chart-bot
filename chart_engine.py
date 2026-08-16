@@ -583,8 +583,12 @@ def generate_trendline_map(
     sp = family.get("scanned_pattern")
     if sp:
         p_bias = sp.get("bias")
-        # Strong educational-chart colors
-        p_color = "#00c853" if p_bias == "BUY" else "#ff1744" if p_bias == "SELL" else "#ffb300"
+        # Bias-based coloring matching the standard trendline-pattern legend:
+        # green = bullish, red = bearish, white = neutral. Applied uniformly
+        # to every scanned pattern (triangles/wedges included) rather than
+        # coloring rails by their position on the chart (upper/lower), which
+        # doesn't tell you the bias at a glance the way the legend does.
+        p_color = "#00c853" if p_bias == "BUY" else "#ff1744" if p_bias == "SELL" else "#e0e0e0"
         key_points = sp.get("key_points") or []
         trigger_line = sp.get("trigger_line") or []
         name = sp.get("name", "")
@@ -665,11 +669,19 @@ def generate_trendline_map(
                     ax.text(chart_len * 0.02, ty0, "Neckline", fontsize=8,
                             color=p_color, fontweight="bold", va="bottom", zorder=12)
 
-        # Pattern title badge (clean, high-contrast)
+        # Pattern title badge -- cheat-sheet style: NAME — BIAS CATEGORY
+        # (e.g. "ASCENDING TRIANGLE — BULLISH CONTINUATION"), all caps,
+        # matching the reference trendline-pattern legend rather than just
+        # a bare name + confidence number.
         conf = sp.get("confidence", 0)
-        title_txt = f"{name}  ·  {conf:.0f}%"
+        category = str(sp.get("category") or "").upper()
+        bias_word = "BULLISH" if p_bias == "BUY" else "BEARISH" if p_bias == "SELL" else "NEUTRAL"
+        stage = str(sp.get("stage") or "").upper()
+        stage_suffix = f"  [{stage}]" if stage and stage != "CONFIRMED" else ""
+        title_txt = f"{name.upper()} — {bias_word} {category}  ·  {conf:.0f}%{stage_suffix}"
         ax.text(0.015, 0.97, title_txt, transform=ax.transAxes,
-                fontsize=10, color="#ffffff", fontweight="bold", va="top", zorder=15,
+                fontsize=9.5, color="#ffffff" if p_bias != "NEUTRAL" else "#111111",
+                fontweight="bold", va="top", zorder=15,
                 bbox=dict(boxstyle="round,pad=0.4", facecolor=p_color, edgecolor="none", alpha=0.92))
 
     # --- Pick exactly ONE structure to draw as "the pattern" -------------
@@ -719,10 +731,17 @@ def generate_trendline_map(
                                           edgecolor="none", alpha=0.92))
 
     elif active_pattern == "wedge" and wedge:
+        # Fallback only: fires when no properly stage-gated scanned_pattern
+        # triangle/wedge exists to draw instead (see run_trendline_analysis,
+        # which always prefers "scanned" when one is available). Colored by
+        # BIAS to match the standard legend (green=bullish, red=bearish,
+        # white=neutral), not by rail position -- and carries no directional
+        # claim since this geometry has no confirmation-candle gate.
         pattern_title = wedge["pattern"]
         apex = wedge.get("apex_index")
-        # Educational-style: green lower, red upper for rising/falling wedges
-        for rail, color, tag in ((wedge["lower"], "#00c853", "Lower"), (wedge["upper"], "#ff1744", "Upper")):
+        w_bias = wedge.get("bias")
+        w_color = "#00c853" if w_bias == "BUY" else "#ff1744" if w_bias == "SELL" else "#e0e0e0"
+        for rail, color, tag in ((wedge["lower"], w_color, "Lower"), (wedge["upper"], w_color, "Upper")):
             x0 = max(0, int(rail["x0"]) - offset)
             x1 = chart_len - 1
             if apex is not None:

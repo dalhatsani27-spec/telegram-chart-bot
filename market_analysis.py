@@ -1286,7 +1286,7 @@ def _atr(df):
 class Pattern:
     """Container for a detected pattern, with everything needed to render it."""
     def __init__(self, name, category, bias, trigger_price, trigger_line,
-                 key_points, confidence, note):
+                 key_points, confidence, note, boundary_lines=None):
         self.name = name                 # display name
         self.category = category         # 'reversal' | 'continuation'
         self.bias = bias                 # 'BUY' | 'SELL'
@@ -1295,6 +1295,11 @@ class Pattern:
         self.key_points = key_points          # list of (x, y, label) marker points to draw
         self.confidence = confidence      # 0-100 raw detector confidence
         self.note = note                  # human-readable rationale
+        # For triangle/wedge patterns only: the two boundary rails as
+        # {"upper": [(x,y),(x,y)], "lower": [(x,y),(x,y)]} so the chart can
+        # draw BOTH lines directly (cheat-sheet style) instead of a renderer
+        # having to reverse-engineer them from key_point labels.
+        self.boundary_lines = boundary_lines
 
     def to_dict(self):
         return {
@@ -1306,6 +1311,7 @@ class Pattern:
             "entry_style": getattr(self, "entry_style", None),
             "entry_reason": getattr(self, "entry_reason", None),
             "retest_level": getattr(self, "retest_level", None),
+            "boundary_lines": getattr(self, "boundary_lines", None),
         }
 
 
@@ -1927,6 +1933,8 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
     line = [(upper_pts[0][0], upper_pts[0][1]), (upper_pts[-1][0], upper_pts[-1][1])]
     lower_line = [(lower_pts[0][0], lower_pts[0][1]), (lower_pts[-1][0], lower_pts[-1][1])]
 
+    boundary_lines = {"upper": line, "lower": lower_line}
+
     # Ascending triangle: flat top, rising bottom -> bullish continuation
     if abs(up_norm) < FLAT and lo_norm > FLAT:
         return Pattern(
@@ -1936,7 +1944,8 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
             key_points=[(p, y, "Resistance") for p, y in upper_pts] + [(p, y, "Higher Low") for p, y in lower_pts],
             confidence=65 + touch_quality_bonus,
             note=f"Flat resistance near {upper_now:.5f} with rising higher-lows underneath — "
-                 f"buyers stepping in earlier each time. Breakout above the flat top favors continuation up."
+                 f"buyers stepping in earlier each time. Breakout above the flat top favors continuation up.",
+            boundary_lines=boundary_lines,
         )
     # Descending triangle: falling top, flat bottom -> bearish continuation
     if up_norm < -FLAT and abs(lo_norm) < FLAT:
@@ -1947,7 +1956,8 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
             key_points=[(p, y, "Support") for p, y in lower_pts] + [(p, y, "Lower High") for p, y in upper_pts],
             confidence=65 + touch_quality_bonus,
             note=f"Flat support near {lower_now:.5f} with falling lower-highs above — "
-                 f"sellers stepping in earlier each time. Breakdown below flat support favors continuation down."
+                 f"sellers stepping in earlier each time. Breakdown below flat support favors continuation down.",
+            boundary_lines=boundary_lines,
         )
     # Rising wedge: both rising, converging, upper rising slower -> bearish reversal
     if up_norm > FLAT and lo_norm > FLAT and lo_norm > up_norm:
@@ -1958,7 +1968,8 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
             key_points=[(p, y, "Upper") for p, y in upper_pts] + [(p, y, "Lower") for p, y in lower_pts],
             confidence=63 + touch_quality_bonus,
             note="Both boundaries rising but converging (upper line losing steam faster) — "
-                 "classic exhaustion structure. Break of the rising lower trendline signals reversal down."
+                 "classic exhaustion structure. Break of the rising lower trendline signals reversal down.",
+            boundary_lines=boundary_lines,
         )
     # Falling wedge: both falling, converging, lower falling slower -> bullish reversal
     if up_norm < -FLAT and lo_norm < -FLAT and up_norm < lo_norm:
@@ -1969,7 +1980,8 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
             key_points=[(p, y, "Upper") for p, y in upper_pts] + [(p, y, "Lower") for p, y in lower_pts],
             confidence=63 + touch_quality_bonus,
             note="Both boundaries falling but converging (lower line losing steam faster) — "
-                 "selling pressure fading. Break of the falling upper trendline signals reversal up."
+                 "selling pressure fading. Break of the falling upper trendline signals reversal up.",
+            boundary_lines=boundary_lines,
         )
     # Symmetrical triangle: opposite slopes converging, roughly equal magnitude
     if up_norm < -FLAT and lo_norm > FLAT:
@@ -1982,7 +1994,8 @@ def detect_triangle_or_wedge(df, ph, pl, lookback=60):
             confidence=55 + touch_quality_bonus,
             note="Converging trendlines with contracting range (coiling price action). "
                  "Direction is set by whichever side breaks first — currently leaning "
-                 + ("up." if bias == "BUY" else "down.")
+                 + ("up." if bias == "BUY" else "down."),
+            boundary_lines=boundary_lines,
         )
     return None
 
@@ -2112,7 +2125,67 @@ _PRIORITY = {
 }
 
 
-def scan_all_patterns(df, left=3, right=3, volume_profile=None, pivots=None):
+def is_price_ranging_vs_sma(df, sma=None, lookback=40, min_crosses=3):
+    """
+    Decide whether price is currently CHOPPING around the 20 SMA (a pattern
+    can still legitimately be forming) or has already left that chop and
+    established a clean, sloping, one-sided trend (in which case any shape
+    from the prior chop is already complete/broken -- there is no live
+    pattern here anymore, just a trend).
+
+    Rule of thumb used: over the last `lookback` bars, price is "ranging"
+    if EITHER the SMA itself is essentially flat (hasn't moved a meaningful
+    distance in ATR terms) OR price has crossed back and forth over the SMA
+    at least `min_crosses` times. Once the SMA is clearly sloped AND price
+    has stopped crossing it, the market has moved into a trend leg and
+    pattern detection should stand down.
+
+    Returns (is_ranging: bool, reason: str).
+    """
+    n = len(df)
+    if n < 25:
+        return True, "insufficient data — default to allowing pattern scan"
+
+    if sma is None:
+        price = (df["High"] + df["Low"]) / 2.0
+        sma = price.rolling(20).mean()
+
+    try:
+        sma_vals = pd.to_numeric(pd.Series(sma).reindex(df.index) if hasattr(sma, "reindex") else sma,
+                                  errors="coerce").to_numpy(float)
+    except Exception:
+        return True, "SMA unavailable — default to allowing pattern scan"
+
+    close = pd.to_numeric(df["Close"], errors="coerce").to_numpy(float)
+    start = max(0, n - lookback)
+    seg_close = close[start:]
+    seg_sma = sma_vals[start:] if len(sma_vals) >= n else np.full(n - start, np.nan)
+
+    valid = np.isfinite(seg_close) & np.isfinite(seg_sma)
+    if valid.sum() < 10:
+        return True, "insufficient SMA history — default to allowing pattern scan"
+
+    diff = seg_close[valid] - seg_sma[valid]
+    signs = np.sign(diff)
+    signs = signs[signs != 0]
+    crosses = int(np.sum(signs[1:] != signs[:-1])) if len(signs) > 1 else 0
+
+    atr_now = float(df["ATR"].iloc[-1]) if "ATR" in df.columns and not df["ATR"].isna().all() else None
+    valid_sma = seg_sma[valid]
+    sma_move = abs(float(valid_sma[-1]) - float(valid_sma[0]))
+    sma_flat = True
+    if atr_now and atr_now > 0:
+        sma_flat = sma_move < 0.6 * atr_now
+
+    ranging = bool(sma_flat or crosses >= min_crosses)
+    reason = (f"{crosses} SMA cross(es) in last {lookback} bars, "
+              f"SMA {'flat' if sma_flat else 'sloping'} "
+              f"({'ranging' if ranging else 'trend established'})")
+    return ranging, reason
+
+
+def scan_all_patterns(df, left=3, right=3, volume_profile=None, pivots=None, sma=None,
+                       ranging_lookback=40):
     """
     Runs every detector against the given OHLC dataframe (must have a
     'Close'-indexed reset-friendly integer position order — pass df as-is,
@@ -2138,8 +2211,20 @@ def scan_all_patterns(df, left=3, right=3, volume_profile=None, pivots=None):
     swing high right next to them. Sharing one pivot source keeps every
     detector reading the same market structure.
 
+    sma: optional pre-computed 20-SMA series (pandas Series aligned to df's
+    index). Used to gate pattern detection: patterns are only meaningful
+    while price is still chopping/ranging around the 20 SMA. Once price has
+    broken away with an impulsive leg and established a sloping SMA trend,
+    any prior pattern is already complete/broken -- there is nothing live
+    to draw or trade as a "pattern" anymore, just a trend. See
+    is_price_ranging_vs_sma().
+
     Returns: (best_pattern_or_None, all_detected_list)
     """
+    ranging, ranging_reason = is_price_ranging_vs_sma(df, sma=sma, lookback=ranging_lookback)
+    if not ranging:
+        return None, []
+
     if pivots:
         ph = sorted(int(p["index"]) for p in pivots if p.get("type") == "high")
         pl = sorted(int(p["index"]) for p in pivots if p.get("type") == "low")

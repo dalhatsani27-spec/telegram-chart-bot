@@ -26,6 +26,7 @@ import market_data
 from market_analysis import (
     zigzag_swings, find_swings, compute_volume_profile, detect_confirmation_candle,
     analyse_structure, detect_order_blocks, scan_all_patterns, detect_market_sequence,
+    is_price_ranging_vs_sma,
 )
 from topdown_engine import get_topdown_bias, format_topdown_summary
 
@@ -1014,8 +1015,7 @@ def _sr_setup_confidence(df: pd.DataFrame, horizontal_levels: List[Dict], close:
     return {"confidence": confidence, "level": best, "bias": bias, "distance_atr": round(dist_atr, 2)}
 
 
-def _pattern_uses_trendline_geometry(sp: Optional[Dict], pv: Optional[Dict],
-                                      primary_line: Optional[Dict],
+def _pattern_uses_trendline_geometry(sp: Optional[Dict], primary_line: Optional[Dict],
                                       index_tol: int = 2, price_tol_frac: float = 0.01) -> bool:
     """
     A trendline is a plain structural read: a rising support or falling
@@ -1032,16 +1032,16 @@ def _pattern_uses_trendline_geometry(sp: Optional[Dict], pv: Optional[Dict],
     and inflate the report with e.g. "TRENDLINE 63%" while the chart is
     unambiguously showing a Head and Shoulders.
 
-    Two ways this happens:
-    1. A wedge/triangle (pattern_visual) IS two trendlines by definition --
-       always counts as pattern geometry, never an independent trendline.
-    2. A classic pattern's (scanned_pattern) key points literally sit on
-       the primary trendline's own two anchor points (e.g. the rail runs
-       Head -> Right Shoulder, which are also two of the pattern's own
-       labelled points) -- same rail, described twice.
+    This is decided live, per-call, off the actual anchor points -- never a
+    blanket "any wedge counts" assumption. A scanned pattern's key points
+    (for a wedge/triangle these are the same points its own boundary_lines
+    were fit through; for a classic pattern they're the labelled Head/
+    Shoulder/Top/Bottom points) are checked against the primary trendline's
+    own two anchor points. If at least two of them coincide within
+    tolerance, the "trendline" being scored IS the pattern's own skeleton --
+    otherwise they're genuinely two different rails on the chart and both
+    can stand as independent setups.
     """
-    if pv:
-        return True
     if not sp or not primary_line:
         return False
     kps = sp.get("key_points") or []
@@ -1079,19 +1079,22 @@ def select_best_setup(family: Dict[str, Any], df: pd.DataFrame) -> Dict[str, Any
 
     trendline_conf = family.get("strength", 0) if family.get("family_kind", "none") != "none" else 0
 
+    # Score the properly stage-gated, confirmation-checked pattern
+    # (scanned_pattern) as the ONE source of pattern confidence -- this
+    # covers triangles/wedges too (market_analysis.detect_triangle_or_wedge),
+    # not just classic reversal shapes. The older independent-slope wedge
+    # fit (`pattern_visual` / family["wedge"]) is deliberately NOT scored
+    # here: it has no stage gate and no confirmation-candle check, so
+    # letting it compete would let an unconfirmed shape win BEST SETUP.
     pattern_conf, pattern_label = 0, None
-    pv = family.get("pattern_visual")
-    if pv:
-        pattern_conf, pattern_label = pv["final_confidence"], pv["pattern_name"]
-    else:
-        sp = family.get("scanned_pattern")
-        mw = family.get("mw_pattern")
-        if sp:
-            stage = str(family.get("pattern_stage") or sp.get("stage") or "").upper()
-            mult = {"CONFIRMED": 1.0, "TRIGGERED": 0.85, "FORMING": 0.55}.get(stage, 0.5)
-            pattern_conf, pattern_label = int(sp.get("confidence", 0) * mult), sp.get("name")
-        elif mw:
-            pattern_conf, pattern_label = int(family.get("pattern_confidence", 0)), mw.get("name")
+    sp = family.get("scanned_pattern")
+    mw = family.get("mw_pattern")
+    if sp:
+        stage = str(family.get("pattern_stage") or sp.get("stage") or "").upper()
+        mult = {"CONFIRMED": 1.0, "TRIGGERED": 0.85, "FORMING": 0.55}.get(stage, 0.5)
+        pattern_conf, pattern_label = int(sp.get("confidence", 0) * mult), sp.get("name")
+    elif mw:
+        pattern_conf, pattern_label = int(family.get("pattern_confidence", 0)), mw.get("name")
 
     sr_result = _sr_setup_confidence(df, family.get("horizontal_levels") or [], close, atr_now)
     sr_conf = sr_result["confidence"] if sr_result else 0
@@ -1102,7 +1105,7 @@ def select_best_setup(family: Dict[str, Any], df: pd.DataFrame) -> Dict[str, Any
     # outrank the pattern it's part of.
     sp_for_check = family.get("scanned_pattern")
     primary_line = (family.get("downtrends") or [None])[0] or (family.get("uptrends") or [None])[0]
-    trendline_is_pattern_rail = _pattern_uses_trendline_geometry(sp_for_check, pv, primary_line)
+    trendline_is_pattern_rail = _pattern_uses_trendline_geometry(sp_for_check, primary_line)
 
     scores = {"TRENDLINE": trendline_conf, "PATTERN": pattern_conf, "S/R": sr_conf}
     eligible = dict(scores)
@@ -1914,12 +1917,15 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     # around the entry zone. The report path can still ask for more via
     # max_levels if it wants the full picture.
     horizontal_levels = _detect_horizontal_levels(df, pivots, n, max_levels=2)
-    # Only let a wedge set direction when it is reasonably strong.
-    # Weak converging geometry should not create trade bias.
-    if wedge and direction == "NEUTRAL" and wedge["bias"] != "NEUTRAL" and strength >= 55:
-        direction = wedge["bias"]
-        strength = max(strength, 60)
-        reasons.append(f"{wedge['pattern']} — rails converging toward apex")
+    # NOTE: this legacy independent-slope wedge fit (`wedge`) is kept ONLY
+    # for the geometry it hands to `pattern_visual`'s narrative text -- it
+    # must never set `direction` itself. It has no neckline-stage gate and
+    # no marubozu/engulfing confirmation-candle check, so letting it move
+    # direction here would silently bypass the same confirmation rule every
+    # other pattern in this bot is held to. The properly-gated equivalent
+    # (market_analysis.detect_triangle_or_wedge, via scanned_pattern) is
+    # what's allowed to set direction -- see run_trendline_analysis, which
+    # only does so once the pattern's stage is TRIGGERED/CONFIRMED.
 
     projections = _measured_move_projections(df, pivots, direction)
     vp = compute_volume_profile(df.iloc[:-1])
@@ -2093,6 +2099,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
         "channel": channel,
         "wedge": wedge,
         "pattern_visual": pattern_visual,
+        "sma20_series": sma20,
         "horizontal_levels": horizontal_levels,
         "projections": projections,
         "mw_pattern": mw,
@@ -3274,13 +3281,35 @@ def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown: Optiona
         # engines on one chart is how a Double Top ends up drawn on minor
         # pullback highs while the structure line shows a bigger untested
         # swing high right next to it.
-        best_pattern, all_patterns = scan_all_patterns(df_tf, pivots=family.get("pivots_full") or family.get("pivots"))
+        best_pattern, all_patterns = scan_all_patterns(
+            df_tf, pivots=family.get("pivots_full") or family.get("pivots"),
+            sma=family.get("sma20_series"),
+        )
         family["scanned_pattern"] = best_pattern.to_dict() if best_pattern else None
         family["scanned_patterns"] = [p.to_dict() for p in all_patterns]
     except Exception as e:
         print(f"[run_trendline_analysis] pattern scan failed for {symbol}: {e!r}")
         family["scanned_pattern"] = None
         family["scanned_patterns"] = []
+
+    # Surface WHY no pattern is being shown when price has already left the
+    # 20-SMA chop and established a sloping trend -- otherwise "no pattern"
+    # reads as the scanner having failed rather than as the expected state
+    # ("no pattern, because there's a trend" is itself the read).
+    try:
+        is_ranging, ranging_reason = is_price_ranging_vs_sma(df_tf, sma=family.get("sma20_series"))
+        family["sma_ranging"] = is_ranging
+        family["sma_ranging_reason"] = ranging_reason
+        if not is_ranging and not family.get("scanned_pattern"):
+            family.setdefault("reasons", []).append(
+                f"No live pattern — price has left the 20SMA chop and the SMA is trending "
+                f"({ranging_reason}). Any earlier shape is already complete/broken; this is a "
+                f"trend leg now, not a forming pattern."
+            )
+    except Exception as e:
+        print(f"[run_trendline_analysis] ranging check failed for {symbol}: {e!r}")
+        family["sma_ranging"] = None
+        family["sma_ranging_reason"] = None
 
     direction = family.get("direction", "NEUTRAL")
     strength = family.get("strength", 0)
@@ -3313,7 +3342,16 @@ def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown: Optiona
         "Head and Shoulders", "Inverse Head and Shoulders",
         "Double Top (M)", "Double Bottom (W)",
     }
-    if sp and sp.get("name") in reversal_names:
+    # Triangles/wedges get the exact same neckline-stage treatment as the
+    # classic reversal patterns -- a wedge is just as capable of being an
+    # unbroken shape as a Double Top is, and must not be allowed to move
+    # direction/strength until its own rail has actually broken with a
+    # confirmation candle (see classify_pattern_stage).
+    stage_gated_names = reversal_names | {
+        "Ascending Triangle", "Descending Triangle", "Symmetrical Triangle",
+        "Rising Wedge", "Falling Wedge",
+    }
+    if sp and sp.get("name") in stage_gated_names:
         stage = str(sp.get("stage") or "FORMING").upper()
         stage_note = sp.get("stage_note") or ""
         reasons.append(f"Pattern stage: {stage} — {stage_note}")
@@ -3363,6 +3401,28 @@ def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown: Optiona
             elif family_kind == "ascending":
                 family["active_pattern"] = "channel" if family.get("channel") else "none"
 
+    # Triangle/wedge/rectangle names, classified by market_analysis.py's
+    # detect_triangle_or_wedge / detect_rectangle to match the standard
+    # trendline-pattern taxonomy (ascending/descending triangle, rising/
+    # falling wedge, symmetrical triangle). These already carry the correct
+    # bias, the FORMING/TRIGGERED/CONFIRMED/FAKEOUT stage gate, and the
+    # marubozu/engulfing confirmation-candle check via classify_pattern_stage
+    # -- unlike the older independent-slope wedge fit (_detect_converging_
+    # wedge / family["wedge"]) which has none of that. Whenever one of these
+    # is present, it must be the chart's SINGLE source of truth for the
+    # drawn geometry and for direction -- never the older ungated fit.
+    WEDGE_TRIANGLE_NAMES = (
+        "Ascending Triangle", "Descending Triangle", "Symmetrical Triangle",
+        "Rising Wedge", "Falling Wedge",
+    )
+    if sp and sp.get("name") in WEDGE_TRIANGLE_NAMES:
+        # Always let the properly-gated scanned pattern win the chart over
+        # the legacy ungated wedge fit, regardless of whether it happens to
+        # agree with the direction already on the board.
+        family["active_pattern"] = "scanned"
+        family["pattern_confidence"] = max(int(family.get("pattern_confidence") or 0),
+                                            int(sp.get("confidence") or 0))
+
     if sp:
         sp_name = sp.get("name", "")
         sp_bias = sp.get("bias", "NEUTRAL")
@@ -3376,13 +3436,31 @@ def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown: Optiona
             and sp_bias == "SELL" and sp_conf >= 72
         )
         is_bullish_cont = (
-            sp_name in ("Bull Flag", "Bullish Pennant", "Ascending Triangle", "Ascending Channel")
-            and sp_conf >= 68
+            sp_name in ("Bull Flag", "Bullish Pennant", "Ascending Triangle", "Ascending Channel",
+                        "Falling Wedge")
+            and sp_bias == "BUY" and sp_conf >= 68
         )
         is_bearish_cont = (
-            sp_name in ("Bear Flag", "Bearish Pennant", "Descending Triangle", "Descending Channel")
-            and sp_conf >= 68
+            sp_name in ("Bear Flag", "Bearish Pennant", "Descending Triangle", "Descending Channel",
+                        "Rising Wedge")
+            and sp_bias == "SELL" and sp_conf >= 68
         )
+        # A triangle/wedge that hasn't broken its own trigger rail yet
+        # (stage FORMING) is a shape, not a signal -- same rule as the
+        # reversal patterns above. Only let it move direction once there's
+        # a real break (TRIGGERED) confirmed by a marubozu/engulfing candle,
+        # or a break-and-hold retest (CONFIRMED).
+        if sp_name in ("Ascending Triangle", "Descending Triangle", "Symmetrical Triangle",
+                       "Rising Wedge", "Falling Wedge"):
+            cont_stage = str(family.get("pattern_stage") or "").upper()
+            if cont_stage not in ("TRIGGERED", "CONFIRMED"):
+                if is_bullish_cont or is_bearish_cont:
+                    reasons.append(
+                        f"⏳ {sp_name} ({sp_conf:.0f}%) still FORMING — rail not broken with "
+                        f"confirmation candle yet, cannot set direction"
+                    )
+                is_bullish_cont = False
+                is_bearish_cont = False
 
         # Continuation patterns own the bias when they are clear
         if is_bullish_cont and direction in ("SELL", "NEUTRAL"):

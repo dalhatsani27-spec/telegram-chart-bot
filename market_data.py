@@ -137,15 +137,34 @@ def _deriv_request(payload, timeout=8):
     raise RuntimeError("Deriv public market-data connection failed. " + " | ".join(errors))
 
 
+def _deriv_request_with_retry(payload, timeout=8, retries=2, backoff=0.6):
+    """
+    Same as _deriv_request, but retries transient failures (a dropped
+    socket, a momentary timeout on one endpoint) before giving up. A single
+    hiccup on an otherwise-healthy feed shouldn't fail an entire live
+    analysis and surface as "Trendline analysis failed" to the user --
+    that's the difference between a robust live read and a flaky one.
+    """
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return _deriv_request(payload, timeout=timeout)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(backoff * (attempt + 1))
+    raise last_exc
+
+
 def deriv_active_symbols():
     """Return currently active Deriv underlying symbols (public, no auth)."""
-    data = _deriv_request({"active_symbols": "brief"})
+    data = _deriv_request_with_retry({"active_symbols": "brief"})
     return data.get("active_symbols", [])
 
 
 def deriv_fetch_tick(symbol):
     """Return latest public Deriv quote for a symbol, or None."""
-    data = _deriv_request({"ticks": deriv_symbol(symbol)})
+    data = _deriv_request_with_retry({"ticks": deriv_symbol(symbol)})
     tick = data.get("tick") or {}
     return float(tick["quote"]) if "quote" in tick else None
 
@@ -155,11 +174,27 @@ def deriv_fetch_candles(symbol, tf_code="30min", count=250):
     granularity = DERIV_TF_SECONDS.get(tf_code)
     if granularity is None:
         raise ValueError(f"Unsupported Deriv timeframe: {tf_code}")
-    data = _deriv_request({
+    # Ask for one extra candle -- the currently-forming (not yet closed) bar
+    # gets trimmed off below, so we still end up with `count` CLOSED bars.
+    data = _deriv_request_with_retry({
         "ticks_history": deriv_symbol(symbol), "end": "latest",
-        "style": "candles", "granularity": granularity, "count": int(count)
+        "style": "candles", "granularity": granularity, "count": int(count) + 1
     })
     candles = data.get("candles", [])
+    if not candles:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
+    # Drop the last candle if its bucket hasn't closed yet. The MT5 path
+    # already does the equivalent (copy_rates_from_pos shifted by 1 to skip
+    # the forming bar); without this, every live tick reshapes the Open/
+    # High/Low/Close of the newest candle mid-bar, which then reshapes ATR/
+    # RSI/EMA/SMA/pivots on every refresh -- so a pattern's shape or even its
+    # name could flicker before the bar is actually done. Only fully-closed
+    # bars should ever feed pattern/pivot/indicator logic.
+    now_epoch = time.time()
+    last_epoch = int(candles[-1]["epoch"])
+    if now_epoch < last_epoch + granularity:
+        candles = candles[:-1]
+    candles = candles[-count:]
     if not candles:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
     df = pd.DataFrame(candles)
@@ -228,7 +263,15 @@ def fetch_candles(symbol, tf_code, count=250):
             if not mt5.symbol_select(symbol, True):
                 pass  # symbol not in Market Watch under this exact name -- fall through to legacy
             else:
-                rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 1, count)  # shift 1 = skip current forming bar
+                # Light retry: a momentary terminal hiccup (reconnecting to
+                # the broker, a stale tick) shouldn't fail the whole request
+                # when a retry a fraction of a second later would succeed.
+                rates = None
+                for attempt in range(3):
+                    rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 1, count)  # shift 1 = skip current forming bar
+                    if rates is not None and len(rates) >= 30:
+                        break
+                    time.sleep(0.3 * (attempt + 1))
                 if rates is not None and len(rates) >= 30:
                     df = pd.DataFrame(rates)
                     df['time'] = pd.to_datetime(df['time'], unit='s')
