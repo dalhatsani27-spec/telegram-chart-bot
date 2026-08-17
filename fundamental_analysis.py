@@ -52,11 +52,6 @@ US_SERIES = {
     "yield10": "DGS10",
 }
 
-# Qualitative macro direction: higher rates/yields generally support a
-# currency; higher inflation is supportive only insofar as it raises the
-# probability of tighter policy. We therefore use the *change* in the latest
-# values rather than treating a high absolute CPI reading as automatically bullish.
-
 
 def _cached(key: str) -> Any:
     item = _CACHE.get(key)
@@ -89,7 +84,7 @@ def _fred_series(series_id: str, limit: int = 8) -> List[float]:
         for row in rows:
             try:
                 v = float(row.get("value"))
-                if v == v:  # not NaN
+                if v == v:
                     values.append(v)
             except (TypeError, ValueError):
                 continue
@@ -138,12 +133,9 @@ def _news_score(ticker: str) -> Tuple[float, int, List[str]]:
         weight_sum += w
     if not weight_sum:
         return 0.0, 0, []
-    # Alpha sentiment is roughly -1..+1. Map to -30..+30.
     score = max(-30.0, min(30.0, weighted / weight_sum * 30.0))
-    reasons = []
     label = "bullish" if score > 7 else "bearish" if score < -7 else "mixed/neutral"
-    reasons.append(f"Alpha Vantage news sentiment {label} ({score:+.0f})")
-    return score, len(feed), reasons
+    return score, len(feed), [f"Alpha Vantage news sentiment {label} ({score:+.0f})"]
 
 
 def _delta(values: Iterable[float]) -> float:
@@ -172,44 +164,38 @@ def _us_macro() -> Tuple[float, List[str], Dict[str, Any]]:
         score += max(-20, min(20, d * 10))
         if abs(d) >= 0.05:
             reasons.append(f"Fed funds rate changed {d:+.2f} pp")
-
     if cpi:
         metrics["cpi"] = cpi[0]
         d = _delta(cpi)
-        # Rising inflation modestly raises tightening expectations; falling
-        # inflation reduces that pressure. Keep this contribution small.
         score += max(-8, min(8, d * 0.8))
         if abs(d) >= 0.1:
             reasons.append(f"US CPI changed {d:+.2f}")
-
     if unemp:
         metrics["unemployment"] = unemp[0]
         d = _delta(unemp)
-        # Falling unemployment is mildly supportive; rising unemployment is not.
         score += max(-8, min(8, -d * 4))
         if abs(d) >= 0.1:
             reasons.append(f"US unemployment changed {d:+.2f} pp")
-
     if gdp:
         metrics["gdp"] = gdp[0]
         d = _delta(gdp)
         score += max(-8, min(8, d * 0.15))
         if abs(d) >= 0.1:
             reasons.append(f"US GDP changed {d:+.2f}")
-
     if y10:
         metrics["10y_yield"] = y10[0]
         d = _delta(y10)
         score += max(-10, min(10, d * 4))
         if abs(d) >= 0.03:
             reasons.append(f"US 10Y yield changed {d:+.2f} pp")
-
     return max(-60.0, min(60.0, score)), reasons, metrics
 
 
 def _currency_news_ticker(currency: str) -> Optional[str]:
-    # Alpha Vantage NEWS_SENTIMENT supports currency filters such as USD/JPY.
-    return currency if currency in {"USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD"} else None
+    # Alpha Vantage's NEWS_SENTIMENT forex filter uses FOREX:XXX.
+    if currency in {"USD", "EUR", "GBP", "JPY", "AUD", "CAD", "NZD"}:
+        return f"FOREX:{currency}"
+    return None
 
 
 def currency_fundamental(currency: str) -> Dict[str, Any]:
@@ -218,14 +204,12 @@ def currency_fundamental(currency: str) -> Dict[str, Any]:
         score, reasons, metrics = _us_macro()
     else:
         score, reasons, metrics = 0.0, [f"No dedicated FRED macro model for {currency}; using news sentiment"], {}
-
     ticker = _currency_news_ticker(currency)
     if ticker:
         nscore, count, nreasons = _news_score(ticker)
         score += nscore
         reasons.extend(nreasons)
         metrics["news_articles"] = count
-
     score = max(-100.0, min(100.0, score))
     bias = "BULLISH" if score >= 20 else "BEARISH" if score <= -20 else "NEUTRAL"
     return {"currency": currency, "score": round(score), "bias": bias, "reasons": reasons[:6], "metrics": metrics}
@@ -240,42 +224,20 @@ def analyze(symbol: str) -> Dict[str, Any]:
     clean = str(symbol or "").upper().replace("/", "")
     base, quote = PAIR_CURRENCIES.get(clean, (None, None))
     if not base or not quote:
-        return {
-            "symbol": symbol, "available": False, "bias": "NEUTRAL", "score": 0,
-            "confidence": "LOW", "reason": "No currency mapping for this symbol.",
-        }
-
+        return {"symbol": symbol, "available": False, "bias": "NEUTRAL", "score": 0, "confidence": "LOW", "reason": "No currency mapping for this symbol."}
     base_data = currency_fundamental(base)
     quote_data = currency_fundamental(quote)
     score = max(-100, min(100, base_data["score"] - quote_data["score"]))
     bias = "BULLISH" if score >= 20 else "BEARISH" if score <= -20 else "NEUTRAL"
     confidence = "HIGH" if abs(score) >= 50 else "MEDIUM" if abs(score) >= 25 else "LOW"
-    reasons = [
-        f"{base}: {base_data['bias']} ({base_data['score']:+d})",
-        f"{quote}: {quote_data['bias']} ({quote_data['score']:+d})",
-    ]
-    reasons.extend(base_data["reasons"][:2])
-    reasons.extend(quote_data["reasons"][:2])
-    return {
-        "symbol": clean, "available": bool(FRED_API_KEY or ALPHA_VANTAGE_API_KEY),
-        "bias": bias, "score": int(score), "confidence": confidence,
-        "base": base_data, "quote": quote_data, "reasons": reasons[:6],
-    }
+    reasons = [f"{base}: {base_data['bias']} ({base_data['score']:+d})", f"{quote}: {quote_data['bias']} ({quote_data['score']:+d})"]
+    reasons.extend(base_data["reasons"][:2]); reasons.extend(quote_data["reasons"][:2])
+    return {"symbol": clean, "available": bool(FRED_API_KEY or ALPHA_VANTAGE_API_KEY), "bias": bias, "score": int(score), "confidence": confidence, "base": base_data, "quote": quote_data, "reasons": reasons[:6]}
 
 
 def format_report(result: Dict[str, Any]) -> str:
     if not result.get("available"):
         return "FUNDAMENTAL ANALYSIS\n\nWAIT / UNAVAILABLE\nSet FRED_API_KEY and/or ALPHA_VANTAGE_API_KEY."
-    lines = [
-        "════════════════════════════",
-        "📊 FUNDAMENTAL ANALYSIS",
-        "════════════════════════════",
-        f"{result.get('symbol', '—')}",
-        f"BIAS: {result.get('bias', 'NEUTRAL')}",
-        f"SCORE: {result.get('score', 0):+d}/100",
-        f"CONFIDENCE: {result.get('confidence', 'LOW')}",
-        "",
-        "MACRO INTELLIGENCE:",
-    ]
+    lines = ["════════════════════════════", "📊 FUNDAMENTAL ANALYSIS", "════════════════════════════", f"{result.get('symbol', '—')}", f"BIAS: {result.get('bias', 'NEUTRAL')}", f"SCORE: {result.get('score', 0):+d}/100", f"CONFIDENCE: {result.get('confidence', 'LOW')}", "", "MACRO INTELLIGENCE:"]
     lines.extend(f"• {r}" for r in result.get("reasons", [])[:6])
     return "\n".join(lines)
