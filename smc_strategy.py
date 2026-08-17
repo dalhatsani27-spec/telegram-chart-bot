@@ -1,17 +1,18 @@
 """Compatibility API for the bot's SMC strategy.
 
 SMC is powered by strategy_upgrade.smc_analysis and now receives the same
-macro fundamental filter used by Trendline and OTE.
+macro fundamental filter and Alligator Trifecta regime gate used by the other
+strategies.
 """
 from strategy_upgrade import smc_analysis, format_smc_report
 from fundamental_analysis import analyze as analyze_fundamentals
+from alligator_logic import apply_alligator
 
 
-def run_smc_analysis(symbol: str, tf_code: str = "30min", topdown=None):
-    result = smc_analysis(symbol, tf_code=tf_code, topdown=topdown)
+def _apply_fundamental(result):
     if not result or result.get("error"):
         return result
-    fundamental = analyze_fundamentals(symbol)
+    fundamental = analyze_fundamentals(result.get("symbol", ""))
     result["fundamental"] = fundamental
     if not fundamental.get("available"):
         return result
@@ -38,8 +39,13 @@ def run_smc_analysis(symbol: str, tf_code: str = "30min", topdown=None):
     return result
 
 
+def run_smc_analysis(symbol: str, tf_code: str = "30min", topdown=None):
+    result = smc_analysis(symbol, tf_code=tf_code, topdown=topdown)
+    return apply_alligator(_apply_fundamental(result))
+
+
 def build_smc_ticket(analysis):
-    if not analysis or not analysis.get("entry_ready"):
+    if not analysis or not analysis.get("entry_ready") or not analysis.get("valid", True):
         return None
     return {
         "entry": analysis.get("entry"),
