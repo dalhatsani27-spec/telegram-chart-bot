@@ -4,18 +4,20 @@ from strategy_upgrade import trendline_analysis, ote_analysis, format_trendline_
 from fundamental_analysis import analyze as analyze_fundamentals, format_report as _format_fundamental_report
 from alligator_logic import apply_alligator
 from market_intelligence import apply as apply_market_intelligence
-from technical_policy import market_regime as technical_market_regime
+from technical_policy import market_regime as technical_market_regime, enrich as technical_enrich
 from learning_state import calibration, record_outcome
 
+# Replace both legacy runtime hooks: no EMA20/EMA50 calculations participate in
+# Trendline/OTE decisions, not even indirectly through the regime calculation.
 strategy_upgrade.market_regime = technical_market_regime
+strategy_upgrade.enrich = technical_enrich
 
 
 def _apply_learning(result):
     if not result or result.get("error") or result.get("direction") not in ("BUY","SELL"): return result
     regime=result.get("market_regime") or result.get("regime",{}).get("regime","UNKNOWN")
     strategy=result.get("active_setup") or ("OTE" if result.get("zone") else "TRENDLINE")
-    cal=calibration(strategy,regime,result["direction"])
-    result["learning"] = cal
+    cal=calibration(strategy,regime,result["direction"]); result["learning"]=cal
     if cal.get("usable"):
         old=int(result.get("score",result.get("strength",0))); result["score"]=max(0,min(100,old+int(cal.get("adjustment",0)))); result["strength"]=result["score"]
         result.setdefault("reasons",[]).append(f"Historical calibration: {cal['sample']} comparable outcomes, {cal['expectancy_r']:+.2f}R expectancy")
@@ -26,24 +28,18 @@ def _apply_fundamental(result):
     if not result or result.get("error"): return result
     fundamental=analyze_fundamentals(result.get("symbol","")); result["fundamental"]=fundamental
     if not fundamental.get("available"): return result
-    direction=result.get("direction","NEUTRAL"); fbias=fundamental.get("bias","NEUTRAL"); old=int(result.get("score",result.get("strength",0))); score=old
-    fscore=float(fundamental.get("score",0))
+    direction=result.get("direction","NEUTRAL"); fbias=fundamental.get("bias","NEUTRAL"); old=int(result.get("score",result.get("strength",0))); score=old; fscore=float(fundamental.get("score",0))
     if direction in ("BUY","SELL") and fbias in ("BUY","SELL"):
         if direction==fbias: score=min(100,score+7); result.setdefault("reasons",[]).append(f"Fundamentals align: {fbias} ({fscore:+.1f})")
         else: score=max(0,score-10); result.setdefault("reasons",[]).append(f"Fundamental conflict: technical {direction} vs macro {fbias} ({fscore:+.1f})")
     if fundamental.get("event_risk")=="HIGH": score=max(0,score-5); result.setdefault("reasons",[]).append("High-impact macro event risk: reduce size / wait for release")
-    result["score"]=score; result["strength"]=score; result["fundamental_adjustment"]=score-old
-    return result
+    result["score"]=score; result["strength"]=score; result["fundamental_adjustment"]=score-old; return result
 
 
 def _apply_filters(result):
-    result=apply_market_intelligence(result)
-    result=apply_alligator(result)
-    result=_apply_fundamental(result)
-    result=_apply_learning(result)
+    result=apply_market_intelligence(result); result=apply_alligator(result); result=_apply_fundamental(result); result=_apply_learning(result)
     if result and not result.get("error"):
-        result["gating_notes"]=result.get("reasons",[])
-        result["technical_indicator_policy"]="200EMA+ALLIGATOR_ONLY"
+        result["gating_notes"]=result.get("reasons",[]); result["technical_indicator_policy"]="200EMA+ALLIGATOR_ONLY"
         if "valid" in result: result["valid"]=bool(result.get("valid")) and int(result.get("score",0))>=55
     return result
 
