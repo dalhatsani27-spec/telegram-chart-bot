@@ -1,8 +1,14 @@
-"""Compatibility API for Trendline/OTE plus shared intelligence filters."""
+"""Compatibility API for Trendline/OTE with the single-indicator policy."""
+import strategy_upgrade
 from strategy_upgrade import trendline_analysis, ote_analysis, format_trendline_report, format_ote_report
 from fundamental_analysis import analyze as analyze_fundamentals, format_report as _format_fundamental_report
 from alligator_logic import apply_alligator
 from market_intelligence import apply as apply_market_intelligence
+from technical_policy import market_regime as technical_market_regime
+
+# Critical: strategy_upgrade's runtime regime function is replaced here, so
+# EMA20/EMA50 cannot participate in Trendline/OTE technical decisions.
+strategy_upgrade.market_regime = technical_market_regime
 
 
 def _apply_fundamental(result):
@@ -25,6 +31,7 @@ def _apply_filters(result):
     result=_apply_fundamental(result)
     if result and not result.get("error"):
         result["gating_notes"]=result.get("reasons",[])
+        result["technical_indicator_policy"]="200EMA+ALLIGATOR_ONLY"
         if "valid" in result: result["valid"]=bool(result.get("valid")) and int(result.get("score",0))>=55
     return result
 
