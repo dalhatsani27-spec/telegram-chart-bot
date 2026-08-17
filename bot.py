@@ -23,6 +23,7 @@ from market_analysis import direction_banner
 from chart_engine import generate_trendline_educational_map, generate_ote_map, generate_smc_map
 import strategies
 import smc_strategy
+import unified_strategy
 from topdown_engine import get_topdown_bias
 import execution_engine as engine
 from execution_engine import state as ts_state
@@ -149,13 +150,9 @@ def push_telegram_photo(photo, caption=""):
 
 
 def get_home_menu():
-    """Home interface -- only the two remaining chart strategies."""
-    strat_label = ts_state.strategy_label()
+    """Home interface -- one unified strategy."""
     keyboard = [
-        [InlineKeyboardButton(f"🧠 STRATEGY: {strat_label}", callback_data="menu_strategy")],
-        [InlineKeyboardButton("📐  Trendline (Selected TF)", callback_data="menu_trendline")],
-        [InlineKeyboardButton("🎯  OTE (62–79%, 30M)", callback_data="menu_ote")],
-        [InlineKeyboardButton("🧠  SMC (selected TF)", callback_data="menu_smc")],
+        [InlineKeyboardButton("🧠 UNIFIED MARKET INTELLIGENCE", callback_data="menu_unified")],
         [InlineKeyboardButton("📍  HTF Context", callback_data="prompt_htf_context")],
         [InlineKeyboardButton("👁  Watch Price Level", callback_data="menu_price_watch"),
          InlineKeyboardButton("📋  My Watch Levels", callback_data="show_price_watches")],
@@ -167,20 +164,7 @@ def get_home_menu():
 
 
 def get_strategy_menu():
-    selected = ts_state.get_selected_strategy()
-    keyboard = [
-        [InlineKeyboardButton(
-            f"{'✅' if selected == engine.STRATEGY_TRENDLINE else '⚪'} Trendline",
-            callback_data="set_strategy|TRENDLINE")],
-        [InlineKeyboardButton(
-            f"{'✅' if selected == engine.STRATEGY_OTE else '⚪'} OTE (62–79%)",
-            callback_data="set_strategy|OTE")],
-        [InlineKeyboardButton(
-            f"{'✅' if selected == engine.STRATEGY_SMC else '⚪'} SMC (Structure/Liquidity)",
-            callback_data="set_strategy|SMC")],
-        [InlineKeyboardButton("« Back", callback_data="menu_home")],
-    ]
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🧠 Unified Market Intelligence", callback_data="menu_unified")], [InlineKeyboardButton("« Back", callback_data="menu_home")]])
 
 
 def get_mobile_panel_menu():
@@ -200,7 +184,7 @@ def get_mobile_panel_menu():
     watched = ts_state.get_watched_symbol()
     watch_label = f"🎯 Watching: {watched} (tap to change)" if watched else "🎯 Select Asset to Watch"
     tf_label = f"⏱ Entry Timeframe: {ts_state.watch_timeframe_label()}"
-    strat_label = ts_state.strategy_label()
+    strat_label = unified_strategy.STRATEGY_NAME
 
     keyboard = [
         [InlineKeyboardButton(master_label, callback_data="toggle_master")],
@@ -252,7 +236,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "══════════════════════════════════\n"
         "  TOP-DOWN PRICE-ACTION ENGINE\n"
         "══════════════════════════════════\n\n"
-        "Trendline Structure  •  OTE 62–79% Retracement\n"
+        "Unified Market Intelligence\n"
         "4H → 1H → 30M Top-Down Bias  •  200 EMA Regime\n"
         "Structure Permission  •  MT5 Execution\n\n"
         "──────────────────────────────\n"
@@ -298,7 +282,7 @@ async def background_price_watch_scanner():
                                 f"Price: {price:.10f}".rstrip("0").rstrip(".") + f"\n"
                                 f"Event: {event.replace('_', ' ')}\n\n"
                                 f"Price is now {side} your watched level.\n"
-                                "This is an analysis alert — confirm structure/trendline/pattern/OTE before trading."
+                                "This is an analysis alert — confirm the unified market-state decision before trading."
                             )
                 except Exception as e:
                     print(f"[price_watch] {symbol}: {e!r}")
@@ -397,6 +381,17 @@ async def send_trendline_analysis(context, chat_id, symbol):
             text=f"Trendline analysis failed for '{symbol}': {str(e)}",
             reply_markup=get_home_menu(),
         )
+
+
+async def send_unified_analysis(context, chat_id, symbol):
+    try:
+        analysis = unified_strategy.analyze(symbol, timeframe=ts_state.get_watch_timeframe())
+        await context.bot.send_message(chat_id=chat_id, text=unified_strategy.format_report(analysis))
+        if ts_state.get_mode() == engine.MODE_COPY_TRADE and analysis.get("ready"):
+            await context.bot.send_message(chat_id=chat_id, text=format_trade_ticket(symbol, unified_strategy.STRATEGY_NAME, analysis.get("direction"), analysis.get("score",0), None, analysis.get("evidence")))
+        await context.bot.send_message(chat_id=chat_id, text="Choose next action:", reply_markup=get_home_menu())
+    except Exception as e:
+        await context.bot.send_message(chat_id=chat_id, text=f"Unified analysis failed for '{symbol}': {e}", reply_markup=get_home_menu())
 
 
 async def send_ote_analysis(context, chat_id, symbol):
@@ -552,13 +547,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     symbol = raw_text.upper()
     await update.message.reply_text(f"Running {ts_state.strategy_label()} analysis for {symbol}...")
-    strat = ts_state.get_selected_strategy()
-    if strat == engine.STRATEGY_OTE:
-        await send_ote_analysis(context, chat_id, symbol)
-    elif strat == engine.STRATEGY_SMC:
-        await send_smc_analysis(context, chat_id, symbol)
-    else:
-        await send_trendline_analysis(context, chat_id, symbol)
+    await send_unified_analysis(context, chat_id, symbol)
 
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -598,6 +587,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             f"Strategy set → {ts_state.strategy_label()}",
             reply_markup=get_strategy_menu(),
         )
+
+    # ---------------- Unified strategy ----------------
+    elif data == "menu_unified":
+        await query.edit_message_text("🧠 UNIFIED MARKET INTELLIGENCE\n\nTrendline, SMC and OTE are internal intelligence modules.\nThe bot makes one final market-state decision.", reply_markup=get_home_menu())
 
     # ---------------- Trendline ----------------
     elif data == "menu_trendline":

@@ -27,6 +27,7 @@ from flask import request, jsonify
 import market_data
 from market_analysis import scan_all_patterns, Pattern, compute_volume_profile, detect_confirmation_candle, is_price_ranging_vs_sma
 from strategies import build_trendline_family, build_position_container
+import unified_strategy
 
 
 # ============================================================
@@ -46,10 +47,12 @@ MODE_APPROVAL = "APPROVAL"
 MODE_COPY_TRADE = "COPY_TRADE"
 VALID_MODES = {MODE_OFF, MODE_AUTO, MODE_APPROVAL, MODE_COPY_TRADE}
 
+STRATEGY_UNIFIED = "UNIFIED"
+# Legacy constants retained only so stale callbacks do not crash; they are not selectable.
 STRATEGY_TRENDLINE = "TRENDLINE"
 STRATEGY_OTE = "OTE"
 STRATEGY_SMC = "SMC"
-VALID_STRATEGIES = {STRATEGY_TRENDLINE, STRATEGY_OTE, STRATEGY_SMC}
+VALID_STRATEGIES = {STRATEGY_UNIFIED}
 
 APPROVAL_EXPIRY_SECONDS = 180
 
@@ -74,7 +77,7 @@ class TradeStateManager:
 
         # Strategy selection -- only Trendline and OTE remain, so this is
         # a straight either/or choice (no Hybrid/confluence mode).
-        self.selected_strategy = STRATEGY_TRENDLINE
+        self.selected_strategy = STRATEGY_UNIFIED
 
         self._commands = {}
         self._pending_approvals = {}
@@ -190,7 +193,7 @@ class TradeStateManager:
         return self.selected_strategy
 
     def strategy_label(self):
-        return self.selected_strategy.title().replace("_", " ")
+        return "Unified Market Intelligence" if self.selected_strategy == STRATEGY_UNIFIED else self.selected_strategy.title().replace("_", " ")
 
     # ---------------- EA command queue ----------------
     def queue_command(self, symbol, command):
