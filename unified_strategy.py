@@ -1,19 +1,21 @@
 """Unified market-intelligence strategy.
 
-Trendline, SMC and OTE are evidence extractors, not user-selectable strategies.
-The engine reasons over market state and a causal sequence before deciding.
+Trendline, SMC, OTE and fundamental analysis are evidence extractors, not
+user-selectable strategies. The engine reasons over market state and a causal
+sequence before deciding.
 """
 from __future__ import annotations
 from typing import Any, Dict
 import numpy as np
 import pandas as pd
 import market_data
+import fundamental_analysis
 from market_analysis import find_swings, analyse_structure, detect_order_blocks
 from smc_engine import detect_liquidity_pools, detect_fair_value_gaps, select_smc_zone
 from topdown_engine import get_topdown_bias
 
 STRATEGY_NAME = "Unified Market Intelligence"
-POLICY = "ONE_STRATEGY_TRENDLINE_SMC_OTE_INTELLIGENCE"
+POLICY = "ONE_STRATEGY_TRENDLINE_SMC_OTE_FUNDAMENTAL_INTELLIGENCE"
 
 
 def _atr(df, n=14):
@@ -113,16 +115,46 @@ def analyze(symbol,timeframe="30min",include_htf=True):
     if hdir not in ("BUY","SELL"):hdir="NEUTRAL"
     if hdir==dominant:evidence.append("Higher-timeframe context aligned")
     if hdir in ("BUY","SELL") and dominant in ("BUY","SELL") and hdir!=dominant:conflict=True
+
+    # Fundamental analysis is a separate macro filter. It never creates a
+    # trade by itself: it confirms or vetoes the technical market-state read.
+    try:
+        fundamental=fundamental_analysis.analyze(symbol)
+    except Exception as exc:
+        print(f"[unified] fundamental analysis failed for {symbol}: {exc!r}")
+        fundamental={"symbol":symbol,"available":False,"bias":"NEUTRAL","score":0,"confidence":"LOW","reasons":["Fundamental engine unavailable"]}
+    fbias=str(fundamental.get("bias","NEUTRAL")).upper()
+    if fbias in ("BULLISH","BEARISH") and dominant in ("BUY","SELL"):
+        fdir="BUY" if fbias=="BULLISH" else "SELL"
+        if fdir==dominant:
+            evidence.append(f"Fundamental bias aligned ({fundamental.get('score',0):+d})")
+        else:
+            conflict=True
+            evidence.append(f"Fundamental conflict ({fundamental.get('score',0):+d})")
+
     event_ok=bool(smc.get("sweep") or smc.get("zone",{}).get("confluence") or tl.get("event","").startswith("BREAKOUT"))
     location_ok=ote.get("location") in ("DEEP_RETRACEMENT","SHALLOW_RETRACEMENT")
-    ready=dominant in ("BUY","SELL") and not conflict and state["state"] not in ("SLEEPING","TRANSITION","UNKNOWN") and event_ok and location_ok and len(evidence)>=3
-    return {"strategy":STRATEGY_NAME,"policy":POLICY,"symbol":symbol,"timeframe":timeframe,"decision":dominant if ready else "WAIT","direction":dominant,"ready":ready,"conflict":conflict,"evidence":evidence,"alligator":state,"trendline_intelligence":tl,"smc_intelligence":smc,"ote_intelligence":ote,"htf":htf,"df":df,"score":min(100,40+len(evidence)*10),"reason":"; ".join(evidence) if evidence else "No coherent market-state sequence"}
+    # When fundamentals are configured and produce a directional signal, the
+    # signal must agree with technical direction. If APIs are unavailable,
+    # the existing technical rules remain fully operational.
+    fundamental_ok=(not fundamental.get("available")) or fbias=="NEUTRAL" or (
+        (fbias=="BULLISH" and dominant=="BUY") or (fbias=="BEARISH" and dominant=="SELL")
+    )
+    ready=dominant in ("BUY","SELL") and not conflict and fundamental_ok and state["state"] not in ("SLEEPING","TRANSITION","UNKNOWN") and event_ok and location_ok and len(evidence)>=3
+    tech_score=min(100,40+len(evidence)*10)
+    if fundamental.get("available"):
+        fscore=abs(int(fundamental.get("score",0)))
+        score=min(100,int(round(tech_score*.70+fscore*.30)))
+    else:
+        score=tech_score
+    return {"strategy":STRATEGY_NAME,"policy":POLICY,"symbol":symbol,"timeframe":timeframe,"decision":dominant if ready else "WAIT","direction":dominant,"ready":ready,"conflict":conflict,"fundamental_ok":fundamental_ok,"evidence":evidence,"alligator":state,"trendline_intelligence":tl,"smc_intelligence":smc,"ote_intelligence":ote,"htf":htf,"fundamental":fundamental,"df":df,"score":score,"reason":"; ".join(evidence) if evidence else "No coherent market-state sequence"}
 
 
 def format_report(r):
     if r.get("error"):return f"{STRATEGY_NAME} — {r['symbol']}\n\nWAIT\n{r['error']}"
-    a=r["alligator"]; s=r["smc_intelligence"]; o=r["ote_intelligence"]; h=r.get("htf",{})
-    lines=["════════════════════════════","🧠 UNIFIED MARKET INTELLIGENCE","════════════════════════════",f"{r['symbol']} | {r['timeframe']}",f"DECISION: {r['decision']}",f"STATE: {a['state']}",f"ALLIGATOR: {a['direction']}",f"STRUCTURE: {_structure_direction(s.get('structure'))}",f"LIQUIDITY: {'SWEPT' if s.get('sweep') else 'NO CONFIRMED SWEEP'}",f"LOCATION: {o.get('location')}",f"HTF: {h.get('direction') or h.get('bias') or 'NEUTRAL'}"]
-    if r.get("evidence"):lines += ["","INTELLIGENCE:"]+[f"• {x}" for x in r["evidence"][:7]]
-    lines += ["",f"WHY: {r['reason']}","","Trendline / SMC / OTE are internal intelligence sources — not separate strategies."]
+    a=r["alligator"]; s=r["smc_intelligence"]; o=r["ote_intelligence"]; h=r.get("htf",{}); f=r.get("fundamental",{})
+    lines=["════════════════════════════","🧠 UNIFIED MARKET INTELLIGENCE","════════════════════════════",f"{r['symbol']} | {r['timeframe']}",f"DECISION: {r['decision']}",f"STATE: {a['state']}",f"ALLIGATOR: {a['direction']}",f"STRUCTURE: {_structure_direction(s.get('structure'))}",f"LIQUIDITY: {'SWEPT' if s.get('sweep') else 'NO CONFIRMED SWEEP'}",f"LOCATION: {o.get('location')}",f"HTF: {h.get('direction') or h.get('bias') or 'NEUTRAL'}",f"FUNDAMENTAL: {f.get('bias','NEUTRAL')} ({f.get('score',0):+d}) | {f.get('confidence','LOW')}"]
+    if r.get("evidence"):lines += ["","INTELLIGENCE:"]+[f"• {x}" for x in r["evidence"][:8]]
+    if f.get("reasons"):lines += ["","FUNDAMENTAL DRIVERS:"]+[f"• {x}" for x in f["reasons"][:5]]
+    lines += ["",f"WHY: {r['reason']}","","Trendline / SMC / OTE / Fundamentals are internal intelligence sources — not separate strategies."]
     return "\n".join(lines)
