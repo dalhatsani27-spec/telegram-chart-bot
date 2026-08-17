@@ -1,8 +1,12 @@
-"""Compatibility API for SMC plus shared market intelligence."""
+"""Compatibility API for SMC with the single-indicator technical policy."""
+import strategy_upgrade
 from strategy_upgrade import smc_analysis, format_smc_report
 from fundamental_analysis import analyze as analyze_fundamentals
 from alligator_logic import apply_alligator
 from market_intelligence import apply as apply_market_intelligence
+from technical_policy import market_regime as technical_market_regime
+
+strategy_upgrade.market_regime = technical_market_regime
 
 
 def _apply_fundamental(result):
@@ -22,6 +26,7 @@ def run_smc_analysis(symbol: str, tf_code: str = "30min", topdown=None):
     result=apply_market_intelligence(result); result=apply_alligator(result); result=_apply_fundamental(result)
     if result and not result.get("error"):
         result["gating_notes"]=result.get("reasons",[])
+        result["technical_indicator_policy"]="200EMA+ALLIGATOR_ONLY"
         if "valid" in result: result["valid"]=bool(result.get("valid")) and int(result.get("score",0))>=55
     return result
 
