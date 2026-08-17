@@ -384,8 +384,35 @@ async def send_trendline_analysis(context, chat_id, symbol):
 
 
 async def send_unified_analysis(context, chat_id, symbol):
+    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         analysis = unified_strategy.analyze(symbol, timeframe=ts_state.get_watch_timeframe())
+
+        try:
+            df_unified = analysis.get("df")
+            if df_unified is not None and not getattr(df_unified, "empty", True):
+                smc_intel = analysis.get("smc_intelligence") or {}
+                chart_analysis = {
+                    "liquidity": smc_intel.get("liquidity"),
+                    "zone": smc_intel.get("zone"),
+                    "bias": analysis.get("direction", "NEUTRAL"),
+                    "status": analysis.get("decision", "WAIT"),
+                    "timeframe_label": analysis.get("timeframe", ""),
+                }
+                chart_img = generate_smc_map(df_unified, symbol, chart_analysis, title_suffix=ts_str)
+                await context.bot.send_photo(
+                    chat_id=chat_id, photo=chart_img,
+                    caption=f"{symbol} Unified ({analysis.get('timeframe', '')}) | {ts_str}",
+                )
+        except Exception:
+            print(f"[send_unified_analysis] chart generation failed for {symbol}:")
+            traceback.print_exc()
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ Chart failed to render for {symbol} (sending text analysis only). "
+                     f"Check server logs for the traceback.",
+            )
+
         await context.bot.send_message(chat_id=chat_id, text=unified_strategy.format_report(analysis))
         if ts_state.get_mode() == engine.MODE_COPY_TRADE and analysis.get("ready"):
             await context.bot.send_message(chat_id=chat_id, text=format_trade_ticket(symbol, unified_strategy.STRATEGY_NAME, analysis.get("direction"), analysis.get("score",0), None, analysis.get("evidence")))
