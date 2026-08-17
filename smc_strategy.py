@@ -34,7 +34,7 @@ def run_smc_analysis(symbol: str, tf_code: str = "30min", topdown=None):
     result["fundamental_adjustment"] = score - old_score
     result["gating_notes"] = result.get("reasons", [])
     if "valid" in result:
-        result["valid"] = result.get("valid", False) and score >= 55
+        result["valid"] = bool(result.get("valid")) and score >= 55
     return result
 
 
