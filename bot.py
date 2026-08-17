@@ -190,7 +190,7 @@ def get_mobile_panel_menu():
         [InlineKeyboardButton(master_label, callback_data="toggle_master")],
         [InlineKeyboardButton(trade_mode_label, callback_data="toggle_trade_mode")],
         [InlineKeyboardButton(copy_label, callback_data="toggle_copy_trade")],
-        [InlineKeyboardButton(f"🧠 {strat_label}", callback_data="menu_unified")],
+        [InlineKeyboardButton(f"🧠 {strat_label}", callback_data="menu_strategy")],
         [InlineKeyboardButton(lot_label, callback_data="toggle_lot_mode")],
         [InlineKeyboardButton(watch_label, callback_data="menu_watch_asset")],
         [InlineKeyboardButton(tf_label, callback_data="menu_watch_tf")],
@@ -520,7 +520,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"BIAS: {emoji} {topdown.get('bias_4h', 'NEUTRAL')}\n"
                 f"1H DIRECTION: {td_dir}\n"
                 f"LOCATION: {location}\n\n"
-                f"Cached — {symbol}'s next Unified Market Intelligence analysis will include this context "
+                f"Cached — {symbol}'s next Trendline/SMC analysis will include this context "
                 f"until you refresh it again."
             )
             await update.message.reply_text(text, reply_markup=get_home_menu())
@@ -568,36 +568,48 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=get_home_menu()
         )
 
-    # ---------------- Unified strategy ----------------
-    elif data in ("menu_strategy", "menu_unified"):
+    # ---------------- Strategy Selector ----------------
+    elif data == "menu_strategy":
         await query.edit_message_text(
-            "🧠 UNIFIED MARKET INTELLIGENCE\n\n"
-            "One strategy. Select the asset to analyze.\n\n"
-            "The engine internally extracts structure, liquidity and retracement "
-            "intelligence, then combines it with Alligator, 200 EMA and fundamental context "
-            "to produce one BUY / SELL / WAIT decision.",
-            reply_markup=get_unified_asset_menu(),
+            "🧠 STRATEGY SELECTOR\n\n"
+            "Both strategies run the same 4H → 1H top-down bias read, "
+            "then execute on the 30M chart.\n\n"
+            f"Current: {ts_state.strategy_label()}",
+            reply_markup=get_strategy_menu(),
         )
 
-    elif data.startswith("cat_unified|"):
-        _, cat = data.split("|", 1)
+    elif data.startswith("set_strategy|"):
+        name = data.split("|", 1)[1]
+        mapping = {"TRENDLINE": engine.STRATEGY_TRENDLINE, "OTE": engine.STRATEGY_OTE, "SMC": engine.STRATEGY_SMC}
+        if name in mapping:
+            ts_state.set_selected_strategy(mapping[name])
         await query.edit_message_text(
-            f"🧠 UNIFIED MARKET INTELLIGENCE\n\n{cat} — select the asset:",
-            reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_unified", "menu_unified"),
-        )
-    elif data.startswith("run_unified|"):
-        _, symbol = data.split("|", 1)
-        await query.edit_message_text(f"🧠 Analyzing {symbol} with Unified Market Intelligence...")
-        await send_unified_analysis(context, chat_id, symbol)
-    elif data == "prompt_custom_ticker_unified":
-        await query.edit_message_text(
-            "🧠 UNIFIED MARKET INTELLIGENCE\n\nType any ticker to analyze.\nExample: BTCUSD, XAUUSD, EURUSD",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_unified")]])
+            f"Strategy set → {ts_state.strategy_label()}",
+            reply_markup=get_strategy_menu(),
         )
 
     # ---------------- Unified strategy ----------------
     elif data == "menu_unified":
-        await query.edit_message_text("🧠 UNIFIED MARKET INTELLIGENCE\n\nTrendline, SMC and OTE are internal intelligence modules.\nThe bot makes one final market-state decision.", reply_markup=get_home_menu())
+        extra = [InlineKeyboardButton("🔎 Custom Ticker", callback_data="prompt_custom_ticker_unified")]
+        await query.edit_message_text(
+            "🧠 UNIFIED MARKET INTELLIGENCE\n\n"
+            "Trendline, SMC and OTE are internal intelligence modules.\n"
+            "The bot makes one final market-state decision.\n\n"
+            "Choose the market and asset:",
+            reply_markup=get_category_keyboard("cat_unified", "menu_home", extra_row=extra),
+        )
+    elif data.startswith("cat_unified|"):
+        _, cat = data.split("|", 1)
+        await query.edit_message_text(f"{cat}:", reply_markup=get_pairs_keyboard(ASSET_CONTAINER.get(cat, []), "run_unified", "menu_unified"))
+    elif data.startswith("run_unified|"):
+        _, symbol = data.split("|", 1)
+        await query.edit_message_text(f"Running {ts_state.strategy_label()} analysis for {symbol}...")
+        await send_unified_analysis(context, chat_id, symbol)
+    elif data == "prompt_custom_ticker_unified":
+        await query.edit_message_text(
+            f"Type any ticker for {ts_state.strategy_label()} analysis.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_unified")]])
+        )
 
     # ---------------- Trendline ----------------
     elif data == "menu_trendline":
@@ -647,7 +659,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "prompt_htf_context":
         await query.edit_message_text(
             "📍 Type a ticker to fetch HTF (4H/1H) context.\n\n"
-            "This is cached and folded into your next Unified Market Intelligence analysis "
+            "This is cached and folded into your next Trendline/SMC analysis "
             "for that symbol -- it does not run automatically every time.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_home")]])
         )
