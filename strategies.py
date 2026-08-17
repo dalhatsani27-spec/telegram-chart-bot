@@ -1,6 +1,7 @@
 """Compatibility API for the modern Trendline and OTE engines."""
 from strategy_upgrade import trendline_analysis, ote_analysis, format_trendline_report, format_ote_report
 from fundamental_analysis import analyze as analyze_fundamentals, format_report as _format_fundamental_report
+from alligator_logic import apply_alligator
 
 
 def _apply_fundamental(result):
@@ -34,12 +35,16 @@ def _apply_fundamental(result):
     return result
 
 
+def _apply_filters(result):
+    return apply_alligator(_apply_fundamental(result))
+
+
 def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown=None):
-    return _apply_fundamental(trendline_analysis(symbol, tf_code=tf_code, topdown=topdown))
+    return _apply_filters(trendline_analysis(symbol, tf_code=tf_code, topdown=topdown))
 
 
 def run_ote_analysis(symbol: str, tf_code: str = "30min", topdown=None):
-    return _apply_fundamental(ote_analysis(symbol, tf_code=tf_code, topdown=topdown))
+    return _apply_filters(ote_analysis(symbol, tf_code=tf_code, topdown=topdown))
 
 
 def run_fundamental_analysis(symbol: str):
