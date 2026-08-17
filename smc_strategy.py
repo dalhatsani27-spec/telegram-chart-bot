@@ -4,10 +4,11 @@ from strategy_upgrade import smc_analysis, format_smc_report
 from fundamental_analysis import analyze as analyze_fundamentals
 from alligator_logic import apply_alligator
 from market_intelligence import apply as apply_market_intelligence
-from technical_policy import market_regime as technical_market_regime
+from technical_policy import market_regime as technical_market_regime, enrich as technical_enrich
 from learning_state import calibration, record_outcome
 
 strategy_upgrade.market_regime = technical_market_regime
+strategy_upgrade.enrich = technical_enrich
 
 
 def _apply_fundamental(result):
@@ -36,8 +37,7 @@ def run_smc_analysis(symbol: str, tf_code: str = "30min", topdown=None):
     result=smc_analysis(symbol,tf_code=tf_code,topdown=topdown)
     result=apply_market_intelligence(result); result=apply_alligator(result); result=_apply_fundamental(result); result=_apply_learning(result)
     if result and not result.get("error"):
-        result["gating_notes"]=result.get("reasons",[])
-        result["technical_indicator_policy"]="200EMA+ALLIGATOR_ONLY"
+        result["gating_notes"]=result.get("reasons",[]); result["technical_indicator_policy"]="200EMA+ALLIGATOR_ONLY"
         if "valid" in result: result["valid"]=bool(result.get("valid")) and int(result.get("score",0))>=55
     return result
 
