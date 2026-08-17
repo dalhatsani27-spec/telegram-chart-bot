@@ -163,20 +163,8 @@ def get_home_menu():
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_unified_asset_menu():
-    """Asset picker for the single user-facing strategy.
-
-    Trendline/SMC/OTE never appear here: they are internal intelligence
-    extractors used by Unified Market Intelligence.
-    """
-    return get_category_keyboard("cat_unified", "menu_home", extra_row=[
-        InlineKeyboardButton("🔎 Custom Ticker", callback_data="prompt_custom_ticker_unified")
-    ])
-
-
 def get_strategy_menu():
-    # Compatibility for older callers: there is only one strategy now.
-    return get_unified_asset_menu()
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🧠 Unified Market Intelligence", callback_data="menu_unified")], [InlineKeyboardButton("« Back", callback_data="menu_home")]])
 
 
 def get_mobile_panel_menu():
@@ -606,6 +594,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             "🧠 UNIFIED MARKET INTELLIGENCE\n\nType any ticker to analyze.\nExample: BTCUSD, XAUUSD, EURUSD",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu_unified")]])
         )
+
+    # ---------------- Unified strategy ----------------
+    elif data == "menu_unified":
+        await query.edit_message_text("🧠 UNIFIED MARKET INTELLIGENCE\n\nTrendline, SMC and OTE are internal intelligence modules.\nThe bot makes one final market-state decision.", reply_markup=get_home_menu())
 
     # ---------------- Trendline ----------------
     elif data == "menu_trendline":
