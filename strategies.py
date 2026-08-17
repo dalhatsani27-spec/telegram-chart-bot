@@ -1,13 +1,53 @@
 """Compatibility API for the modern Trendline and OTE engines."""
 from strategy_upgrade import trendline_analysis, ote_analysis, format_trendline_report, format_ote_report
+from fundamental_analysis import analyze as analyze_fundamentals, format_report as _format_fundamental_report
+
+
+def _apply_fundamental(result):
+    if not result or result.get("error"):
+        return result
+    fundamental = analyze_fundamentals(result.get("symbol", ""))
+    result["fundamental"] = fundamental
+    if not fundamental.get("available"):
+        return result
+    direction = result.get("direction", "NEUTRAL")
+    fbias = fundamental.get("bias", "NEUTRAL")
+    old_score = int(result.get("score", result.get("strength", 0)))
+    score = old_score
+    fscore = float(fundamental.get("score", 0))
+    if direction in ("BUY", "SELL") and fbias in ("BUY", "SELL"):
+        if direction == fbias:
+            score = min(100, score + 7)
+            result.setdefault("reasons", []).append(f"Fundamentals align: {fbias} ({fscore:+.1f})")
+        else:
+            score = max(0, score - 10)
+            result.setdefault("reasons", []).append(f"Fundamental conflict: technical {direction} vs macro {fbias} ({fscore:+.1f})")
+    if fundamental.get("event_risk") == "HIGH":
+        score = max(0, score - 5)
+        result.setdefault("reasons", []).append("High-impact macro event risk: reduce size / wait for release")
+    result["score"] = score
+    result["strength"] = score
+    result["fundamental_adjustment"] = score - old_score
+    result["gating_notes"] = result.get("reasons", [])
+    if "valid" in result:
+        result["valid"] = bool(result.get("valid")) and score >= 55
+    return result
 
 
 def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown=None):
-    return trendline_analysis(symbol, tf_code=tf_code, topdown=topdown)
+    return _apply_fundamental(trendline_analysis(symbol, tf_code=tf_code, topdown=topdown))
 
 
 def run_ote_analysis(symbol: str, tf_code: str = "30min", topdown=None):
-    return ote_analysis(symbol, tf_code=tf_code, topdown=topdown)
+    return _apply_fundamental(ote_analysis(symbol, tf_code=tf_code, topdown=topdown))
+
+
+def run_fundamental_analysis(symbol: str):
+    return analyze_fundamentals(symbol)
+
+
+def format_fundamental_report(symbol: str):
+    return _format_fundamental_report(analyze_fundamentals(symbol))
 
 
 def build_position_container(a):
