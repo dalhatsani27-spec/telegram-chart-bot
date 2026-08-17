@@ -5,10 +5,21 @@ from fundamental_analysis import analyze as analyze_fundamentals, format_report 
 from alligator_logic import apply_alligator
 from market_intelligence import apply as apply_market_intelligence
 from technical_policy import market_regime as technical_market_regime
+from learning_state import calibration, record_outcome
 
-# Critical: strategy_upgrade's runtime regime function is replaced here, so
-# EMA20/EMA50 cannot participate in Trendline/OTE technical decisions.
 strategy_upgrade.market_regime = technical_market_regime
+
+
+def _apply_learning(result):
+    if not result or result.get("error") or result.get("direction") not in ("BUY","SELL"): return result
+    regime=result.get("market_regime") or result.get("regime",{}).get("regime","UNKNOWN")
+    strategy=result.get("active_setup") or ("OTE" if result.get("zone") else "TRENDLINE")
+    cal=calibration(strategy,regime,result["direction"])
+    result["learning"] = cal
+    if cal.get("usable"):
+        old=int(result.get("score",result.get("strength",0))); result["score"]=max(0,min(100,old+int(cal.get("adjustment",0)))); result["strength"]=result["score"]
+        result.setdefault("reasons",[]).append(f"Historical calibration: {cal['sample']} comparable outcomes, {cal['expectancy_r']:+.2f}R expectancy")
+    return result
 
 
 def _apply_fundamental(result):
@@ -29,6 +40,7 @@ def _apply_filters(result):
     result=apply_market_intelligence(result)
     result=apply_alligator(result)
     result=_apply_fundamental(result)
+    result=_apply_learning(result)
     if result and not result.get("error"):
         result["gating_notes"]=result.get("reasons",[])
         result["technical_indicator_policy"]="200EMA+ALLIGATOR_ONLY"
@@ -40,6 +52,7 @@ def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown=None): r
 def run_ote_analysis(symbol: str, tf_code: str = "30min", topdown=None): return _apply_filters(ote_analysis(symbol,tf_code=tf_code,topdown=topdown))
 def run_fundamental_analysis(symbol: str): return analyze_fundamentals(symbol)
 def format_fundamental_report(symbol: str): return _format_fundamental_report(analyze_fundamentals(symbol))
+def record_trade_outcome(strategy: str, regime: str, direction: str, r_multiple: float): return record_outcome(strategy,regime,direction,r_multiple)
 
 
 def build_position_container(a):
