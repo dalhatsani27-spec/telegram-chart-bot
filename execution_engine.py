@@ -17,6 +17,7 @@ Sections in this file (in call order, top to bottom):
   6. Flask routes    -- register_routes(app), called once from bot.py
 """
 
+import json
 import os
 import time
 import uuid
@@ -739,8 +740,39 @@ def poll(symbol, tf, magic_number=None, pushed_df=None):
     setup["symbol"] = symbol
     setup["timeframe"] = tf
 
+    # --- Second opinion before letting AUTO mode fire unattended -------
+    # This engine's own pattern-scan/confirmation logic used to be the
+    # only vote. unified_strategy.analyze() runs a second, independent
+    # read (trendline + SMC + OTE + fundamentals + HTF) on the same
+    # symbol; if it actively disagrees on direction, or isn't ready,
+    # that's real signal that this setup is weaker than the confirmation
+    # engine alone thinks. AUTO gets downgraded to APPROVAL in that case
+    # rather than firing blind -- everything else about the setup
+    # (entry/SL/TP, EA drawing data) is untouched.
+    confirmation = None
+    confirmation_agrees = True
+    try:
+        confirmation = unified_strategy.analyze(symbol, timeframe=tf, include_htf=True)
+        c_dir = confirmation.get("direction")
+        if c_dir in ("BUY", "SELL") and c_dir != setup.get("bias"):
+            confirmation_agrees = False
+        elif not confirmation.get("ready", False):
+            confirmation_agrees = False
+    except Exception as exc:
+        print(f"[execution] confirmation check failed for {symbol}: {exc!r}")
+        confirmation = None  # engine failure -> don't block on it, just don't have a second opinion
+
+    setup["confirmation_signal_id"] = (confirmation or {}).get("signal_id")
+    setup["confirmation_agrees"] = confirmation_agrees
+
     ea_available = state.is_ea_available(symbol)
     effective_mode = mode if ea_available else MODE_COPY_TRADE
+    if effective_mode == MODE_AUTO and confirmation is not None and not confirmation_agrees:
+        effective_mode = MODE_APPROVAL
+        setup["note"] = (
+            setup.get("note", "")
+            + f" [Downgraded from AUTO: independent analysis disagreed ({confirmation.get('direction')}, ready={confirmation.get('ready')}) -- approve manually.]"
+        ).strip()
 
     if effective_mode == MODE_AUTO:
         state.queue_command(symbol, setup)
@@ -771,8 +803,39 @@ def _format_setup_summary(setup):
 
 def report_event(symbol, event_type, details):
     """EA calls this (via the API) to report fills/TP hits/SL hits so Telegram can relay them."""
+    _log_outcome(symbol, event_type, details)
     if _notify_callbacks.get("report_event"):
         _notify_callbacks["report_event"](symbol, event_type, details)
+
+
+def _log_outcome(symbol, event_type, details):
+    """
+    Append trade outcomes to the same log unified_strategy.analyze() writes
+    signals to, keyed by signal_id when present, so signals can eventually
+    be joined to what actually happened and the scoring weights recalibrated
+    against real results instead of staying fixed guesses.
+
+    NOTE: this only links to a specific signal if the EA echoes back the
+    `confirmation_signal_id` field from the command it was given (the EA
+    source isn't part of this codebase, so that echo may need adding on
+    that side). Until then this still logs every outcome unlinked, which
+    is strictly better than not logging outcomes at all.
+    """
+    try:
+        details = details or {}
+        record = {
+            "record_type": "outcome",
+            "ts": time.time(),
+            "symbol": symbol,
+            "event_type": event_type,
+            "signal_id": details.get("confirmation_signal_id") or details.get("signal_id"),
+            "profit": details.get("profit"),
+            "ticket": details.get("ticket"),
+        }
+        with open(unified_strategy.SIGNAL_LOG_PATH, "a") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except Exception as exc:
+        print(f"[execution] outcome log write failed: {exc!r}")
 
 
 # ============================================================
