@@ -9,6 +9,10 @@ This module is the single decision layer used by Telegram analysis and
 """
 from __future__ import annotations
 
+import json
+import os
+import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -22,6 +26,35 @@ from topdown_engine import get_topdown_bias
 
 STRATEGY_NAME = "Unified Market Intelligence"
 POLICY = "ONE_STRATEGY_TRENDLINE_SMC_OTE_FUNDAMENTAL_INTELLIGENCE"
+
+# Every decision this engine makes gets appended here, so scoring weights
+# (currently fixed constants -- see analyze()) can eventually be checked
+# against and tuned by real outcomes, instead of staying guesses forever.
+# report_event() in execution_engine.py appends the matching outcome line
+# when a trade tied to a signal_id closes.
+SIGNAL_LOG_PATH = os.environ.get("SIGNAL_LOG_PATH", "signal_log.jsonl")
+
+
+def _log_signal(result: Dict[str, Any]) -> None:
+    try:
+        record = {
+            "signal_id": uuid.uuid4().hex[:12],
+            "ts": time.time(),
+            "symbol": result["symbol"],
+            "timeframe": result["timeframe"],
+            "decision": result["decision"],
+            "direction": result["direction"],
+            "ready": result["ready"],
+            "score": result["score"],
+            "weights": result["weights"],
+            "evidence_sources": result["evidence_sources"],
+            "conflict": result["conflict"],
+        }
+        result["signal_id"] = record["signal_id"]
+        with open(SIGNAL_LOG_PATH, "a") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except Exception as exc:
+        print(f"[unified] signal log write failed: {exc!r}")
 
 
 def _atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
@@ -307,46 +340,93 @@ def analyze(symbol: str, timeframe: str = "30min", include_htf: bool = True) -> 
             "reasons": ["Fundamental engine unavailable"],
         }
 
-    dirs: List[str] = []
-    for d in (state["direction"], tl["direction"], smc["direction"], ote["direction"]):
-        if d in ("BUY", "SELL"):
-            dirs.append(d)
+    # --- Weighted confidence per source, instead of one-vote-each -----
+    # Each source contributes a 0-100 confidence to whichever direction
+    # it's actually pointing at. Direction is picked by summed weight,
+    # not by how many sources merely agree, so one strong signal can
+    # (correctly) outweigh two weak/ambiguous ones.
+    alligator_conf = {
+        "AWAKENING_BULLISH": 70, "AWAKENING_BEARISH": 70,
+        "BULLISH": 55, "BEARISH": 55,
+    }.get(state["state"], 0)
 
-    dominant = max(set(dirs), key=dirs.count) if dirs else "NEUTRAL"
-    conflict = len(set(dirs)) > 1
+    smc_flags = [
+        bool(smc.get("entry_ready")),
+        bool(smc.get("sweep")),
+        bool(smc.get("zone", {}).get("confluence")),
+        bool(smc.get("price_in_zone")),
+    ]
+    smc_conf = 0 if smc["direction"] == "NEUTRAL" else min(100, 30 + sum(smc_flags) * 18)
+
+    weights: Dict[str, float] = {"BUY": 0.0, "SELL": 0.0}
+    sources = (
+        (state["direction"], alligator_conf),
+        (tl["direction"], tl.get("quality") or 0),
+        (smc["direction"], smc_conf),
+        (ote["direction"], ote.get("quality") or 0),
+    )
+    for d, conf in sources:
+        if d in weights:
+            weights[d] += conf
+
+    dirs: List[str] = [d for d, _ in sources if d in ("BUY", "SELL")]
+    total_weight = weights["BUY"] + weights["SELL"]
+    if total_weight <= 0:
+        dominant = "NEUTRAL"
+    else:
+        dominant = "BUY" if weights["BUY"] >= weights["SELL"] else "SELL"
+    # Conflict = a real signal on both sides, and the losing side isn't
+    # negligible (avoids flagging conflict when one source is at conf=2
+    # against another at conf=80).
+    margin = abs(weights["BUY"] - weights["SELL"])
+    conflict = weights["BUY"] > 0 and weights["SELL"] > 0 and margin < 0.6 * total_weight
 
     evidence: List[str] = []
+    evidence_sources: set = set()  # independent engines actually backing `dominant`
 
     if state["direction"] == dominant and dominant in ("BUY", "SELL"):
         evidence.append(f"Alligator {state['state']} aligned")
+        evidence_sources.add("alligator")
 
     if tl["direction"] == dominant and tl["quality"] >= 50:
         evidence.append(f"Trendline geometry aligned ({tl['quality']}%)")
+        evidence_sources.add("trendline")
     if tl.get("confirmed") and tl["direction"] == dominant:
         evidence.append("Trendline entry confirmed")
+        evidence_sources.add("trendline")
     if tl.get("event") in ("BREAK_RETEST_CONFIRMED", "BREAKOUT") and tl["direction"] == dominant:
         evidence.append(f"Trendline event: {tl['event']}")
+        evidence_sources.add("trendline")
     if tl.get("active_setup") and tl["active_setup"] not in ("NONE", "TRENDLINE"):
         evidence.append(f"Trendline best setup: {tl['active_setup']}")
+        evidence_sources.add("trendline")
 
     if smc["direction"] == dominant:
         evidence.append("SMC structure aligned")
+        evidence_sources.add("smc")
     if smc.get("sweep"):
         evidence.append("Liquidity sweep present")
+        evidence_sources.add("smc")
     if smc.get("zone", {}).get("confluence"):
         evidence.append("OB/FVG confluence zone")
+        evidence_sources.add("smc")
     if smc.get("entry_ready") and smc["direction"] == dominant:
         evidence.append("SMC entry ready (zone + candle)")
+        evidence_sources.add("smc")
 
     if ote["direction"] == dominant and ote.get("location") == "DEEP_RETRACEMENT":
         evidence.append("Price inside 62–79% OTE zone")
+        evidence_sources.add("ote")
     if ote.get("valid") and ote["direction"] == dominant:
         evidence.append("OTE setup confirmed")
+        evidence_sources.add("ote")
     if ote.get("quality", 0) >= 60 and ote["direction"] == dominant:
         evidence.append(f"OTE quality {ote['quality']}%")
+        evidence_sources.add("ote")
 
     if hdir == dominant and dominant in ("BUY", "SELL"):
         evidence.append("Higher-timeframe context aligned")
+        evidence_sources.add("htf")
     if hdir in ("BUY", "SELL") and dominant in ("BUY", "SELL") and hdir != dominant:
         conflict = True
         evidence.append(f"HTF conflict ({hdir})")
@@ -356,6 +436,7 @@ def analyze(symbol: str, timeframe: str = "30min", include_htf: bool = True) -> 
         fdir = "BUY" if fbias == "BULLISH" else "SELL"
         if fdir == dominant:
             evidence.append(f"Fundamental bias aligned ({fundamental.get('score', 0):+d})")
+            evidence_sources.add("fundamental")
         else:
             conflict = True
             evidence.append(f"Fundamental conflict ({fundamental.get('score', 0):+d})")
@@ -385,6 +466,11 @@ def analyze(symbol: str, timeframe: str = "30min", include_htf: bool = True) -> 
         )
     )
 
+    # Gate on independent engines agreeing, not on raw evidence-line count:
+    # one strong trendline setup used to be able to add 3-4 lines to
+    # `evidence` on its own and clear this bar by itself. Now at least
+    # two of {alligator, trendline, smc, ote, htf, fundamental} have to
+    # actually back the direction.
     ready = (
         dominant in ("BUY", "SELL")
         and not conflict
@@ -392,10 +478,10 @@ def analyze(symbol: str, timeframe: str = "30min", include_htf: bool = True) -> 
         and state["state"] not in ("SLEEPING", "TRANSITION", "UNKNOWN")
         and event_ok
         and location_ok
-        and len(evidence) >= 3
+        and len(evidence_sources) >= 2
     )
 
-    tech_score = min(100, 35 + len(evidence) * 9)
+    tech_score = min(100, 30 + len(evidence_sources) * 14)
     if tl.get("quality"):
         tech_score = min(
             100,
@@ -423,7 +509,7 @@ def analyze(symbol: str, timeframe: str = "30min", include_htf: bool = True) -> 
         elif tl.get("position") and tl["position"].get("entry") is not None:
             ticket = tl["position"]
 
-    return {
+    result = {
         "strategy": STRATEGY_NAME,
         "policy": POLICY,
         "symbol": symbol,
@@ -434,6 +520,8 @@ def analyze(symbol: str, timeframe: str = "30min", include_htf: bool = True) -> 
         "conflict": conflict,
         "fundamental_ok": fundamental_ok,
         "evidence": evidence,
+        "evidence_sources": sorted(evidence_sources),
+        "weights": {"BUY": round(weights["BUY"], 1), "SELL": round(weights["SELL"], 1)},
         "alligator": state,
         "trendline_intelligence": tl,
         "smc_intelligence": smc,
@@ -445,6 +533,8 @@ def analyze(symbol: str, timeframe: str = "30min", include_htf: bool = True) -> 
         "score": score,
         "reason": "; ".join(evidence) if evidence else "No coherent market-state sequence",
     }
+    _log_signal(result)
+    return result
 
 
 def format_report(r: Dict[str, Any]) -> str:
