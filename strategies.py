@@ -1606,6 +1606,7 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
 
     support = _fit_primary(recent_pivots, "support", n, df, sma=sma20_early, atr_now=atr_now)
     resistance = _fit_primary(recent_pivots, "resistance", n, df, sma=sma20_early, atr_now=atr_now)
+    support_raw, resistance_raw = support, resistance
 
     # Reject a candidate diagonal line whose actual price movement across
     # its own span is too shallow to be a meaningful trend -- e.g. two
@@ -1632,6 +1633,49 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
     if resistance and not _has_meaningful_slope(resistance):
         resistance = None
         shallow_rejected = True
+
+    # --- Always have SOMETHING to draw ---------------------------------
+    # `support`/`resistance` above stay exactly as before (None whenever
+    # the structure doesn't clear the trading bar) so direction/strength/
+    # readiness logic below is completely unchanged. `support_line`/
+    # `resistance_line` are separate, chart-only variables: when the real
+    # ones got rejected (or never existed), fall back to whatever geometry
+    # is actually there -- the rejected-for-shallow line, or if there
+    # wasn't even that, the loosest possible fractal-swing connection --
+    # so a ranging/choppy chart still gets a line instead of a blank
+    # space. These NEVER feed direction, strength, or the trading gate.
+    def _visual_fallback_line(kind: str) -> Optional[Dict[str, Any]]:
+        loose = find_fractal_pivots(df, left=2, right=2)
+        want = "low" if kind == "support" else "high"
+        pts = [p for p in loose if p["type"] == want]
+        if len(pts) >= 2:
+            a, b = pts[-2], pts[-1]
+            if b["index"] == a["index"]:
+                return None
+        elif len(pts) == 1:
+            a = pts[0]
+            b = {"index": n - 1, "price": float(df["Close"].iloc[-1])}
+            if b["index"] == a["index"]:
+                return None
+        else:
+            return None
+        slope = (b["price"] - a["price"]) / max(b["index"] - a["index"], 1)
+        y_end = _line_value(a["index"], a["price"], b["index"], b["price"], n - 1)
+        return {
+            "x0": a["index"], "y0": float(a["price"]),
+            "x1": b["index"], "y1": float(b["price"]),
+            "y_end": float(y_end), "slope": float(slope),
+            "touches": _count_touches(df, a["index"], a["price"], b["index"], b["price"], kind),
+            "violations": 0, "confirmed": False, "quality": "visual_only",
+            "tradeable": False, "kind": kind, "method": "visual_fallback",
+        }
+
+    support_line = support_raw or _visual_fallback_line("support")
+    if support_line is not None and support_line.get("quality") != "visual_only" and support_line is support_raw and support is None:
+        support_line = dict(support_line, quality="shallow", tradeable=False)
+    resistance_line = resistance_raw or _visual_fallback_line("resistance")
+    if resistance_line is not None and resistance_line.get("quality") != "visual_only" and resistance_line is resistance_raw and resistance is None:
+        resistance_line = dict(resistance_line, quality="shallow", tradeable=False)
 
     # SIMPLE RULE (matches MT5 hand-drawn style):
     # Always keep BOTH a clean ascending support AND a clean descending
@@ -1682,10 +1726,28 @@ def build_trendline_family(df: pd.DataFrame, max_lines: int = 4, lookback_bars: 
                     "members": family_lines,
                 }
 
+    # When nothing cleared the trading bar, `family_lines` above stays
+    # empty and nothing gets drawn -- fall back to the visual-only
+    # line(s) so the chart still shows a reference trendline. This only
+    # affects what's drawn; `direction`/`strength`/`primary` below are
+    # untouched and still correctly reflect "no tradeable trendline here".
+    used_visual_fallback = False
+    if not family_lines:
+        visual_candidates = [l for l in (support_line, resistance_line) if l is not None]
+        if visual_candidates:
+            family_lines = visual_candidates
+            used_visual_fallback = True
+
     # Direction from family geometry (price reveals it)
     direction = "NEUTRAL"
     strength = 40
     reasons = []
+    if used_visual_fallback:
+        reasons.append(
+            "No trendline cleared the trading bar here -- showing the "
+            "nearest swing-to-swing reference line(s) for visual context "
+            "only; not a trade signal."
+        )
     if shallow_rejected and not primary:
         reasons.append(
             "No diagonal trendline met the minimum slope -- price is "
