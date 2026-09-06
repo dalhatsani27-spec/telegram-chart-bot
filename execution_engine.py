@@ -21,6 +21,7 @@ import json
 import os
 import time
 import uuid
+from types import SimpleNamespace
 
 import numpy as np
 from flask import request, jsonify
@@ -497,6 +498,16 @@ HTF_ALIGN_BONUS = 8.0
 HTF_COUNTER_PENALTY = -10.0
 
 
+# ------------------------------------------------------------------
+# DEAD CODE as of the unified-decision merge: get_htf_bias(),
+# htf_alignment_adjustment(), and _trendline_fallback() below are no
+# longer called by poll(). HTF alignment and trendline-only setups are
+# now handled inside unified_strategy.analyze() (the single decision
+# source for both this live path and Telegram reports) so they aren't
+# scored twice by two different HTF adjustments. Left in place rather
+# than deleted in case report/legacy code elsewhere still calls them
+# directly -- if nothing does after a repo-wide check, safe to remove.
+# ------------------------------------------------------------------
 def get_htf_bias(symbol, ltf_timeframe):
     """Returns (bias, description) or (None, None) if no HTF mapping/data available."""
     htf_tf = LTF_TO_HTF.get(ltf_timeframe)
@@ -638,6 +649,16 @@ def poll(symbol, tf, magic_number=None, pushed_df=None):
     Regardless of Mode, if no EA has checked in recently for this symbol,
     a confirmed signal is automatically routed as a manual Copy Trade
     ticket instead of trying to command an executor that isn't there.
+
+    Decision source: unified_strategy.analyze() is now the ONLY brain that
+    decides direction/readiness/ticket -- both for this live path and for
+    Telegram's /analyze-style report. This function no longer runs its own
+    separate pattern-scan+confirmation vote; it only (a) gets the shared
+    classic-pattern read from analyze()'s trendline intelligence so the EA
+    still has something to draw, and (b) waits for that SAME pattern's
+    trigger to actually break and get a confirmation candle before firing,
+    so a snapshot-level "ready" can't fire mid-bar on a level that hasn't
+    really been taken out yet.
     """
     mode = state.get_mode()
     response = {"mode": mode, "lot_mode": state.lot_mode, "command": None, "pattern": None}
@@ -657,44 +678,34 @@ def poll(symbol, tf, magic_number=None, pushed_df=None):
 
     established_df = df.iloc[:-1]
     volume_profile = compute_volume_profile(established_df)
-    best, all_patterns = scan_all_patterns(established_df, volume_profile=volume_profile)
 
-    trendline_setup = None
-    trendline_fire_decision = None
-    if best is None:
-        best, trendline_fire_decision, trendline_setup = _trendline_fallback(established_df)
+    try:
+        result = unified_strategy.analyze(symbol, timeframe=tf, include_htf=True, df=established_df)
+    except Exception as exc:
+        print(f"[execution] unified_strategy.analyze failed for {symbol}: {exc!r}")
+        response["error"] = "analysis_failed"
+        return response
 
-    htf_bias = htf_desc = None
-    if best is not None:
-        htf_bias, htf_desc = get_htf_bias(symbol, tf)
-        delta, htf_note = htf_alignment_adjustment(best.bias, htf_bias, htf_desc)
-        if delta != 0.0:
-            best.confidence = float(np.clip(best.confidence + delta, 0.0, 100.0))
-            best.note += f" {htf_note}"
-            if trendline_setup is not None:
-                trendline_setup["confidence"] = best.confidence
-                trendline_setup["note"] = best.note
+    family = (result.get("trendline_intelligence") or {}).get("raw") or {}
+    scanned = family.get("scanned_pattern")
+    family_df = family.get("df") if family.get("df") is not None else established_df
+    best = SimpleNamespace(**scanned) if scanned else None
 
-    if trendline_fire_decision is not None:
-        decision = trendline_fire_decision
-    else:
-        decision = _confirmation_engine.step(symbol, tf, df, best)
-
+    response["reason"] = result.get("reason")
+    response["decision"] = result.get("decision")
+    response["score"] = result.get("score")
+    response["evidence"] = result.get("evidence")
+    response["signal_id"] = result.get("signal_id")
     response["pattern"] = best.name if best else None
-    response["reason"] = decision["reason"]
-    response["trigger_price"] = best.trigger_price if best else None
-    response["bias"] = best.bias if best else None
-    response["htf_bias"] = htf_bias
-    response["htf_context"] = htf_desc
+    response["trigger_price"] = getattr(best, "trigger_price", None) if best else None
+    response["bias"] = getattr(best, "bias", None) if best else None
+    response["htf_bias"] = (result.get("htf") or {}).get("direction")
+    response["htf_context"] = (result.get("htf") or {}).get("bias_4h") or (result.get("htf") or {}).get("bias")
     if volume_profile is not None:
         response["poc_price"] = volume_profile["poc_price"]
         response["value_area_low"] = volume_profile["value_area_low"]
         response["value_area_high"] = volume_profile["value_area_high"]
 
-    # Full pattern geometry + regime state so the EA can draw the exact
-    # same cheat-sheet-style rails/label a chat request would show, off
-    # this ONE bot-side read -- rather than re-detecting patterns itself
-    # and risking the two copies of the logic drifting apart over time.
     try:
         is_ranging, ranging_reason = is_price_ranging_vs_sma(established_df)
         response["sma_ranging"] = is_ranging
@@ -716,8 +727,8 @@ def poll(symbol, tf, magic_number=None, pushed_df=None):
                     y = float(pt[1])
                 except (TypeError, ValueError, IndexError):
                     continue
-                if 0 <= xi < len(established_df):
-                    t = established_df.index[xi]
+                if 0 <= xi < len(family_df):
+                    t = family_df.index[xi]
                     out.append([int(t.timestamp()), y])
             return out
 
@@ -732,47 +743,58 @@ def poll(symbol, tf, magic_number=None, pushed_df=None):
             response["upper_line"] = []
             response["lower_line"] = _pts_to_epoch(getattr(best, "trigger_line", None))
 
+    # --- Single fire gate ------------------------------------------------
+    # No pattern to watch, or the multi-engine confluence isn't ready, or
+    # the two disagree on direction -> nothing to do. One "no" from either
+    # side is enough; there's no second opinion left to overrule it because
+    # there's only one decision now.
+    if (
+        best is None
+        or not result.get("ready")
+        or result.get("direction") not in ("BUY", "SELL")
+        or getattr(best, "bias", None) != result.get("direction")
+    ):
+        _confirmation_engine.reset(symbol, tf)
+        if best is not None and result.get("direction") in ("BUY", "SELL") and getattr(best, "bias", None) != result.get("direction"):
+            response["reason"] = "pattern_confluence_direction_mismatch"
+        response["command"] = state.pop_command(symbol)
+        return response
+
+    # Confluence says the setup is real; still wait for THIS pattern's own
+    # trigger to actually break and confirm before risking money on it --
+    # `result["ready"]` is a snapshot, this is the timing gate on top of it.
+    decision = _confirmation_engine.step(symbol, tf, df, best)
+    response["reason"] = decision["reason"]
+
     if decision["action"] not in ("FIRE_MARKET", "FIRE_LIMIT"):
         response["command"] = state.pop_command(symbol)
         return response
 
-    setup = trendline_setup if trendline_setup is not None else build_trade_setup(df, decision["pattern"], decision)
-    setup["symbol"] = symbol
-    setup["timeframe"] = tf
+    ticket = result.get("ticket")
+    if not ticket:
+        # ready=True but analyze() didn't attach a ticket -- shouldn't
+        # normally happen (see unified_strategy.analyze's ticket-building
+        # block), but fail safe to the pattern-based setup builder rather
+        # than firing with no numbers.
+        print(f"[execution] ready=True with no ticket from unified_strategy for {symbol}; using pattern-based setup")
+        ticket = build_trade_setup(df, best, decision)
+    else:
+        ticket = dict(ticket)
+        ticket.setdefault("order_type", decision.get("order_type") or "MARKET")
 
-    # --- Second opinion before letting AUTO mode fire unattended -------
-    # This engine's own pattern-scan/confirmation logic used to be the
-    # only vote. unified_strategy.analyze() runs a second, independent
-    # read (trendline + SMC + OTE + fundamentals + HTF) on the same
-    # symbol; if it actively disagrees on direction, or isn't ready,
-    # that's real signal that this setup is weaker than the confirmation
-    # engine alone thinks. AUTO gets downgraded to APPROVAL in that case
-    # rather than firing blind -- everything else about the setup
-    # (entry/SL/TP, EA drawing data) is untouched.
-    confirmation = None
-    confirmation_agrees = True
-    try:
-        confirmation = unified_strategy.analyze(symbol, timeframe=tf, include_htf=True)
-        c_dir = confirmation.get("direction")
-        if c_dir in ("BUY", "SELL") and c_dir != setup.get("bias"):
-            confirmation_agrees = False
-        elif not confirmation.get("ready", False):
-            confirmation_agrees = False
-    except Exception as exc:
-        print(f"[execution] confirmation check failed for {symbol}: {exc!r}")
-        confirmation = None  # engine failure -> don't block on it, just don't have a second opinion
-
-    setup["confirmation_signal_id"] = (confirmation or {}).get("signal_id")
-    setup["confirmation_agrees"] = confirmation_agrees
+    ticket["symbol"] = symbol
+    ticket["timeframe"] = tf
+    ticket["bias"] = result.get("direction")
+    ticket["pattern_name"] = getattr(best, "name", None)
+    ticket["category"] = getattr(best, "category", None)
+    ticket.setdefault("confidence", result.get("score"))
+    ticket["note"] = getattr(best, "note", "")
+    ticket["expiry_bars"] = decision.get("expiry_bars")
+    ticket["signal_id"] = result.get("signal_id")
+    setup = ticket
 
     ea_available = state.is_ea_available(symbol)
     effective_mode = mode if ea_available else MODE_COPY_TRADE
-    if effective_mode == MODE_AUTO and confirmation is not None and not confirmation_agrees:
-        effective_mode = MODE_APPROVAL
-        setup["note"] = (
-            setup.get("note", "")
-            + f" [Downgraded from AUTO: independent analysis disagreed ({confirmation.get('direction')}, ready={confirmation.get('ready')}) -- approve manually.]"
-        ).strip()
 
     if effective_mode == MODE_AUTO:
         state.queue_command(symbol, setup)
