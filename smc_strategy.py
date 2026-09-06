@@ -25,10 +25,8 @@ _TF_LABELS = {"1min": "M1", "3min": "M3", "5min": "M5", "15min": "M15",
               "30min": "M30", "1h": "H1", "4h": "H4"}
 
 
-def run_smc_analysis(symbol: str, tf_code: str = "30min", topdown: Optional[Dict[str, Any]] = None,
-                      df=None) -> Dict[str, Any]:
-    if df is None:
-        df = market_data.fetch_candles(symbol, tf_code, count=250)
+def run_smc_analysis(symbol: str, tf_code: str = "30min", topdown: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    df = market_data.fetch_candles(symbol, tf_code, count=250)
     tf_label = _TF_LABELS.get(tf_code, tf_code)
 
     if df is None or df.empty or len(df) < 40:
