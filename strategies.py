@@ -3240,14 +3240,19 @@ def build_ote_ticket(analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 # read gates and scores it (see topdown_engine.get_topdown_bias).
 # ============================================================
 
-def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def run_trendline_analysis(symbol: str, tf_code: str = "30min", topdown: Optional[Dict[str, Any]] = None,
+                            df=None) -> Dict[str, Any]:
     """Runs entirely on the single selected timeframe (tf_code). Top-down
     HTF context is OPTIONAL -- pass a pre-fetched topdown_engine.get_topdown_bias()
     dict in explicitly (e.g. from a separate "HTF Context" button) if you want
     it folded into the gating notes below; otherwise it's skipped and the
     trendline read stands on its own.
+
+    Pass `df` (e.g. an EA's own freshly-pushed candles) to skip the internal
+    fetch and analyze that data directly -- keeps live execution and this
+    report reading off the exact same bars instead of two independent pulls.
     """
-    df_tf = market_data.fetch_candles(symbol, tf_code, count=250)
+    df_tf = df if df is not None else market_data.fetch_candles(symbol, tf_code, count=250)
     tf_label = {"1min": "M1", "3min": "M3", "5min": "M5", "15min": "M15",
                 "30min": "M30", "1h": "H1", "4h": "H4"}.get(tf_code, tf_code)
     if df_tf is None or df_tf.empty or len(df_tf) < 30:
