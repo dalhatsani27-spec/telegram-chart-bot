@@ -272,12 +272,20 @@ def _extract_ote_intel(analysis: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def analyze(symbol: str, timeframe: str = "30min", include_htf: bool = True) -> Dict[str, Any]:
-    """Run the real Trendline + SMC + OTE engines and produce one decision."""
+def analyze(symbol: str, timeframe: str = "30min", include_htf: bool = True, df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    """Run the real Trendline + SMC + OTE engines and produce one decision.
+
+    Pass `df` when you already have authoritative candles for this
+    symbol/timeframe (e.g. an EA just pushed its own live MT5 bars) --
+    every sub-engine then reads that same data instead of each pulling
+    its own independent copy, which is what let the live-trading brain
+    and the Telegram-report brain drift onto different bars entirely.
+    """
     symbol = str(symbol or "").strip().upper()
     timeframe = timeframe or "30min"
 
-    df = market_data.fetch_candles(symbol, timeframe, count=300)
+    if df is None:
+        df = market_data.fetch_candles(symbol, timeframe, count=300)
     if df is None or df.empty or len(df) < 80:
         return {
             "strategy": STRATEGY_NAME,
@@ -305,21 +313,21 @@ def analyze(symbol: str, timeframe: str = "30min", include_htf: bool = True) -> 
     hdir = _safe_dir(htf.get("direction") or htf.get("bias_4h") or htf.get("bias"))
 
     try:
-        tl_raw = strategies.run_trendline_analysis(symbol, tf_code=timeframe, topdown=htf or None)
+        tl_raw = strategies.run_trendline_analysis(symbol, tf_code=timeframe, topdown=htf or None, df=df)
     except Exception as exc:
         print(f"[unified] trendline engine failed for {symbol}: {exc!r}")
         tl_raw = {"error": str(exc), "direction": "NEUTRAL"}
     tl = _extract_trendline_intel(tl_raw)
 
     try:
-        smc_raw = smc_strategy.run_smc_analysis(symbol, tf_code=timeframe, topdown=htf or None)
+        smc_raw = smc_strategy.run_smc_analysis(symbol, tf_code=timeframe, topdown=htf or None, df=df)
     except Exception as exc:
         print(f"[unified] smc engine failed for {symbol}: {exc!r}")
         smc_raw = {"error": str(exc), "bias": "NEUTRAL"}
     smc = _extract_smc_intel(smc_raw)
 
     try:
-        ote_raw = strategies.run_ote_analysis(symbol)
+        ote_raw = strategies.run_ote_analysis(symbol, df=df)
     except Exception as exc:
         print(f"[unified] ote engine failed for {symbol}: {exc!r}")
         ote_raw = {"error": str(exc), "direction": "NEUTRAL"}
@@ -506,8 +514,21 @@ def analyze(symbol: str, timeframe: str = "30min", include_htf: bool = True) -> 
                 "direction": dominant,
                 "order_type": "MARKET",
             }
-        elif tl.get("position") and tl["position"].get("entry") is not None:
-            ticket = tl["position"]
+        else:
+            # Trendline-only setups: tl["position"] was never actually
+            # populated by run_trendline_analysis (only computed on the fly
+            # inside format_trendline_report for display) -- build it the
+            # same way here so a pure-trendline confluence can still
+            # produce a real ticket instead of `ready=True` with nothing
+            # to trade.
+            try:
+                pos = strategies.build_position_container(tl_raw) if tl_raw and not tl_raw.get("error") else None
+            except Exception as exc:
+                print(f"[unified] build_position_container failed for {symbol}: {exc!r}")
+                pos = None
+            if pos and pos.get("confirmed") and pos.get("entry") is not None:
+                pos.setdefault("order_type", "MARKET")
+                ticket = pos
 
     result = {
         "strategy": STRATEGY_NAME,
